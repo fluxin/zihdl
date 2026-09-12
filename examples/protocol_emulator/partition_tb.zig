@@ -452,7 +452,7 @@ const PartitionTb = struct {
         try mb.assign(rx_addr_w, 0);
         try mb.assign(rx_dout1, 0);
 
-        _ = try mb.instantiate(programmable.SramPartitionBlock(.single, P), "u_dut", .{
+        _ = try mb.instantiate(programmable.SramPartitionBlock(.single, P, true), "u_dut", .{
             .clk = ins.clk,
             .rst_n = ins.rst_n,
             .core_running = core_running_w,

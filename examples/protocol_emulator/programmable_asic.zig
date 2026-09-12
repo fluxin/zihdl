@@ -47,7 +47,7 @@ pub const default_program_words: usize = 64;
 /// (never aliasing capture and never restarting at program word 0) and latches
 /// `pc_oob` until the core owner adds a real fault. A start pulse clears the
 /// capture ring state so every run begins with a fresh capture.
-pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_words: usize) type {
+pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_words: usize, comptime capture_enabled: bool) type {
     const capture_words = sram_total_words - program_words;
     comptime {
         if (program_words < 16 or program_words > 128 or !std.math.isPowerOfTwo(program_words)) {
@@ -112,6 +112,9 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             const P = program_words;
             const C = capture_words;
 
+            // Record whether this elaboration implements the capture ring.
+            _ = try mb.constant("CAPTURE_ENABLED", 1, if (capture_enabled) 1 else 0);
+
             // Capture ring pointer: increments through P..255 and wraps with an
             // explicit comparator (no address truncation), so a capture image
             // can never alias into the program region.
@@ -137,8 +140,10 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
 
             // Capture write side. `full_seen` latches the first fill so loss
             // counting does not pause when the 16-bit sequence wraps, and the
-            // loss count saturates instead of wrapping back to zero.
-            const capture_go = b.eq(ins.rx_we.expr(), 1);
+            // loss count saturates instead of wrapping back to zero. When
+            // capture is disabled the ring logic is held off and synthesis
+            // prunes the constant-zero state.
+            const capture_go = if (capture_enabled) b.eq(ins.rx_we.expr(), 1) else b.lit(1, 0);
             const cap_at_end = b.eq(cap_ptr.expr(), b.lit(8, sram_total_words - 1));
             const cap_next = b.ternary(cap_at_end, b.lit(8, P), b.add(cap_ptr.expr(), 1));
             const capture_full = b.or_(full_seen.expr(), b.ge(outs.capture_seq.expr(), b.lit(16, C)));
@@ -335,6 +340,7 @@ pub fn ProgrammableAsicBlock(
     comptime i2c_addr: u7,
     comptime partition: SramPartition,
     comptime program_words: usize,
+    comptime capture_enabled: bool,
 ) type {
     const I2cInputs = struct {
         clk: Signal(1),
@@ -381,11 +387,16 @@ pub fn ProgrammableAsicBlock(
             try mb.addClockDomain(domain);
             try mb.addEnumType("opcode", isa.Opcode);
 
+            // The SPI programmer has no read path, so capture is only meaningful
+            // with the I2C loader; the effective option is recorded below.
+            const capture = capture_enabled and loader == .i2c;
+
             // Partition configuration is emitted as localparams so design.json
             // and the RTL itself record which macro composition was built.
             _ = try mb.constant("PROGRAM_WORDS", 9, program_words);
             _ = try mb.constant("CAPTURE_WORDS", 9, sram_total_words - program_words);
             _ = try mb.constant("SRAM_PARTITION_MODE", 1, if (partition == .split) 1 else 0);
+            _ = try mb.constant("CAPTURE_ENABLED", 1, if (capture) 1 else 0);
 
             // Internal interconnect
             const host_we = try mb.wire("host_we", 1);
@@ -483,9 +494,11 @@ pub fn ProgrammableAsicBlock(
                 try mb.assign(rx_dout1, 0);
             } else {
                 try mb.assign(sram_dout0, 0);
+                // Without capture there is no RX macro to drive this return.
+                if (!capture) try mb.assign(rx_dout1, 0);
             }
 
-            _ = try mb.instantiate(SramPartitionBlock(partition, program_words), "u_partition", .{
+            _ = try mb.instantiate(SramPartitionBlock(partition, program_words, capture), "u_partition", .{
                 .clk = domain.clk,
                 .rst_n = domain.rst_n,
                 .core_running = outs.core_running,
@@ -555,17 +568,19 @@ pub fn ProgrammableAsicBlock(
                     .csb1 = sram_csb1,
                     .addr1 = sram_addr1,
                 }, .{ .dout1 = sram_dout1 }, .{});
-                _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_rx_sram", .{
-                    .clk0 = domain.clk,
-                    .csb0 = rx_csb0,
-                    .web0 = rx_web0,
-                    .wmask0 = rx_wmask0,
-                    .addr0 = rx_addr0,
-                    .din0 = rx_din0,
-                    .clk1 = domain.clk,
-                    .csb1 = rx_csb1,
-                    .addr1 = rx_addr1,
-                }, .{ .dout1 = rx_dout1 }, .{});
+                if (capture) {
+                    _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_rx_sram", .{
+                        .clk0 = domain.clk,
+                        .csb0 = rx_csb0,
+                        .web0 = rx_web0,
+                        .wmask0 = rx_wmask0,
+                        .addr0 = rx_addr0,
+                        .din0 = rx_din0,
+                        .clk1 = domain.clk,
+                        .csb1 = rx_csb1,
+                        .addr1 = rx_addr1,
+                    }, .{ .dout1 = rx_dout1 }, .{});
+                }
             }
 
             // 120 MHz timing sequencer core
@@ -599,7 +614,7 @@ test "programmable asic block elaborates single and split partitions" {
 
     inline for (.{ SramPartition.single, SramPartition.split }) |partition| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, partition, default_program_words));
+        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, partition, default_program_words, true));
         const v = try verilog.emitDesign(alloc, &design, .{});
         try std.testing.expect(std.mem.indexOf(u8, v, "module programmable_asic_") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
@@ -610,20 +625,27 @@ test "programmable asic block elaborates single and split partitions" {
         try std.testing.expectEqual(expected, sram_instances);
         try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] PROGRAM_WORDS = 9'd64;") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] CAPTURE_WORDS = 9'd192;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v, "localparam CAPTURE_ENABLED = 1'b1;") != null);
     }
 }
 
-test "programmable asic block elaborates spi in both partitions" {
+test "programmable asic block elaborates spi without capture storage" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     inline for (.{ SramPartition.single, SramPartition.split }) |partition| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.spi, 0x00, partition, default_program_words));
+        _ = try design.elaborate(ProgrammableAsicBlock(.spi, 0x00, partition, default_program_words, false));
         const v = try verilog.emitDesign(alloc, &design, .{});
         try std.testing.expect(std.mem.indexOf(u8, v, "module programmable_asic_spi") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module spi_slave_programmer") != null);
+        // The SPI host interface has no read path, so no capture ring and no
+        // RX macro are allocated in either composition.
+        try std.testing.expect(std.mem.indexOf(u8, v, "u_rx_sram") == null);
+        const sram_instances = std.mem.count(u8, v, "sky130_sram_1kbyte_1rw1r_32x256_8 u_");
+        try std.testing.expectEqual(@as(usize, 1), sram_instances);
+        try std.testing.expect(std.mem.indexOf(u8, v, "localparam CAPTURE_ENABLED = 1'b0;") != null);
     }
 }
 
@@ -633,7 +655,7 @@ test "programmable asic block elaborates a non-default 128/128 program split" {
     const alloc = arena.allocator();
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, .single, 128));
+    _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, .single, 128, true));
     const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] PROGRAM_WORDS = 9'd128;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] CAPTURE_WORDS = 9'd128;") != null);
@@ -651,7 +673,7 @@ test "programmable asic design json records partition parameters" {
         .{ SramPartition.split, @as(u64, 1) },
     }) |case| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, case[0], default_program_words));
+        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, case[0], default_program_words, true));
         const json = try metadata.emitDesignJson(alloc, &design, .{});
         const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
         var found = false;

@@ -326,6 +326,8 @@ module sram_partition_single_64 (
     output wire [7:0]  rx_addr1
 );
 
+    localparam CAPTURE_ENABLED = 1'b1;
+
     wire        tmp0;
     wire        tmp1;
     wire        tmp2;
@@ -672,6 +674,7 @@ module programmable_asic_i2c_42 (
     localparam [8:0] PROGRAM_WORDS = 9'd64;
     localparam [8:0] CAPTURE_WORDS = 9'd192;
     localparam SRAM_PARTITION_MODE = 1'b0;
+    localparam CAPTURE_ENABLED = 1'b1;
 
     wire        host_we;
     wire [7:0]  host_addr;

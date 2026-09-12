@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("=====================================================\n\n", .{});
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .single, programmable_asic.default_program_words));
+    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .single, programmable_asic.default_program_words, true));
     const full_v = try verilog.emitDesign(alloc, &design, .{});
     const design_json = try metadata.emitDesignJson(alloc, &design, .{});
     const design_sdc = try sdc.emitDesignSdc(alloc, &design, .{});
@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     // A/B build: the historical two-macro composition is emitted alongside the
     // default single-macro partition for oasic comparisons and regressions.
     var split_design = netlist.Design.init(alloc);
-    _ = try split_design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .split, programmable_asic.default_program_words));
+    _ = try split_design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .split, programmable_asic.default_program_words, true));
     const split_v = try verilog.emitDesign(alloc, &split_design, .{});
     const split_json = try metadata.emitDesignJson(alloc, &split_design, .{});
     const split_sdc = try sdc.emitDesignSdc(alloc, &split_design, .{});
