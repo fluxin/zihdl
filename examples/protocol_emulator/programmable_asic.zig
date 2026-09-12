@@ -66,6 +66,7 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             core_pc: Signal(8),
             op_fault: Signal(1),
             ctrl_start: Signal(1),
+            fetch: Signal(1),
             rx_we: Signal(1),
             rx_addr: Signal(8),
             rx_wdata: Signal(32),
@@ -130,7 +131,7 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             // or beyond P is held (no capture alias) and latched as `pc_oob`
             // until the core owner adds a real fault.
             const fetch_oob_now = b.ge(ins.core_pc.expr(), b.lit(8, P));
-            const fetch_en = b.and_(ins.core_running.expr(), b.not(fetch_oob_now));
+            const fetch_en = b.and_(b.and_(ins.core_running.expr(), ins.fetch.expr()), b.not(fetch_oob_now));
             const fetch_addr = b.ternary(fetch_oob_now, b.lit(8, 0), ins.core_pc.expr());
             const csb1_fetch = b.not(fetch_en);
 
@@ -406,6 +407,7 @@ pub fn ProgrammableAsicBlock(
             const prog_reject = try mb.wire("prog_reject", 1);
             const pc_oob = try mb.wire("pc_oob", 1);
             const op_fault = try mb.wire("op_fault", 1);
+            const fetch = try mb.wire("fetch", 1);
             const capture_seq = try mb.wire("capture_seq", 16);
             const capture_lost = try mb.wire("capture_lost", 16);
 
@@ -490,6 +492,7 @@ pub fn ProgrammableAsicBlock(
                 .core_pc = core_pc,
                 .op_fault = op_fault,
                 .ctrl_start = ctrl_start,
+                .fetch = fetch,
                 .rx_we = rx_we,
                 .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,
@@ -580,6 +583,7 @@ pub fn ProgrammableAsicBlock(
                 .pin_oe = outs.gpio_oe,
                 .core_running = outs.core_running,
                 .op_fault = op_fault,
+                .fetch = fetch,
                 .rx_we = rx_we,
                 .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,

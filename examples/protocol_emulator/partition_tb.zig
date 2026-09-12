@@ -27,6 +27,7 @@ const Drives = struct {
     core_pc: u8 = 0,
     op_fault: u1 = 0,
     ctrl_start: u1 = 0,
+    fetch: u1 = 0,
     rx_we: u1 = 0,
     rx_wdata: u32 = 0,
     host_we: u1 = 0,
@@ -69,7 +70,7 @@ const Model = struct {
 
     fn eval(self: *Model, d: Drives, mem: *[256]u32) Observed {
         const fetch_oob_now = d.core_pc >= P;
-        const fetch_en = d.core_running == 1 and !fetch_oob_now;
+        const fetch_en = d.core_running == 1 and d.fetch == 1 and !fetch_oob_now;
         const fetch_addr: usize = if (fetch_oob_now) 0 else d.core_pc;
 
         const capture_go = d.rx_we == 1;
@@ -193,6 +194,7 @@ const Driver = struct {
             .host_req = d.host_req,
             .op_fault = d.op_fault,
             .ctrl_start = d.ctrl_start,
+            .fetch = d.fetch,
             .expect_valid = 1,
             .exp_host_ack = outs.ack,
             .exp_host_rvalid = outs.rvalid,
@@ -245,7 +247,7 @@ const Driver = struct {
 
     fn runCore(self: *Driver, pc: u8, n: usize) !void {
         var i: usize = 0;
-        while (i < n) : (i += 1) try self.step(.{ .core_running = 1, .core_pc = pc });
+        while (i < n) : (i += 1) try self.step(.{ .core_running = 1, .core_pc = pc, .fetch = 1 });
     }
 };
 
@@ -425,6 +427,7 @@ const PartitionTb = struct {
         const pc_oob_w = try mb.wire("pc_oob_w", 1);
         const op_fault_w = try mb.wire("op_fault_w", 1);
         const ctrl_start_w = try mb.wire("ctrl_start_w", 1);
+        const fetch_w = try mb.wire("fetch_w", 1);
         const capture_seq_w = try mb.wire("capture_seq_w", 16);
         const capture_lost_w = try mb.wire("capture_lost_w", 16);
         const inst_word_w = try mb.wire("inst_word_w", 32);
@@ -456,6 +459,7 @@ const PartitionTb = struct {
             .core_pc = core_pc_w,
             .op_fault = op_fault_w,
             .ctrl_start = ctrl_start_w,
+            .fetch = fetch_w,
             .rx_we = rx_we_w,
             .rx_addr = rx_addr_w,
             .rx_wdata = rx_wdata_w,
@@ -528,6 +532,7 @@ const PartitionTb = struct {
             .host_raddr = host_raddr_w,
             .op_fault = op_fault_w,
             .ctrl_start = ctrl_start_w,
+            .fetch = fetch_w,
             .done = outs.done,
             .fail = outs.fail,
             .fail_cycle = outs.fail_cycle,
@@ -579,8 +584,8 @@ test "model stores and fetches a program word" {
     try std.testing.expectEqual(@as(u32, 0x7005_000A), m.w0_data);
     _ = m.eval(.{}, &mem);
     try std.testing.expectEqual(@as(u32, 0x7005_000A), mem[5]);
-    _ = m.eval(.{ .core_running = 1, .core_pc = 5 }, &mem);
-    const outs = m.eval(.{ .core_running = 1, .core_pc = 5 }, &mem);
+    _ = m.eval(.{ .core_running = 1, .core_pc = 5, .fetch = 1 }, &mem);
+    const outs = m.eval(.{ .core_running = 1, .core_pc = 5, .fetch = 1 }, &mem);
     try std.testing.expectEqual(@as(u32, 0x7005_000A), outs.inst);
 }
 

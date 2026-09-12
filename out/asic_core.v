@@ -290,6 +290,7 @@ module sram_partition_single_64 (
     input  wire [7:0]  core_pc,
     input  wire        op_fault,
     input  wire        ctrl_start,
+    input  wire        fetch,
     input  wire        rx_we,
     input  wire [7:0]  rx_addr,
     input  wire [31:0]  rx_wdata,
@@ -362,7 +363,7 @@ module sram_partition_single_64 (
     assign sram_web0 = (!tmp0);
     assign sram_addr0 = (tmp2 ? cap_ptr : (tmp3 ? w0_addr : (8'd64 + (host_raddr - ((host_raddr >= 8'd192) ? 8'd192 : 8'd0)))));
     assign sram_din0 = (tmp2 ? rx_wdata : w0_data);
-    assign sram_csb1 = (!(core_running && (!tmp4)));
+    assign sram_csb1 = (!((core_running && fetch) && (!tmp4)));
     assign sram_addr1 = (tmp4 ? 8'd0 : core_pc);
     assign rx_csb0 = 1'b1;
     assign rx_web0 = 1'b1;
@@ -505,6 +506,7 @@ module timing_execution_unit (
     output reg  [3:0]  pin_oe,
     output reg         core_running,
     output reg         op_fault,
+    output wire        fetch,
     output reg         rx_we,
     output reg  [7:0]  rx_addr,
     output reg  [31:0]  rx_wdata
@@ -530,6 +532,8 @@ module timing_execution_unit (
     assign tmp1 = (delay_cnt - 16'd1);
     assign tmp2 = (inst[23:21] == 3'd0);
     assign tmp3 = {isr[27:0], pin_in};
+
+    assign fetch = fetch_pending;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -688,6 +692,7 @@ module programmable_asic_i2c_42 (
     wire        prog_reject;
     wire        pc_oob;
     wire        op_fault;
+    wire        fetch;
     wire [15:0]  capture_seq;
     wire [15:0]  capture_lost;
     wire [31:0]  sram_dout0;
@@ -737,6 +742,7 @@ module programmable_asic_i2c_42 (
         .core_pc(core_pc),
         .op_fault(op_fault),
         .ctrl_start(ctrl_start),
+        .fetch(fetch),
         .rx_we(rx_we),
         .rx_addr(rx_addr),
         .rx_wdata(rx_wdata),
@@ -799,6 +805,7 @@ module programmable_asic_i2c_42 (
         .pin_oe(gpio_oe),
         .core_running(core_running),
         .op_fault(op_fault),
+        .fetch(fetch),
         .rx_we(rx_we),
         .rx_addr(rx_addr),
         .rx_wdata(rx_wdata)

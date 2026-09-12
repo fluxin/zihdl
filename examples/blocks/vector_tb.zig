@@ -117,6 +117,7 @@ pub const PartitionVector = struct {
     exp_inst_word: u32 = 0,
     op_fault: u1 = 0,
     ctrl_start: u1 = 0,
+    fetch: u1 = 0,
 
     pub fn pack(self: PartitionVector) u256 {
         var word: u256 = self.host_wdata;
@@ -139,6 +140,7 @@ pub const PartitionVector = struct {
         word |= @as(u256, self.exp_inst_word) << 161;
         word |= @as(u256, self.op_fault) << 193;
         word |= @as(u256, self.ctrl_start) << 194;
+        word |= @as(u256, self.fetch) << 195;
         return word;
     }
 };
@@ -174,6 +176,7 @@ pub fn PartitionPlayer(comptime init_file: []const u8, comptime depth: usize) ty
             host_raddr: Signal(8),
             op_fault: Signal(1),
             ctrl_start: Signal(1),
+            fetch: Signal(1),
             done: Signal(1),
             fail: Signal(1),
             fail_cycle: Signal(addr_w),
@@ -204,6 +207,7 @@ pub fn PartitionPlayer(comptime init_file: []const u8, comptime depth: usize) ty
             try mb.assign(outs.host_req, b.bit(word, 91));
             try mb.assign(outs.op_fault, b.bit(word, 193));
             try mb.assign(outs.ctrl_start, b.bit(word, 194));
+            try mb.assign(outs.fetch, b.bit(word, 195));
 
             const expect = b.bit(word, 92);
             const bad_ack = b.and_(expect, b.ne(ins.host_ack.expr(), b.bit(word, 93)));

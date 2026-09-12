@@ -57,6 +57,7 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
             pin_oe: Signal(4),
             core_running: Signal(1),
             op_fault: Signal(1),
+            fetch: Signal(1),
             rx_we: Signal(1),
             rx_addr: Signal(8),
             rx_wdata: Signal(32),
@@ -169,6 +170,10 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
                     }),
                 }, &.{}),
             };
+
+            // Request-driven port 1: the SRAM needs to capture the PC only on
+            // the cycle the core is consuming a fetch.
+            try mb.assign(outs.fetch, fetch_pending.expr());
 
             const stmts = [_]Stmt{
                 // Defaults
