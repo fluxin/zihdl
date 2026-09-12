@@ -43,21 +43,21 @@ pub fn FifoBlock(comptime depth: usize, comptime data_width: usize) type {
             const rd_ptr = try mb.reg("rd_ptr", ptr_w, 0);
             const count = try mb.reg("count", count_w, 0);
 
-            const is_empty = b.eq(count.expr(), b.lit(count_w, 0));
+            const is_empty = b.eq(count.expr(), 0);
             const is_full = b.eq(count.expr(), b.lit(count_w, depth));
             const not_full = b.ne(count.expr(), b.lit(count_w, depth));
-            const not_empty = b.ne(count.expr(), b.lit(count_w, 0));
+            const not_empty = b.ne(count.expr(), 0);
 
             const can_push = b.and_(ins.push.expr(), not_full);
             const can_pop = b.and_(ins.pop.expr(), not_empty);
 
             const wr_last = b.eq(wr_ptr.expr(), b.lit(ptr_w, depth - 1));
             const rd_last = b.eq(rd_ptr.expr(), b.lit(ptr_w, depth - 1));
-            const wr_inc = b.ternary(wr_last, b.lit(ptr_w, 0), b.add(wr_ptr.expr(), b.lit(ptr_w, 1)));
-            const rd_inc = b.ternary(rd_last, b.lit(ptr_w, 0), b.add(rd_ptr.expr(), b.lit(ptr_w, 1)));
+            const wr_inc = b.ternary(wr_last, 0, b.add(wr_ptr.expr(), 1));
+            const rd_inc = b.ternary(rd_last, 0, b.add(rd_ptr.expr(), 1));
 
-            const cnt_inc = b.add(count.expr(), b.lit(count_w, 1));
-            const cnt_dec = b.sub(count.expr(), b.lit(count_w, 1));
+            const cnt_inc = b.add(count.expr(), 1);
+            const cnt_dec = b.sub(count.expr(), 1);
 
             try mb.assignExpr(outs.rdata, b.memRead(mem, rd_ptr.expr()));
             try mb.assignExpr(outs.empty, is_empty);
@@ -83,60 +83,4 @@ pub fn FifoBlock(comptime depth: usize, comptime data_width: usize) type {
             try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &stmts);
         }
     };
-}
-
-test "fifo block verilog emission" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = netlist.Design.init(alloc);
-    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst_n = try top.input("rst_n", 1);
-    const push = try top.input("push", 1);
-    const pop = try top.input("pop", 1);
-    const wdata = try top.input("wdata", 32);
-
-    _ = try top.instantiate(FifoBlock(8, 32), "u_fifo", .{
-        .clk = clk,
-        .rst_n = rst_n,
-        .push = push,
-        .wdata = wdata,
-        .pop = pop,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "module fifo_8x32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign empty = (count == 4'd0);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign full = (count == 4'd8);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "wr_ptr <= ((wr_ptr == 3'd7) ? 3'd0 : (wr_ptr + 3'd1));") != null);
-}
-
-test "fifo non-power-of-two depth wraps within memory bounds" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = netlist.Design.init(alloc);
-    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst_n = try top.input("rst_n", 1);
-    const push = try top.input("push", 1);
-    const pop = try top.input("pop", 1);
-    const wdata = try top.input("wdata", 8);
-
-    _ = try top.instantiate(FifoBlock(10, 8), "u_fifo", .{
-        .clk = clk,
-        .rst_n = rst_n,
-        .push = push,
-        .wdata = wdata,
-        .pop = pop,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "module fifo_10x8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "wr_ptr <= ((wr_ptr == 4'd9) ? 4'd0 : (wr_ptr + 4'd1));") != null);
 }

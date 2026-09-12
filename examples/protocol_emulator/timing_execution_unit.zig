@@ -1,6 +1,7 @@
 const std = @import("std");
 const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
+const verilog = js_asic.backend.verilog;
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;
@@ -38,18 +39,19 @@ pub const TimingExecutionUnitBlock = struct {
         const b = mb.exprs();
         const domain = netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
 
+        const fetch_pending = try mb.reg("fetch_pending", 1, 0);
         const delay_cnt = try mb.reg("delay_cnt", 16, 0);
         const x_reg = try mb.reg("x_reg", 32, 0);
         const isr = try mb.reg("isr", 32, 0);
         const isr_bits = try mb.reg("isr_bits", 6, 0);
         const rx_ptr = try mb.reg("rx_ptr", 8, 0);
 
-        const is_start = b.eq(ins.ctrl_start.expr(), b.lit(1, 1));
-        const is_stop = b.eq(ins.ctrl_stop.expr(), b.lit(1, 1));
-        const is_running = b.eq(outs.core_running.expr(), b.lit(1, 1));
+        const is_start = b.eq(ins.ctrl_start.expr(), 1);
+        const is_stop = b.eq(ins.ctrl_stop.expr(), 1);
+        const is_running = b.eq(outs.core_running.expr(), 1);
 
-        const delay_active = b.gt(delay_cnt.expr(), b.lit(16, 0));
-        const delay_dec = b.sub(delay_cnt.expr(), b.lit(16, 1));
+        const delay_active = b.gt(delay_cnt.expr(), 0);
+        const delay_dec = b.sub(delay_cnt.expr(), 1);
 
         // Instruction fields (see isa.Instruction layout)
         const op = ins.inst.slice(31, 28);
@@ -60,36 +62,36 @@ pub const TimingExecutionUnitBlock = struct {
         const jmp_cond = ins.inst.slice(26, 24);
         const in_source = ins.inst.slice(23, 21);
 
-        const x_is_zero = b.eq(x_reg.expr(), b.lit(32, 0));
-        const x_not_zero = b.ne(x_reg.expr(), b.lit(32, 0));
-        const x_dec = b.sub(x_reg.expr(), b.lit(32, 1));
+        const x_is_zero = b.eq(x_reg.expr(), 0);
+        const x_not_zero = b.ne(x_reg.expr(), 0);
+        const x_dec = b.sub(x_reg.expr(), 1);
 
         const in_stmts = [_]Stmt{
-            b.when(b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))), &[_]Stmt{
-                b.when(b.eq(isr_bits.expr(), b.lit(6, 28)), &[_]Stmt{
+            b.when(b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))), &.{
+                b.when(b.eq(isr_bits.expr(), 28), &.{
                     // Last nibble completes a 32-bit RX word.
-                    b.assign(outs.rx_we, b.lit(1, 1)),
+                    b.assign(outs.rx_we, 1),
                     b.assign(outs.rx_addr, rx_ptr.expr()),
                     b.assign(outs.rx_wdata, b.concat(.{ isr.slice(27, 0), ins.pin_in })),
-                    b.assign(rx_ptr, b.add(rx_ptr.expr(), b.lit(8, 1))),
+                    b.assign(rx_ptr, b.add(rx_ptr.expr(), 1)),
                     b.assign(isr, b.concat(.{ isr.slice(27, 0), ins.pin_in })),
-                    b.assign(isr_bits, b.lit(6, 0)),
-                }, &[_]Stmt{
+                    b.assign(isr_bits, 0),
+                }, &.{
                     b.assign(isr, b.concat(.{ isr.slice(27, 0), ins.pin_in })),
-                    b.assign(isr_bits, b.add(isr_bits.expr(), b.lit(6, 4))),
+                    b.assign(isr_bits, b.add(isr_bits.expr(), 4)),
                 }),
             }, &.{}),
         };
 
         const set_stmts = [_]Stmt{
             b.case_(set_target, &.{
-                b.caseBranch(@intFromEnum(isa.SetTarget.PINS), &[_]Stmt{
+                b.caseBranch(@intFromEnum(isa.SetTarget.PINS), &.{
                     b.assign(outs.pin_out, set_val4),
                 }),
-                b.caseBranch(@intFromEnum(isa.SetTarget.PIN_DIRS), &[_]Stmt{
+                b.caseBranch(@intFromEnum(isa.SetTarget.PIN_DIRS), &.{
                     b.assign(outs.pin_oe, set_val4),
                 }),
-                b.caseBranch(@intFromEnum(isa.SetTarget.X), &[_]Stmt{
+                b.caseBranch(@intFromEnum(isa.SetTarget.X), &.{
                     b.assign(x_reg, b.concat(.{ b.lit(27, 0), set_val5 })),
                 }),
             }, &.{}),
@@ -97,14 +99,14 @@ pub const TimingExecutionUnitBlock = struct {
 
         const jmp_stmts = [_]Stmt{
             b.case_(jmp_cond, &.{
-                b.caseBranch(@intFromEnum(isa.JmpCondition.ALWAYS), &[_]Stmt{
+                b.caseBranch(@intFromEnum(isa.JmpCondition.ALWAYS), &.{
                     b.assign(outs.pc, jmp_target),
                 }),
-                b.caseBranch(@intFromEnum(isa.JmpCondition.NOT_X), &[_]Stmt{
-                    b.when(x_is_zero, &[_]Stmt{b.assign(outs.pc, jmp_target)}, &.{}),
+                b.caseBranch(@intFromEnum(isa.JmpCondition.NOT_X), &.{
+                    b.when(x_is_zero, &.{b.assign(outs.pc, jmp_target)}, &.{}),
                 }),
-                b.caseBranch(@intFromEnum(isa.JmpCondition.X_DEC), &[_]Stmt{
-                    b.when(x_not_zero, &[_]Stmt{
+                b.caseBranch(@intFromEnum(isa.JmpCondition.X_DEC), &.{
+                    b.when(x_not_zero, &.{
                         b.assign(x_reg, x_dec),
                         b.assign(outs.pc, jmp_target),
                     }, &.{}),
@@ -114,26 +116,34 @@ pub const TimingExecutionUnitBlock = struct {
 
         const stmts = [_]Stmt{
             // Defaults
-            b.assign(outs.rx_we, b.lit(1, 0)),
-            b.when(is_start, &[_]Stmt{
+            b.assign(outs.rx_we, 0),
+            b.when(is_start, &.{
                 b.assign(outs.pc, ins.start_pc.expr()),
-                b.assign(delay_cnt, b.lit(16, 0)),
-                b.assign(outs.core_running, b.lit(1, 1)),
-            }, &[_]Stmt{
-                b.when(is_stop, &[_]Stmt{
-                    b.assign(outs.core_running, b.lit(1, 0)),
-                }, &[_]Stmt{
-                    b.when(is_running, &[_]Stmt{
-                        b.when(delay_active, &[_]Stmt{
-                            b.assign(delay_cnt, delay_dec),
-                        }, &[_]Stmt{
-                            b.assign(outs.pc, b.add(outs.pc.expr(), b.lit(8, 1))),
-                            b.assign(delay_cnt, ins.inst.slice(15, 0)),
-                            b.case_(op, &.{
-                                b.caseBranch(@intFromEnum(isa.Opcode.SET), &set_stmts),
-                                b.caseBranch(@intFromEnum(isa.Opcode.JMP), &jmp_stmts),
-                                b.caseBranch(@intFromEnum(isa.Opcode.IN), &in_stmts),
-                            }, &.{}),
+                b.assign(fetch_pending, 1),
+                b.assign(delay_cnt, 0),
+                b.assign(outs.core_running, 1),
+            }, &.{
+                b.when(is_stop, &.{
+                    b.assign(outs.core_running, 0),
+                }, &.{
+                    b.when(is_running, &.{
+                        b.when(b.eq(fetch_pending.expr(), 1), &.{
+                            // SRAM captures this PC now; consume its registered result next edge.
+                            b.assign(fetch_pending, 0),
+                            b.when(delay_active, &.{b.assign(delay_cnt, delay_dec)}, &.{}),
+                        }, &.{
+                            b.when(delay_active, &.{
+                                b.assign(delay_cnt, delay_dec),
+                            }, &.{
+                                b.assign(fetch_pending, 1),
+                                b.assign(outs.pc, b.add(outs.pc.expr(), 1)),
+                                b.assign(delay_cnt, ins.inst.slice(15, 0)),
+                                b.case_(op, &.{
+                                    b.caseBranch(@intFromEnum(isa.Opcode.SET), &set_stmts),
+                                    b.caseBranch(@intFromEnum(isa.Opcode.JMP), &jmp_stmts),
+                                    b.caseBranch(@intFromEnum(isa.Opcode.IN), &in_stmts),
+                                }, &.{}),
+                            }),
                         }),
                     }, &.{}),
                 }),
@@ -167,13 +177,14 @@ test "timing execution unit emission" {
         .ctrl_stop = ctrl_stop,
         .start_pc = start_pc,
         .pin_in = pin_in,
-    }, .{});
+    }, .{}, .{});
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
+    const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(std.mem.indexOf(u8, v, "module timing_execution_unit") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "x_reg <= {27'd0, inst[20:16]};") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "rx_we <= 1'b1;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "isr <= {isr[27:0], pin_in};") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "rx_wdata <= {isr[27:0], pin_in};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "= {isr[27:0], pin_in};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "isr <= tmp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "rx_wdata <= tmp") != null);
 }

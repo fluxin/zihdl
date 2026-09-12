@@ -33,12 +33,22 @@ pub fn build(b: *std.Build) void {
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
         // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
+        // of this module, you will have to make sure to re-export them from the
+        // root file.
         .root_source_file = b.path("src/root.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+    });
+
+    // Example-level design blocks (ISA, loaders, execution units); depends on
+    // the library module and is shared by the reference projects.
+    const blocks_mod = b.createModule(.{
+        .root_source_file = b.path("examples/blocks/blocks.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "js_asic", .module = mod },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -60,11 +70,12 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "js_asic",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/main.zig"),
+            .root_source_file = b.path("examples/protocol_emulator/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "js_asic", .module = mod },
+                .{ .name = "protocol_blocks", .module = blocks_mod },
             },
         }),
     });
@@ -91,12 +102,76 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
 
+    // Generated testbench runner: builds the vector stimulus in Zig and emits
+    // out/loader_read_tb.v + out/loader_read_tb_stim.hex.
+    const tb_exe = b.addExecutable(.{
+        .name = "js_asic_tbgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/loader_read_tb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+                .{ .name = "protocol_blocks", .module = blocks_mod },
+            },
+        }),
+    });
+    const tb_gen = b.addRunArtifact(tb_exe);
+    const tb_step = b.step("tb", "Generate the loader read testbench from Zig");
+    tb_step.dependOn(&tb_gen.step);
+
     // Lint the generated Verilog with Verilator. Depends on the run step, which
-    // writes asic_core.v into the project root.
-    const lint_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "asic_core.v" });
+    // writes out/asic_core.v.
+    const lint_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/asic_core.v" });
     lint_cmd.step.dependOn(&run_cmd.step);
     const lint_step = b.step("lint", "Lint generated Verilog with Verilator");
     lint_step.dependOn(&lint_cmd.step);
+
+    // SystemVerilog target: run the synthesizer with --sv and lint the result.
+    const sv_cmd = b.addRunArtifact(exe);
+    sv_cmd.addArg("--sv");
+    sv_cmd.step.dependOn(&run_cmd.step);
+    const lint_sv_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/asic_core.sv" });
+    lint_sv_cmd.step.dependOn(&sv_cmd.step);
+    const lint_sv_step = b.step("lint-sv", "Lint generated SystemVerilog with Verilator");
+    lint_sv_step.dependOn(&lint_sv_cmd.step);
+
+    // Transitional behavioral simulation with Icarus Verilog. oasic's own
+    // simulator replaces this once its Verilog front end lands.
+    const i2c_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_iv", "out/asic_core.v", "examples/protocol_emulator/asic_i2c_tb.v" });
+    i2c_compile.step.dependOn(&run_cmd.step);
+    const i2c_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_iv" });
+    i2c_run.step.dependOn(&i2c_compile.step);
+
+    const rx_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_iv", "out/asic_core.v", "examples/protocol_emulator/asic_rx_tb.v" });
+    rx_compile.step.dependOn(&run_cmd.step);
+    const rx_run = b.addSystemCommand(&.{ "vvp", "out/asic_rx_iv" });
+    rx_run.step.dependOn(&rx_compile.step);
+
+    const sv_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-o", "out/asic_i2c_sv", "out/asic_core.sv", "examples/protocol_emulator/asic_i2c_tb.v" });
+    sv_compile.step.dependOn(&sv_cmd.step);
+    const sv_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_sv" });
+    sv_run.step.dependOn(&sv_compile.step);
+
+    // Generated testbench: the Zig-built vector stimulus drives the loader
+    // through latch/NACK/commit scenarios and reports its own verdict.
+    const read_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "loader_read_tb_harness", "-o", "out/loader_read_iv", "out/loader_read_tb.v" });
+    read_compile.step.dependOn(&tb_gen.step);
+    const read_run = b.addSystemCommand(&.{ "vvp", "out/loader_read_iv" });
+    read_run.step.dependOn(&read_compile.step);
+
+    const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
+    sim_step.dependOn(&i2c_run.step);
+    sim_step.dependOn(&rx_run.step);
+    sim_step.dependOn(&read_run.step);
+
+    const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
+    verify_step.dependOn(&lint_cmd.step);
+    verify_step.dependOn(&lint_sv_cmd.step);
+    verify_step.dependOn(&i2c_run.step);
+    verify_step.dependOn(&rx_run.step);
+    verify_step.dependOn(&sv_run.step);
+    verify_step.dependOn(&read_run.step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.
@@ -118,6 +193,13 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    // Example design blocks are their own module; test them separately from the
+    // protocol emulator executable (test binaries only cover one module).
+    const blocks_tests = b.addTest(.{
+        .root_module = blocks_mod,
+    });
+    const run_blocks_tests = b.addRunArtifact(blocks_tests);
+
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
@@ -133,6 +215,7 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_blocks_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.

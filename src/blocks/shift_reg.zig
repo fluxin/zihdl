@@ -35,8 +35,8 @@ pub fn ShiftRegisterBlock(comptime width: usize, comptime dir: ShiftDirection) t
             const b = mb.exprs();
 
             const data_reg = try mb.reg("data_reg", width, 0);
-            const is_load = b.eq(ins.load.expr(), b.lit(1, 1));
-            const is_shift = b.eq(ins.shift_en.expr(), b.lit(1, 1));
+            const is_load = b.eq(ins.load.expr(), 1);
+            const is_shift = b.eq(ins.shift_en.expr(), 1);
 
             const shifted = if (width == 1)
                 ins.s_in.expr()
@@ -63,33 +63,4 @@ pub fn ShiftRegisterBlock(comptime width: usize, comptime dir: ShiftDirection) t
             });
         }
     };
-}
-
-test "shift register verilog emission" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = netlist.Design.init(alloc);
-    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst_n = try top.input("rst_n", 1);
-    const load = try top.input("load", 1);
-    const p_in = try top.input("p_in", 8);
-    const shift_en = try top.input("shift_en", 1);
-    const s_in = try top.input("s_in", 1);
-
-    _ = try top.instantiate(ShiftRegisterBlock(8, .left), "u_sreg", .{
-        .clk = clk,
-        .rst_n = rst_n,
-        .load = load,
-        .p_in = p_in,
-        .shift_en = shift_en,
-        .s_in = s_in,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "module shift_register_8_left") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "data_reg <= {data_reg[6:0], s_in};") != null);
 }

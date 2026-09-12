@@ -3,12 +3,12 @@ const std = @import("std");
 // ============================================================================
 // js_asic typed hardware construction library
 //
-//   * Scope owns the symbol table (names) of exactly one Verilog module.
+//   * Scope owns the symbol table (names) of exactly one hardware module.
 //   * Signal(W)/Param(W)/Mem(W) are nameless, compile-time width-typed handles
 //     into a Scope. Identity is the handle, naming is the Scope's job.
 //   * Expr(W) carries a width at the type level and an erased AnyExpr for
-//     storage/emission; arithmetic, concat, slicing and conversions infer
-//     widths at compile time and `assign` is width-checked everywhere.
+//     storage; arithmetic, concat, slicing and conversions infer widths at
+//     compile time and `assign` is width-checked everywhere.
 //   * ModuleBuilder elaborates one module definition; Design is the registry of
 //     block definitions (built on first instantiate, emitted once).
 // ============================================================================
@@ -26,8 +26,8 @@ pub const SymbolKind = enum {
     wire,
     reg,
     mem,
-    localparam,
-    parameter,
+    constant,
+    module_param,
 };
 
 pub const ReadKind = enum { comb, sync };
@@ -49,6 +49,8 @@ pub const Symbol = struct {
     read_kind: ReadKind = .comb,
     write_mode: WriteMode = .read_first,
     init_file: ?[]const u8 = null,
+    /// Elaboration reached no live reader or driver; backends may omit it.
+    dead: bool = false,
 };
 
 /// A handle to a symbol inside a module Scope.
@@ -77,7 +79,7 @@ pub const SymRef = struct {
     }
 };
 
-/// Symbol table of one Verilog module.
+/// Symbol table of one hardware module.
 pub const Scope = struct {
     allocator: std.mem.Allocator,
     symbols: std.ArrayList(Symbol),
@@ -165,20 +167,32 @@ pub const BinOp = enum {
     }
 };
 
+/// Base of a bit / part select: a symbol (emitted directly as `x[i]` /
+/// `x[hi:lo]`) or an arbitrary expression. Since no HDL allows selecting from
+/// an expression, backends lower `.expr` bases, normally through a temp wire.
+pub const SelectBase = union(enum) {
+    sym: SymRef,
+    expr: *const AnyExpr,
+};
+
 /// Erased expression node. Width and signedness are runtime fields here; the
 /// `Expr(W)` wrapper carries the width in the type system. Expressions are
 /// always built through `ExprBuilder` so children live in the arena.
 pub const AnyExpr = struct {
     width: usize,
     is_signed: bool,
+    /// Interned structural hash; 0 until canonicalized.
+    hash: u64 = 0,
+    /// Elaboration-time two-state value when statically known.
+    known: ?u64 = null,
     node: Node,
 
     pub const Node = union(enum) {
         ref: SymRef,
         lit: u64,
-        bit: struct { base: SymRef, index: usize },
-        bit_dyn: struct { base: SymRef, index: *const AnyExpr },
-        slice: struct { base: SymRef, hi: usize, lo: usize },
+        bit: struct { base: SelectBase, index: usize },
+        bit_dyn: struct { base: SelectBase, index: *const AnyExpr },
+        slice: struct { base: SelectBase, hi: usize, lo: usize },
         concat: []const AnyExpr,
         mem_read: struct { mem: SymRef, addr: *const AnyExpr },
         not: *const AnyExpr, // logical !
@@ -236,8 +250,28 @@ fn asRef(x: anytype) SymRef {
     return x.ref;
 }
 
-fn maxW(comptime A: type, comptime B: type) usize {
-    return @max(valWidth(A), valWidth(B));
+/// Width of a hardware value type, or null for bare comptime integers and
+/// erased `AnyExpr` values (whose width is runtime data).
+fn widthOfType(comptime T: type) ?usize {
+    if (T == comptime_int or T == AnyExpr) return null;
+    return T.width;
+}
+
+/// Result width of a binary operation whose operands may include bare comptime
+/// integers: typed operands win and integers adopt their width. An integer
+/// with no typed context is an error (use `lit(W, value)`).
+fn operandWidth(comptime A: type, comptime B: type) usize {
+    const aw = widthOfType(A) orelse 0;
+    const bw = widthOfType(B) orelse 0;
+    if (aw == 0 and bw == 0) {
+        @compileError("cannot infer a width for a bare integer here; use a width-typed value or lit(W, value)");
+    }
+    return @max(aw, bw);
+}
+
+/// Bits needed to express a shift amount for a `W`-bit value (at least 1).
+fn shiftWidth(comptime W: usize) usize {
+    return @max(1, std.math.log2_int_ceil(usize, W));
 }
 
 fn tupleWidth(comptime T: type) usize {
@@ -255,6 +289,7 @@ fn tupleWidth(comptime T: type) usize {
 pub fn Signal(comptime W: usize) type {
     return struct {
         pub const width: usize = W;
+        pub const is_signal = true;
         ref: SymRef,
 
         pub fn name(self: @This()) []const u8 {
@@ -267,12 +302,12 @@ pub fn Signal(comptime W: usize) type {
 
         pub fn bit(self: @This(), comptime idx: usize) Expr(1) {
             comptime std.debug.assert(idx < W);
-            return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = self.ref, .index = idx } } } };
+            return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = .{ .sym = self.ref }, .index = idx } } } };
         }
 
         pub fn slice(self: @This(), comptime hi: usize, comptime lo: usize) Expr(hi - lo + 1) {
             comptime std.debug.assert(hi >= lo and hi < W);
-            return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = self.ref, .hi = hi, .lo = lo } } } };
+            return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = .{ .sym = self.ref }, .hi = hi, .lo = lo } } } };
         }
     };
 }
@@ -291,6 +326,16 @@ pub fn Param(comptime W: usize) type {
         pub fn expr(self: @This()) Expr(W) {
             return .{ .e = .{ .width = W, .is_signed = false, .node = .{ .ref = self.ref } } };
         }
+    };
+}
+
+/// Compile-time schema entry for a module parameter. A block advertises
+/// value parameters as `pub const Params = struct { DEPTH: ParamSpec(16), ... };`
+/// and instantiations may override them with `#(.DEPTH(16'd...))`.
+pub fn ParamSpec(comptime W: usize) type {
+    return struct {
+        pub const width: usize = W;
+        pub const is_param = true;
     };
 }
 
@@ -320,16 +365,310 @@ pub const CaseBranch = struct {
     stmts: []const Stmt,
 };
 
+// ============================================================================
+// Expression interning (structural CSE) and constant folding
+// ============================================================================
+
+const InternContext = struct {
+    pub fn hash(_: InternContext, key: *const AnyExpr) u64 {
+        return key.hash;
+    }
+
+    pub fn eql(_: InternContext, a: *const AnyExpr, b: *const AnyExpr) bool {
+        return exprEql(a, b);
+    }
+};
+
+/// Canonical-expression table owned by a `ModuleBuilder`; any two structurally
+/// identical expressions share one arena node.
+pub const InternTable = std.HashMapUnmanaged(*const AnyExpr, void, InternContext, 80);
+
+/// Hash-map context for comparing expression *values* structurally (useful to
+/// backends, which see copies of canonical nodes rather than pointers).
+pub const ExprContext = struct {
+    pub fn hash(_: ExprContext, key: AnyExpr) u64 {
+        return key.hash;
+    }
+
+    pub fn eql(_: ExprContext, a: AnyExpr, b: AnyExpr) bool {
+        return exprEql(&a, &b);
+    }
+};
+
+fn symEql(a: SymRef, b: SymRef) bool {
+    return a.idx == b.idx and a.scope == b.scope;
+}
+
+fn selectBaseEql(a: SelectBase, b: SelectBase) bool {
+    return switch (a) {
+        .sym => |as| switch (b) {
+            .sym => |bs| symEql(as, bs),
+            .expr => false,
+        },
+        .expr => |ae| switch (b) {
+            .sym => false,
+            .expr => |be| exprEql(ae, be),
+        },
+    };
+}
+
+fn selectBaseWidth(base: SelectBase) usize {
+    return switch (base) {
+        .sym => |r| r.width(),
+        .expr => |e| e.width,
+    };
+}
+
+fn selectBaseName(base: SelectBase) []const u8 {
+    return switch (base) {
+        .sym => |r| r.name(),
+        .expr => "<expression>",
+    };
+}
+
+fn exprEql(a: *const AnyExpr, b: *const AnyExpr) bool {
+    if (a == b) return true;
+    if (a.width != b.width or a.is_signed != b.is_signed or a.hash != b.hash) return false;
+    return nodeEql(&a.node, &b.node);
+}
+
+fn nodeEql(a: *const AnyExpr.Node, b: *const AnyExpr.Node) bool {
+    if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
+    return switch (a.*) {
+        .ref => |r| symEql(r, b.ref),
+        .lit => |v| v == b.lit,
+        .bit => |x| selectBaseEql(x.base, b.bit.base) and x.index == b.bit.index,
+        .bit_dyn => |x| selectBaseEql(x.base, b.bit_dyn.base) and exprEql(x.index, b.bit_dyn.index),
+        .slice => |x| selectBaseEql(x.base, b.slice.base) and x.hi == b.slice.hi and x.lo == b.slice.lo,
+        .concat => |items| items.len == b.concat.len and for (items, b.concat) |x, y| {
+            if (!exprEql(&x, &y)) break false;
+        } else true,
+        .mem_read => |x| symEql(x.mem, b.mem_read.mem) and exprEql(x.addr, b.mem_read.addr),
+        .not => |n| exprEql(n, b.not),
+        .bit_not => |n| exprEql(n, b.bit_not),
+        .neg => |n| exprEql(n, b.neg),
+        .sext => |n| exprEql(n, b.sext),
+        .zext => |n| exprEql(n, b.zext),
+        .trunc => |n| exprEql(n, b.trunc),
+        .reduce_and => |n| exprEql(n, b.reduce_and),
+        .reduce_or => |n| exprEql(n, b.reduce_or),
+        .reduce_xor => |n| exprEql(n, b.reduce_xor),
+        .replicate => |x| x.count == b.replicate.count and exprEql(x.base, b.replicate.base),
+        .bin_op => |x| x.op == b.bin_op.op and exprEql(x.lhs, b.bin_op.lhs) and exprEql(x.rhs, b.bin_op.rhs),
+        .ternary => |x| exprEql(x.cond, b.ternary.cond) and exprEql(x.then_e, b.ternary.then_e) and exprEql(x.else_e, b.ternary.else_e),
+    };
+}
+
+fn exprHash(x: *const AnyExpr) u64 {
+    if (x.hash != 0) return x.hash;
+    return computeHash(x);
+}
+
+fn mixHash(h: *std.hash.Wyhash, value: anytype) void {
+    var v: u64 = @intCast(value);
+    h.update(std.mem.asBytes(&v));
+}
+
+fn selectBaseHash(h: *std.hash.Wyhash, base: SelectBase) void {
+    switch (base) {
+        .sym => |s| {
+            mixHash(h, s.idx);
+            mixHash(h, @intFromPtr(s.scope));
+        },
+        .expr => |e| mixHash(h, exprHash(e)),
+    }
+}
+
+fn computeHash(x: *const AnyExpr) u64 {
+    var h = std.hash.Wyhash.init(0);
+    mixHash(&h, x.width);
+    mixHash(&h, @intFromBool(x.is_signed));
+    mixHash(&h, @intFromEnum(std.meta.activeTag(x.node)));
+    switch (x.node) {
+        .ref => |r| {
+            mixHash(&h, r.idx);
+            mixHash(&h, @intFromPtr(r.scope));
+        },
+        .lit => |v| mixHash(&h, v),
+        .bit => |b| {
+            mixHash(&h, b.index);
+            selectBaseHash(&h, b.base);
+        },
+        .bit_dyn => |b| {
+            selectBaseHash(&h, b.base);
+            mixHash(&h, exprHash(b.index));
+        },
+        .slice => |s| {
+            mixHash(&h, s.hi);
+            mixHash(&h, s.lo);
+            selectBaseHash(&h, s.base);
+        },
+        .concat => |items| {
+            mixHash(&h, items.len);
+            for (items) |item| mixHash(&h, exprHash(&item));
+        },
+        .mem_read => |mr| {
+            mixHash(&h, mr.mem.idx);
+            mixHash(&h, @intFromPtr(mr.mem.scope));
+            mixHash(&h, exprHash(mr.addr));
+        },
+        .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| mixHash(&h, exprHash(n)),
+        .bin_op => |bo| {
+            mixHash(&h, @intFromEnum(bo.op));
+            mixHash(&h, exprHash(bo.lhs));
+            mixHash(&h, exprHash(bo.rhs));
+        },
+        .ternary => |t| {
+            mixHash(&h, exprHash(t.cond));
+            mixHash(&h, exprHash(t.then_e));
+            mixHash(&h, exprHash(t.else_e));
+        },
+        .replicate => |r| {
+            mixHash(&h, r.count);
+            mixHash(&h, exprHash(r.base));
+        },
+    }
+    return h.final();
+}
+
+fn maskOf(width: usize) u64 {
+    return if (width >= 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+}
+
+fn signExtend(value: u64, width: usize) u64 {
+    if (width == 0 or width >= 64) return value;
+    const masked = value & maskOf(width);
+    return if ((masked >> @intCast(width - 1)) & 1 == 1) masked | ~maskOf(width) else masked;
+}
+
+fn extend(value: u64, from: usize, to: usize, signed: bool) u64 {
+    if (from >= to) return value & maskOf(to);
+    return (if (signed) signExtend(value, from) else value) & maskOf(to);
+}
+
+/// Two-state evaluation of a node whose children are already canonical and
+/// folded; `null` when any input is a signal or the width exceeds 64 bits.
+fn foldNode(x: *const AnyExpr) ?u64 {
+    if (x.width > 64) return null;
+    const res_mask = maskOf(x.width);
+    return switch (x.node) {
+        .lit => |v| v & res_mask,
+        .ref, .bit, .bit_dyn, .slice, .mem_read => null,
+        .not => |n| (~(n.known orelse return null)) & 1,
+        .bit_not => |n| ~(n.known orelse return null) & res_mask,
+        .neg => |n| (0 -% (n.known orelse return null)) & res_mask,
+        .sext => |n| blk: {
+            const v = n.known orelse return null;
+            break :blk signExtend(v, n.width) & res_mask;
+        },
+        .zext => |n| (n.known orelse return null) & res_mask,
+        .trunc => |n| (n.known orelse return null) & res_mask,
+        .reduce_and => |n| @intFromBool((n.known orelse return null) & maskOf(n.width) == maskOf(n.width)),
+        .reduce_or => |n| @intFromBool(((n.known orelse return null) & maskOf(n.width)) != 0),
+        .reduce_xor => |n| @intFromBool(@popCount((n.known orelse return null) & maskOf(n.width)) & 1 == 1),
+        .replicate => |r| blk: {
+            if (r.base.width == 0 or r.base.width * r.count > 64) return null;
+            const v = (r.base.known orelse return null) & maskOf(r.base.width);
+            var out: u64 = 0;
+            var i: usize = 0;
+            while (i < r.count) : (i += 1) out |= v << @intCast(i * r.base.width);
+            break :blk out & res_mask;
+        },
+        .concat => |items| blk: {
+            var out: u64 = 0;
+            var total: usize = 0;
+            for (items) |item| {
+                total += item.width;
+                if (total > 64) return null;
+                out = (out << @intCast(item.width)) | ((item.known orelse return null) & maskOf(item.width));
+            }
+            break :blk out & res_mask;
+        },
+        .ternary => |t| blk: {
+            const c = t.cond.known orelse {
+                if (t.then_e == t.else_e) break :blk t.then_e.known;
+                break :blk null;
+            };
+            const chosen = if (c != 0) t.then_e else t.else_e;
+            const v = chosen.known orelse return null;
+            break :blk v & maskOf(chosen.width) & res_mask;
+        },
+        .bin_op => |bo| blk: {
+            const a = bo.lhs.known orelse return null;
+            const b = bo.rhs.known orelse return null;
+            const signed = bo.lhs.is_signed and bo.rhs.is_signed;
+            const av = extend(a, bo.lhs.width, x.width, signed);
+            const bv = extend(b, bo.rhs.width, x.width, signed);
+            const shift_max = if (x.width == 0) 0 else x.width - 1;
+            switch (bo.op) {
+                .add => break :blk (av +% bv) & res_mask,
+                .sub => break :blk (av -% bv) & res_mask,
+                .mul => break :blk (av *% bv) & res_mask,
+                .bit_and => break :blk av & bv & res_mask,
+                .bit_or => break :blk (av | bv) & res_mask,
+                .bit_xor => break :blk (av ^ bv) & res_mask,
+                .bool_and => break :blk @intFromBool(av != 0 and bv != 0),
+                .bool_or => break :blk @intFromBool(av != 0 or bv != 0),
+                .shl => break :blk if (bv > shift_max) 0 else (av << @intCast(bv)) & res_mask,
+                .shr => {
+                    if (bv > shift_max) {
+                        break :blk if (signed and (av >> @intCast(shift_max)) & 1 == 1) res_mask else 0;
+                    }
+                    if (signed) {
+                        const sv: i64 = @bitCast(av);
+                        break :blk @as(u64, @bitCast(sv >> @intCast(bv))) & res_mask;
+                    }
+                    break :blk (av >> @intCast(bv)) & res_mask;
+                },
+                .eq => break :blk @intFromBool(av == bv),
+                .ne => break :blk @intFromBool(av != bv),
+                .lt => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) < @as(i64, @bitCast(bv)) else av < bv),
+                .le => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) <= @as(i64, @bitCast(bv)) else av <= bv),
+                .gt => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) > @as(i64, @bitCast(bv)) else av > bv),
+                .ge => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) >= @as(i64, @bitCast(bv)) else av >= bv),
+            }
+        },
+    };
+}
+
 pub const ExprBuilder = struct {
     allocator: std.mem.Allocator,
+    intern_table: ?*InternTable = null,
 
     pub fn init(allocator: std.mem.Allocator) ExprBuilder {
         return .{ .allocator = allocator };
     }
 
+    pub fn initInterned(allocator: std.mem.Allocator, intern_table: *InternTable) ExprBuilder {
+        return .{ .allocator = allocator, .intern_table = intern_table };
+    }
+
+    /// Canonicalizes (and constant-folds) any expression root. Statement and
+    /// assignment builders route through this so every stored expression is an
+    /// interned node.
+    pub fn intern(self: ExprBuilder, x: anytype) AnyExpr {
+        return self.dup(asAny(x)).*;
+    }
+
     fn dup(self: ExprBuilder, x: AnyExpr) *const AnyExpr {
+        var node = x;
+        node.known = foldNode(&node);
+        if (node.known) |value| {
+            node.node = .{ .lit = value };
+            node.hash = 0;
+        }
+        if (self.intern_table) |table| {
+            if (node.hash == 0) node.hash = computeHash(&node);
+            const gop = table.getOrPut(self.allocator, &node) catch @panic("js_asic: expression arena out of memory");
+            if (gop.found_existing) return gop.key_ptr.*;
+            const p = self.allocator.create(AnyExpr) catch @panic("js_asic: expression arena out of memory");
+            p.* = node;
+            gop.key_ptr.* = p;
+            gop.value_ptr.* = {};
+            return p;
+        }
         const p = self.allocator.create(AnyExpr) catch @panic("js_asic: expression arena out of memory");
-        p.* = x;
+        p.* = node;
         return p;
     }
 
@@ -342,7 +681,24 @@ pub const ExprBuilder = struct {
         if (W < 64 and val >= (@as(u64, 1) << @intCast(W))) {
             @compileError(std.fmt.comptimePrint("literal {d} does not fit in {d} bits", .{ val, W }));
         }
-        return .{ .e = .{ .width = W, .is_signed = false, .node = .{ .lit = val } } };
+        return .{ .e = .{ .width = W, .is_signed = false, .known = val, .node = .{ .lit = val } } };
+    }
+
+    /// Materializes a bare comptime integer as a width-typed literal in
+    /// contexts that know the intended width; hardware values pass through.
+    fn coerce(self: ExprBuilder, x: anytype, comptime W: usize) AnyExpr {
+        if (@TypeOf(x) == comptime_int) return self.lit(W, x).e;
+        return asAny(x);
+    }
+
+    /// Condition operand: bare integers become 1-bit literals, typed values
+    /// must already be exactly one bit.
+    fn cond1(self: ExprBuilder, cond: anytype) AnyExpr {
+        if (@TypeOf(cond) == comptime_int) return self.lit(1, cond).e;
+        comptime {
+            if (valWidth(@TypeOf(cond)) != 1) @compileError("condition must be 1 bit");
+        }
+        return self.intern(cond);
     }
 
     pub fn ref(self: ExprBuilder, sig: anytype) Expr(valWidth(@TypeOf(sig))) {
@@ -354,6 +710,7 @@ pub const ExprBuilder = struct {
         _ = self;
         var v = asAny(x);
         v.is_signed = true;
+        v.hash = 0;
         return .{ .e = v };
     }
 
@@ -361,6 +718,7 @@ pub const ExprBuilder = struct {
         _ = self;
         var v = asAny(x);
         v.is_signed = false;
+        v.hash = 0;
         return .{ .e = v };
     }
 
@@ -379,9 +737,10 @@ pub const ExprBuilder = struct {
         return .{ .e = .{ .width = xe.width, .is_signed = xe.is_signed, .node = .{ .neg = self.dup(xe) } } };
     }
 
-    fn bin(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
-        const ae = asAny(a);
-        const be = asAny(b);
+    fn bin(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
+        const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
+        const ae = self.coerce(a, W);
+        const be = self.coerce(b, W);
         return .{ .e = .{
             .width = @max(ae.width, be.width),
             .is_signed = ae.is_signed and be.is_signed,
@@ -389,22 +748,22 @@ pub const ExprBuilder = struct {
         } };
     }
 
-    pub fn add(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn add(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.add, a, b);
     }
-    pub fn sub(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn sub(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.sub, a, b);
     }
-    pub fn mul(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn mul(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.mul, a, b);
     }
-    pub fn band(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn band(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.bit_and, a, b);
     }
-    pub fn bor(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn bor(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.bit_or, a, b);
     }
-    pub fn bxor(self: ExprBuilder, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn bxor(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.bit_xor, a, b);
     }
     pub fn and_(self: ExprBuilder, a: anytype, b: anytype) Expr(1) {
@@ -449,49 +808,54 @@ pub const ExprBuilder = struct {
     }
 
     fn cmp(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(1) {
-        const ae = asAny(a);
-        const be = asAny(b);
+        const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
+        const ae = self.coerce(a, W);
+        const be = self.coerce(b, W);
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
     fn scmp(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(1) {
-        var ae = asAny(a);
-        var be = asAny(b);
+        const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
+        var ae = self.coerce(a, W);
+        var be = self.coerce(b, W);
         ae.is_signed = true;
         be.is_signed = true;
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
     pub fn shl(self: ExprBuilder, a: anytype, b: anytype) Expr(valWidth(@TypeOf(a))) {
+        const W = comptime valWidth(@TypeOf(a));
         const ae = asAny(a);
-        const be = asAny(b);
+        const be = self.coerce(b, shiftWidth(W));
         return .{ .e = .{ .width = ae.width, .is_signed = ae.is_signed, .node = .{ .bin_op = .{ .op = .shl, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
     pub fn shr(self: ExprBuilder, a: anytype, b: anytype) Expr(valWidth(@TypeOf(a))) {
+        const W = comptime valWidth(@TypeOf(a));
         const ae = asAny(a);
-        const be = asAny(b);
+        const be = self.coerce(b, shiftWidth(W));
         return .{ .e = .{ .width = ae.width, .is_signed = ae.is_signed, .node = .{ .bin_op = .{ .op = .shr, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
-    pub fn ternary(self: ExprBuilder, cond: anytype, then_e: anytype, else_e: anytype) Expr(maxW(@TypeOf(then_e), @TypeOf(else_e))) {
-        comptime {
-            if (valWidth(@TypeOf(cond)) != 1) @compileError("ternary condition must be 1 bit");
-        }
-        const ce = asAny(cond);
-        const te = asAny(then_e);
-        const ee = asAny(else_e);
+    pub fn ternary(self: ExprBuilder, cond: anytype, then_e: anytype, else_e: anytype) Expr(operandWidth(@TypeOf(then_e), @TypeOf(else_e))) {
+        const W = comptime operandWidth(@TypeOf(then_e), @TypeOf(else_e));
+        const ce = self.cond1(cond);
+        const te = self.coerce(then_e, W);
+        const ee = self.coerce(else_e, W);
+        const then_ptr = self.dup(te);
+        const else_ptr = self.dup(ee);
+        if (then_ptr == else_ptr) return .{ .e = then_ptr.* };
         return .{ .e = .{
             .width = @max(te.width, ee.width),
             .is_signed = te.is_signed and ee.is_signed,
-            .node = .{ .ternary = .{ .cond = self.dup(ce), .then_e = self.dup(te), .else_e = self.dup(ee) } },
+            .node = .{ .ternary = .{ .cond = self.dup(ce), .then_e = then_ptr, .else_e = else_ptr } },
         } };
     }
 
     pub fn concat(self: ExprBuilder, items: anytype) Expr(tupleWidth(@TypeOf(items))) {
         const fields = @typeInfo(@TypeOf(items)).@"struct".fields;
         const list = self.allocator.alloc(AnyExpr, fields.len) catch @panic("js_asic: expression arena out of memory");
-        inline for (fields, 0..) |f, i| list[i] = asAny(@field(items, f.name));
+        inline for (fields, 0..) |f, i| list[i] = self.dup(asAny(@field(items, f.name))).*;
         return .{ .e = .{
             .width = tupleWidth(@TypeOf(items)),
             .is_signed = false,
@@ -499,19 +863,31 @@ pub const ExprBuilder = struct {
         } };
     }
 
+    /// Select base resolution: plain symbol references (including `Expr(W)`
+    /// values wrapping one) stay direct part-selects; anything computed becomes
+    /// an expression base the backend lowers.
+    fn selectBase(self: ExprBuilder, x: anytype) SelectBase {
+        const xe = asAny(x);
+        if (xe.node == .ref) return .{ .sym = xe.node.ref };
+        return .{ .expr = self.dup(xe) };
+    }
+
     pub fn bit(self: ExprBuilder, sig: anytype, index: usize) Expr(1) {
-        _ = self;
-        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = asRef(sig), .index = index } } } };
+        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = self.selectBase(sig), .index = index } } } };
     }
 
     pub fn bitDyn(self: ExprBuilder, sig: anytype, index: anytype) Expr(1) {
         const ie = asAny(index);
-        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit_dyn = .{ .base = asRef(sig), .index = self.dup(ie) } } } };
+        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit_dyn = .{ .base = self.selectBase(sig), .index = self.dup(ie) } } } };
     }
 
     pub fn slice(self: ExprBuilder, sig: anytype, comptime hi: usize, comptime lo: usize) Expr(hi - lo + 1) {
-        _ = self;
-        return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = asRef(sig), .hi = hi, .lo = lo } } } };
+        comptime {
+            if (@TypeOf(sig) != AnyExpr and (lo > hi or hi >= valWidth(@TypeOf(sig)))) {
+                @compileError("slice bounds out of range");
+            }
+        }
+        return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = self.selectBase(sig), .hi = hi, .lo = lo } } } };
     }
 
     pub fn zext(self: ExprBuilder, x: anytype, comptime NW: usize) Expr(NW) {
@@ -539,10 +915,14 @@ pub const ExprBuilder = struct {
     }
 
     pub fn resize(self: ExprBuilder, x: anytype, comptime NW: usize) Expr(NW) {
-        const W = valWidth(@TypeOf(x));
-        if (NW == W) return .{ .e = asAny(x) };
-        if (NW < W) return self.trunc(x, NW);
-        return if (asAny(x).is_signed) self.sext(x, NW) else self.zext(x, NW);
+        const W = comptime valWidth(@TypeOf(x));
+        if (comptime NW == W) {
+            return .{ .e = asAny(x) };
+        } else if (comptime NW < W) {
+            return self.trunc(x, NW);
+        } else {
+            return if (asAny(x).is_signed) self.sext(x, NW) else self.zext(x, NW);
+        }
     }
 
     pub fn memRead(self: ExprBuilder, mem: anytype, addr: anytype) Expr(valWidth(@TypeOf(mem))) {
@@ -560,27 +940,15 @@ pub const ExprBuilder = struct {
     }
 
     pub fn assert_(self: ExprBuilder, cond: anytype, msg: []const u8) Stmt {
-        _ = self;
-        comptime {
-            if (valWidth(@TypeOf(cond)) != 1) @compileError("assert condition must be 1 bit");
-        }
-        return .{ .assert_ = .{ .cond = asAny(cond), .msg = msg } };
+        return .{ .assert_ = .{ .cond = self.cond1(cond), .msg = msg } };
     }
 
     pub fn assume_(self: ExprBuilder, cond: anytype, msg: []const u8) Stmt {
-        _ = self;
-        comptime {
-            if (valWidth(@TypeOf(cond)) != 1) @compileError("assume condition must be 1 bit");
-        }
-        return .{ .assume_ = .{ .cond = asAny(cond), .msg = msg } };
+        return .{ .assume_ = .{ .cond = self.cond1(cond), .msg = msg } };
     }
 
     pub fn cover_(self: ExprBuilder, cond: anytype, msg: []const u8) Stmt {
-        _ = self;
-        comptime {
-            if (valWidth(@TypeOf(cond)) != 1) @compileError("cover condition must be 1 bit");
-        }
-        return .{ .cover_ = .{ .cond = asAny(cond), .msg = msg } };
+        return .{ .cover_ = .{ .cond = self.cond1(cond), .msg = msg } };
     }
 
     /// Replication `{K{x}}` (Fill).
@@ -593,7 +961,7 @@ pub const ExprBuilder = struct {
         } };
     }
 
-    pub fn mux(self: ExprBuilder, sel: anytype, a: anytype, b: anytype) Expr(maxW(@TypeOf(a), @TypeOf(b))) {
+    pub fn mux(self: ExprBuilder, sel: anytype, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.ternary(sel, a, b);
     }
 
@@ -613,53 +981,59 @@ pub const ExprBuilder = struct {
     }
 
     pub fn assign(self: ExprBuilder, dst: anytype, src: anytype) Stmt {
+        const W = comptime valWidth(@TypeOf(dst));
+        if (@TypeOf(src) == comptime_int) {
+            return .{ .assign = .{ .dst = asRef(dst), .src = self.lit(W, src).e } };
+        }
         comptime {
-            if (valWidth(@TypeOf(dst)) != valWidth(@TypeOf(src))) {
+            if (valWidth(@TypeOf(src)) != W) {
                 @compileError("assign width mismatch: dst has " ++
-                    std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(dst))}) ++ " bits, src has " ++
+                    std.fmt.comptimePrint("{d}", .{W}) ++ " bits, src has " ++
                     std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(src))}) ++ " bits");
             }
         }
-        _ = self;
-        return .{ .assign = .{ .dst = asRef(dst), .src = asAny(src) } };
+        return .{ .assign = .{ .dst = asRef(dst), .src = self.intern(src) } };
     }
 
     pub fn sliceAssign(self: ExprBuilder, dst: anytype, comptime hi: usize, comptime lo: usize, src: anytype) Stmt {
+        if (@TypeOf(src) == comptime_int) {
+            return .{ .slice_assign = .{ .dst = asRef(dst), .hi = hi, .lo = lo, .src = self.lit(hi - lo + 1, src).e } };
+        }
         comptime {
             if (valWidth(@TypeOf(src)) != hi - lo + 1) {
                 @compileError("slice assign width mismatch");
             }
         }
-        _ = self;
-        return .{ .slice_assign = .{ .dst = asRef(dst), .hi = hi, .lo = lo, .src = asAny(src) } };
+        return .{ .slice_assign = .{ .dst = asRef(dst), .hi = hi, .lo = lo, .src = self.intern(src) } };
     }
 
     pub fn memWrite(self: ExprBuilder, mem: anytype, addr: anytype, src: anytype) Stmt {
+        const W = comptime valWidth(@TypeOf(mem));
+        if (@TypeOf(src) == comptime_int) {
+            return .{ .mem_write = .{ .mem = asRef(mem), .addr = self.intern(addr), .src = self.lit(W, src).e } };
+        }
         comptime {
-            if (valWidth(@TypeOf(src)) != valWidth(@TypeOf(mem))) {
+            if (valWidth(@TypeOf(src)) != W) {
                 @compileError("memory write data width must match memory width");
             }
         }
-        _ = self;
-        return .{ .mem_write = .{ .mem = asRef(mem), .addr = asAny(addr), .src = asAny(src) } };
+        return .{ .mem_write = .{ .mem = asRef(mem), .addr = self.intern(addr), .src = self.intern(src) } };
     }
 
     pub fn memWriteBytes(self: ExprBuilder, mem: anytype, addr: anytype, src: anytype, be: anytype) Stmt {
-        _ = self;
+        const W = comptime valWidth(@TypeOf(mem));
+        const bytes = (W + 7) / 8;
         return .{ .mem_write_bytes = .{
             .mem = asRef(mem),
-            .addr = asAny(addr),
-            .src = asAny(src),
-            .be = asAny(be),
+            .addr = self.intern(addr),
+            .src = if (@TypeOf(src) == comptime_int) self.lit(W, src).e else self.intern(src),
+            .be = if (@TypeOf(be) == comptime_int) self.lit(bytes, be).e else self.intern(be),
         } };
     }
 
     pub fn when(self: ExprBuilder, cond: anytype, then_stmts: []const Stmt, else_stmts: []const Stmt) Stmt {
-        comptime {
-            if (valWidth(@TypeOf(cond)) != 1) @compileError("if condition must be 1 bit");
-        }
         return .{ .if_then = .{
-            .cond = asAny(cond),
+            .cond = self.cond1(cond),
             .then_stmts = self.dupStmts(then_stmts),
             .else_stmts = if (else_stmts.len > 0) self.dupStmts(else_stmts) else &.{},
         } };
@@ -675,7 +1049,7 @@ pub const ExprBuilder = struct {
 
     pub fn case_(self: ExprBuilder, sel: anytype, branches: []const CaseBranch, default_stmts: []const Stmt) Stmt {
         return .{ .case_block = .{
-            .sel = asAny(sel),
+            .sel = self.intern(sel),
             .cases = self.allocator.dupe(CaseBranch, branches) catch @panic("js_asic: expression arena out of memory"),
             .default_stmts = if (default_stmts.len > 0) self.dupStmts(default_stmts) else &.{},
         } };
@@ -736,10 +1110,18 @@ pub const Connection = struct {
     direction: PortDir,
 };
 
+/// One instance-site module-parameter override.
+pub const ParamOverride = struct {
+    name: []const u8,
+    width: usize,
+    value: u64,
+};
+
 pub const Instance = struct {
     module_name: []const u8,
     instance_name: []const u8,
     connections: []const Connection,
+    params: []const ParamOverride = &.{},
 };
 
 pub const Assign = struct {
@@ -765,478 +1147,99 @@ pub const ClockDomain = struct {
 };
 
 // ============================================================================
-// Module AST + Verilog backend
+// Target-neutral design metadata
 // ============================================================================
+
+/// One value of a named enumeration group (FSM states, opcodes, field IDs).
+pub const EnumEntry = struct {
+    name: []const u8,
+    value: u64,
+};
+
+/// FSM-specific metadata attached to an enum group.
+pub const FsmInfo = struct {
+    /// State register symbol.
+    state: SymRef,
+    /// Encoding tag: "binary", "one_hot" or "gray".
+    encoding: []const u8,
+    /// Reset encoding, when the machine declares one.
+    reset: ?u64 = null,
+};
+
+/// A named group of encoded values registered during elaboration. Backends may
+/// emit it as an enumeration; the metadata sidecar exports it for recovery and
+/// program views.
+pub const EnumGroup = struct {
+    name: []const u8,
+    width: usize,
+    entries: []const EnumEntry,
+    fsm: ?FsmInfo = null,
+};
+
+/// One leaf of a declared bundle and its member path relative to the bundle
+/// name (for example "bus.addr").
+pub const BundleMember = struct {
+    ref: SymRef,
+    path: []const u8,
+};
+
+/// A named group of symbols declared together as a bundle. Backends with
+/// aggregate types may render it as a packed struct; flat backends ignore it
+/// and emit the members individually in declaration order.
+pub const Bundle = struct {
+    name: []const u8,
+    /// Preferred aggregate type name; empty lets the backend derive one.
+    type_name: []const u8 = "",
+    /// Total packed width of the members.
+    width: usize,
+    members: []const BundleMember,
+};
+
+// ============================================================================
+// Module AST
+// ============================================================================
+
+/// Source language of a foreign (verbatim) module body.
+pub const ForeignLanguage = enum { verilog, systemverilog };
+
+/// A foreign module implementation carried through elaboration untouched and
+/// emitted verbatim by the backend matching `language`.
+pub const ForeignSource = struct {
+    language: ForeignLanguage,
+    text: []const u8,
+
+    pub fn verilog(text: []const u8) ForeignSource {
+        return .{ .language = .verilog, .text = text };
+    }
+
+    pub fn systemVerilog(text: []const u8) ForeignSource {
+        return .{ .language = .systemverilog, .text = text };
+    }
+};
 
 pub const Module = struct {
     name: []const u8,
     scope: *Scope,
+    /// Registry this module belongs to; lets backends resolve instance callees.
+    design: ?*const Design = null,
     assigns: []const Assign = &.{},
     processes: []const Process = &.{},
     instances: []const Instance = &.{},
-    foreign_verilog: ?[]const u8 = null,
+    foreign: ?ForeignSource = null,
     is_top: bool = false,
-
-    pub fn emitVerilog(self: Module, allocator: std.mem.Allocator) ![]u8 {
-        if (self.foreign_verilog) |src| {
-            var out = try std.ArrayList(u8).initCapacity(allocator, src.len + 128);
-            try appendStr(&out, allocator, "// ============================================================================\n");
-            try appendFmt(&out, allocator, "// Foreign Module: {s}\n", .{self.name});
-            try appendStr(&out, allocator, "// ============================================================================\n");
-            try appendStr(&out, allocator, src);
-            if (src.len == 0 or src[src.len - 1] != '\n') try appendStr(&out, allocator, "\n");
-            return out.toOwnedSlice(allocator);
-        }
-
-        var out = try std.ArrayList(u8).initCapacity(allocator, 2048);
-
-        try appendStr(&out, allocator, "// ============================================================================\n");
-        try appendFmt(&out, allocator, "// Hardware Module: {s}\n", .{self.name});
-        try appendStr(&out, allocator, "// Synthesized from typed Zig AST (js_asic)\n");
-        try appendStr(&out, allocator, "// ============================================================================\n");
-        try appendStr(&out, allocator, "`default_nettype none\n\nmodule ");
-        try appendStr(&out, allocator, self.name);
-        try appendStr(&out, allocator, " (\n");
-
-        var port_count: usize = 0;
-        for (self.scope.symbols.items) |sym| {
-            if (isPort(sym.kind)) port_count += 1;
-        }
-        var port_idx: usize = 0;
-        for (self.scope.symbols.items) |sym| {
-            if (!isPort(sym.kind)) continue;
-            port_idx += 1;
-            const comma = if (port_idx == port_count) "" else ",";
-            const dir_str: []const u8 = switch (sym.kind) {
-                .input => "input  wire",
-                .output => if (sym.is_reg) "output reg " else "output wire",
-                .inout => "inout  wire",
-                else => unreachable,
-            };
-            if (sym.width == 1) {
-                try appendFmt(&out, allocator, "    {s}        {s}{s}\n", .{ dir_str, sym.name, comma });
-            } else {
-                try appendFmt(&out, allocator, "    {s} [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
-            }
-        }
-        try appendStr(&out, allocator, ");\n\n");
-
-        // Parameters and localparams
-        var wrote_section = false;
-        for (self.scope.symbols.items) |sym| {
-            if (sym.kind != .localparam and sym.kind != .parameter) continue;
-            const keyword: []const u8 = if (sym.kind == .parameter) "parameter" else "localparam";
-            if (sym.width == 1) {
-                try appendFmt(&out, allocator, "    {s} {s} = 1'b{d};\n", .{ keyword, sym.name, sym.init_val & 1 });
-            } else {
-                try appendFmt(&out, allocator, "    {s} [{d}:0] {s} = {d}'d{d};\n", .{ keyword, sym.width - 1, sym.name, sym.width, sym.init_val });
-            }
-            wrote_section = true;
-        }
-        if (wrote_section) try appendStr(&out, allocator, "\n");
-
-        // Wires
-        wrote_section = false;
-        for (self.scope.symbols.items) |sym| {
-            if (sym.kind != .wire) continue;
-            if (sym.width == 1) {
-                try appendFmt(&out, allocator, "    wire        {s};\n", .{sym.name});
-            } else {
-                try appendFmt(&out, allocator, "    wire [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
-            }
-            wrote_section = true;
-        }
-        if (wrote_section) try appendStr(&out, allocator, "\n");
-
-        // Registers
-        wrote_section = false;
-        for (self.scope.symbols.items) |sym| {
-            if (sym.kind != .reg) continue;
-            if (sym.width == 1) {
-                try appendFmt(&out, allocator, "    reg         {s};\n", .{sym.name});
-            } else {
-                try appendFmt(&out, allocator, "    reg [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
-            }
-            wrote_section = true;
-        }
-        if (wrote_section) try appendStr(&out, allocator, "\n");
-
-        // Memories (+ optional $readmemh init)
-        wrote_section = false;
-        for (self.scope.symbols.items) |sym| {
-            if (sym.kind != .mem) continue;
-            if (sym.width == 1) {
-                try appendFmt(&out, allocator, "    reg         {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
-            } else {
-                try appendFmt(&out, allocator, "    reg [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
-            }
-            if (sym.init_file) |file| {
-                try appendStr(&out, allocator, "    initial begin\n");
-                try appendFmt(&out, allocator, "        $readmemh(\"{s}\", {s});\n", .{ file, sym.name });
-                try appendStr(&out, allocator, "    end\n");
-            }
-            wrote_section = true;
-        }
-        if (wrote_section) try appendStr(&out, allocator, "\n");
-
-        // Continuous assignments
-        for (self.assigns) |a| {
-            const src_str = try emitExpr(allocator, a.src);
-            defer allocator.free(src_str);
-            try appendFmt(&out, allocator, "    assign {s} = {s};\n", .{ a.dst.name(), src_str });
-        }
-        if (self.assigns.len > 0) try appendStr(&out, allocator, "\n");
-
-        // Instances
-        for (self.instances) |inst| {
-            try appendFmt(&out, allocator, "    {s} {s} (\n", .{ inst.module_name, inst.instance_name });
-            for (inst.connections, 0..) |conn, c_idx| {
-                const comma = if (c_idx + 1 == inst.connections.len) "" else ",";
-                try appendFmt(&out, allocator, "        .{s}({s}){s}\n", .{ conn.port_name, conn.signal.name(), comma });
-            }
-            try appendStr(&out, allocator, "    );\n\n");
-        }
-
-        // Processes
-        for (self.processes) |proc| {
-            switch (proc.sensitivity) {
-                .comb => {
-                    try appendStr(&out, allocator, "    always @(*) begin\n");
-                    for (proc.stmts) |s| try emitStmt(&out, allocator, s, 2, "=");
-                    try appendStr(&out, allocator, "    end\n\n");
-                },
-                .edge => |e| {
-                    if (e.rst) |rst| {
-                        const active_low = rst.kind == .async_low or rst.kind == .sync_low;
-                        const is_async = rst.kind == .async_low or rst.kind == .async_high;
-                        if (is_async) {
-                            const edge: []const u8 = if (active_low) "negedge" else "posedge";
-                            try appendFmt(&out, allocator, "    always @(posedge {s} or {s} {s}) begin\n", .{ e.clk.name(), edge, rst.signal.name() });
-                        } else {
-                            try appendFmt(&out, allocator, "    always @(posedge {s}) begin\n", .{e.clk.name()});
-                        }
-                        if (active_low) {
-                            try appendFmt(&out, allocator, "        if (!{s}) begin\n", .{rst.signal.name()});
-                        } else {
-                            try appendFmt(&out, allocator, "        if ({s}) begin\n", .{rst.signal.name()});
-                        }
-
-                        var assigned = std.ArrayList(SymRef).empty;
-                        defer assigned.deinit(allocator);
-                        try collectAssigned(allocator, proc.stmts, &assigned);
-                        for (self.scope.symbols.items, 0..) |sym, i| {
-                            if (!containsIdx(assigned.items, @intCast(i))) continue;
-                            const resettable = sym.kind == .reg or (sym.kind == .output and sym.is_reg);
-                            if (!resettable) continue;
-                            if (sym.width == 1) {
-                                try appendFmt(&out, allocator, "            {s} <= 1'b{d};\n", .{ sym.name, sym.init_val & 1 });
-                            } else {
-                                try appendFmt(&out, allocator, "            {s} <= {d}'d{d};\n", .{ sym.name, sym.width, sym.init_val });
-                            }
-                        }
-
-                        try appendStr(&out, allocator, "        end else begin\n");
-                        for (proc.stmts) |s| try emitStmt(&out, allocator, s, 3, "<=");
-                        try appendStr(&out, allocator, "        end\n");
-                        try appendStr(&out, allocator, "    end\n\n");
-                    } else {
-                        try appendFmt(&out, allocator, "    always @(posedge {s}) begin\n", .{e.clk.name()});
-                        for (proc.stmts) |s| try emitStmt(&out, allocator, s, 2, "<=");
-                        try appendStr(&out, allocator, "    end\n\n");
-                    }
-                },
-            }
-        }
-
-        try appendStr(&out, allocator, "endmodule\n");
-        return out.toOwnedSlice(allocator);
-    }
+    /// Enum groups / FSMs registered during elaboration.
+    meta: []const EnumGroup = &.{},
+    /// Clock domains declared by this module (timing metadata, SDC export).
+    clocks: []const ClockDomain = &.{},
+    /// Bundle shapes declared in this module (packed-struct emission).
+    bundles: []const Bundle = &.{},
 };
-
-fn isPort(kind: SymbolKind) bool {
-    return switch (kind) {
-        .input, .output, .inout => true,
-        else => false,
-    };
-}
-
-fn emitStmt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, stmt: Stmt, indent: usize, op: []const u8) !void {
-    try emitIndent(out, alloc, indent);
-
-    switch (stmt) {
-        .nop => {
-            try appendStr(out, alloc, ";\n");
-        },
-        .assert_, .assume_, .cover_ => {
-            try appendStr(out, alloc, "`ifdef JS_ASIC_ASSERT\n");
-            try emitIndent(out, alloc, indent);
-            switch (stmt) {
-                .assert_ => |a| {
-                    const c = try emitExpr(alloc, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "assert ({s}) else $error(\"{s}\");\n", .{ c, a.msg });
-                },
-                .assume_ => |a| {
-                    const c = try emitExpr(alloc, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "assume ({s}) else $error(\"{s}\");\n", .{ c, a.msg });
-                },
-                .cover_ => |a| {
-                    const c = try emitExpr(alloc, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "cover ({s});\n", .{c});
-                },
-                else => unreachable,
-            }
-            try appendStr(out, alloc, "`endif\n");
-        },
-        .assign => |a| {
-            const src_str = try emitExpr(alloc, a.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s} {s} {s};\n", .{ a.dst.name(), op, src_str });
-        },
-        .slice_assign => |sa| {
-            const src_str = try emitExpr(alloc, sa.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s}[{d}:{d}] {s} {s};\n", .{ sa.dst.name(), sa.hi, sa.lo, op, src_str });
-        },
-        .mem_write => |mw| {
-            const addr_str = try emitExpr(alloc, mw.addr);
-            defer alloc.free(addr_str);
-            const src_str = try emitExpr(alloc, mw.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s}[{s}] {s} {s};\n", .{ mw.mem.name(), addr_str, op, src_str });
-        },
-        .mem_write_bytes => |mw| {
-            const addr_str = try emitExpr(alloc, mw.addr);
-            defer alloc.free(addr_str);
-            const src_str = try emitExpr(alloc, mw.src);
-            defer alloc.free(src_str);
-            const be_str = try emitExpr(alloc, mw.be);
-            defer alloc.free(be_str);
-            var byte: usize = 0;
-            while (byte * 8 < mw.mem.width()) : (byte += 1) {
-                const lo = byte * 8;
-                const hi = @min(lo + 7, mw.mem.width() - 1);
-                if (byte > 0) try emitIndent(out, alloc, indent);
-                try appendFmt(out, alloc, "if ({s}[{d}]) begin\n", .{ be_str, byte });
-                try emitIndent(out, alloc, indent + 1);
-                try appendFmt(out, alloc, "{s}[{s}][{d}:{d}] {s} {s}[{d}:{d}];\n", .{ mw.mem.name(), addr_str, hi, lo, op, src_str, hi, lo });
-                try emitIndent(out, alloc, indent);
-                try appendStr(out, alloc, "end\n");
-            }
-        },
-        .if_then => |it| {
-            const cond_str = try emitExpr(alloc, it.cond);
-            defer alloc.free(cond_str);
-            try appendFmt(out, alloc, "if ({s}) begin\n", .{cond_str});
-            for (it.then_stmts) |s| try emitStmt(out, alloc, s, indent + 1, op);
-            if (it.else_stmts.len > 0) {
-                try emitIndent(out, alloc, indent);
-                try appendStr(out, alloc, "end else begin\n");
-                for (it.else_stmts) |s| try emitStmt(out, alloc, s, indent + 1, op);
-            }
-            try emitIndent(out, alloc, indent);
-            try appendStr(out, alloc, "end\n");
-        },
-        .case_block => |cb| {
-            const sel_str = try emitExpr(alloc, cb.sel);
-            defer alloc.free(sel_str);
-            try appendFmt(out, alloc, "case ({s})\n", .{sel_str});
-            for (cb.cases) |c| {
-                try emitIndent(out, alloc, indent + 1);
-                switch (c.val) {
-                    .lit => |v| try appendFmt(out, alloc, "{d}: begin\n", .{v}),
-                    .sym => |s| try appendFmt(out, alloc, "{s}: begin\n", .{s.name()}),
-                }
-                for (c.stmts) |s| try emitStmt(out, alloc, s, indent + 2, op);
-                try emitIndent(out, alloc, indent + 1);
-                try appendStr(out, alloc, "end\n");
-            }
-            if (cb.default_stmts.len > 0) {
-                try emitIndent(out, alloc, indent + 1);
-                try appendStr(out, alloc, "default: begin\n");
-                for (cb.default_stmts) |s| try emitStmt(out, alloc, s, indent + 2, op);
-                try emitIndent(out, alloc, indent + 1);
-                try appendStr(out, alloc, "end\n");
-            }
-            try emitIndent(out, alloc, indent);
-            try appendStr(out, alloc, "endcase\n");
-        },
-    }
-}
-
-fn emitExpr(alloc: std.mem.Allocator, expr: AnyExpr) std.mem.Allocator.Error![]u8 {
-    const raw = try emitRaw(alloc, expr);
-    if (expr.is_signed) {
-        const wrapped = try std.fmt.allocPrint(alloc, "$signed({s})", .{raw});
-        alloc.free(raw);
-        return wrapped;
-    }
-    return raw;
-}
-
-fn emitRaw(alloc: std.mem.Allocator, expr: AnyExpr) std.mem.Allocator.Error![]u8 {
-    return switch (expr.node) {
-        .ref => |r| alloc.dupe(u8, r.name()),
-        .lit => |l| if (expr.width == 1)
-            std.fmt.allocPrint(alloc, "1'b{d}", .{l & 1})
-        else
-            std.fmt.allocPrint(alloc, "{d}'d{d}", .{ expr.width, l }),
-        .bit => |b| std.fmt.allocPrint(alloc, "{s}[{d}]", .{ b.base.name(), b.index }),
-        .bit_dyn => |bd| {
-            const idx_str = try emitExpr(alloc, bd.index.*);
-            defer alloc.free(idx_str);
-            return std.fmt.allocPrint(alloc, "{s}[{s}]", .{ bd.base.name(), idx_str });
-        },
-        .slice => |s| std.fmt.allocPrint(alloc, "{s}[{d}:{d}]", .{ s.base.name(), s.hi, s.lo }),
-        .concat => |items| {
-            var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-            defer buf.deinit(alloc);
-            try appendStr(&buf, alloc, "{");
-            for (items, 0..) |item, idx| {
-                const comma = if (idx + 1 == items.len) "" else ", ";
-                const part = try emitExpr(alloc, item);
-                defer alloc.free(part);
-                try appendFmt(&buf, alloc, "{s}{s}", .{ part, comma });
-            }
-            try appendStr(&buf, alloc, "}");
-            return alloc.dupe(u8, buf.items);
-        },
-        .mem_read => |mr| {
-            const addr_str = try emitExpr(alloc, mr.addr.*);
-            defer alloc.free(addr_str);
-            return std.fmt.allocPrint(alloc, "{s}[{s}]", .{ mr.mem.name(), addr_str });
-        },
-        .not => |n| {
-            const inner = try emitExpr(alloc, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(!{s})", .{inner});
-        },
-        .bit_not => |n| {
-            const inner = try emitExpr(alloc, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(~{s})", .{inner});
-        },
-        .neg => |n| {
-            const inner = try emitExpr(alloc, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(-{s})", .{inner});
-        },
-        .reduce_and, .reduce_or, .reduce_xor => {
-            const inner = try emitExpr(alloc, switch (expr.node) {
-                .reduce_and, .reduce_or, .reduce_xor => |n| n.*,
-                else => unreachable,
-            });
-            defer alloc.free(inner);
-            const sign: []const u8 = switch (expr.node) {
-                .reduce_and => "&",
-                .reduce_or => "|",
-                .reduce_xor => "^",
-                else => unreachable,
-            };
-            return std.fmt.allocPrint(alloc, "({s}{s})", .{ sign, inner });
-        },
-        .replicate => |r| {
-            const inner = try emitExpr(alloc, r.base.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "{{" ++ "{d}" ++ "{{" ++ "{s}" ++ "}}" ++ "}}", .{ r.count, inner });
-        },
-        .bin_op => |bo| {
-            const l = try emitExpr(alloc, bo.lhs.*);
-            defer alloc.free(l);
-            const r = try emitExpr(alloc, bo.rhs.*);
-            defer alloc.free(r);
-            const op_sym: []const u8 = if (bo.op == .shr and bo.lhs.*.is_signed) ">>>" else bo.op.symbol();
-            return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ l, op_sym, r });
-        },
-        .ternary => |t| {
-            const c = try emitExpr(alloc, t.cond.*);
-            defer alloc.free(c);
-            const th = try emitExpr(alloc, t.then_e.*);
-            defer alloc.free(th);
-            const el = try emitExpr(alloc, t.else_e.*);
-            defer alloc.free(el);
-            return std.fmt.allocPrint(alloc, "({s} ? {s} : {s})", .{ c, th, el });
-        },
-        .sext => |n| {
-            const k = expr.width - n.width;
-            if (k == 0) return emitExpr(alloc, n.*);
-            const msb: ?[]u8 = switch (n.*.node) {
-                .ref => |r| try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ r.name(), n.width - 1 }),
-                .slice => |s| try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ s.base.name(), s.hi }),
-                .bit => |bt| try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ bt.base.name(), bt.index }),
-                .bit_dyn => |bd| blk: {
-                    const idx = try emitExpr(alloc, bd.index.*);
-                    defer alloc.free(idx);
-                    break :blk try std.fmt.allocPrint(alloc, "{s}[{s}]", .{ bd.base.name(), idx });
-                },
-                else => null,
-            };
-            if (msb) |m| {
-                defer alloc.free(m);
-                const inner = try emitRaw(alloc, n.*);
-                defer alloc.free(inner);
-                return std.fmt.allocPrint(alloc, "{{{{" ++ "{d}" ++ "{{" ++ "{s}" ++ "}}" ++ "}}" ++ ", {s}" ++ "}}", .{ k, m, inner });
-            }
-            return emitRaw(alloc, n.*);
-        },
-        .zext => |n| {
-            const inner = try emitExpr(alloc, n.*);
-            const k = expr.width - n.width;
-            if (k == 0) return inner;
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "{{{{" ++ "{d}" ++ "{{1'b0}}" ++ "}}, {s}" ++ "}}", .{ k, inner });
-        },
-        .trunc => |n| {
-            // Part-select is only legal on vectors; mask wider expressions so
-            // the low bits survive in a wider context.
-            switch (n.*.node) {
-                .ref, .bit, .slice, .bit_dyn => {
-                    const inner = try emitExpr(alloc, n.*);
-                    defer alloc.free(inner);
-                    return std.fmt.allocPrint(alloc, "{s}[{d}:0]", .{ inner, expr.width - 1 });
-                },
-                else => {
-                    const inner = try emitExpr(alloc, n.*);
-                    defer alloc.free(inner);
-                    const zeros = n.width - expr.width;
-                    if (zeros == 0) return std.fmt.allocPrint(alloc, "({s})", .{inner});
-                    const mask = try std.fmt.allocPrint(
-                        alloc,
-                        "{{{{" ++ "{d}" ++ "{{1'b0}}" ++ "}}" ++ ", " ++ "{{" ++ "{d}" ++ "{{1'b1}}" ++ "}}" ++ "}}",
-                        .{ zeros, expr.width },
-                    );
-                    defer alloc.free(mask);
-                    return std.fmt.allocPrint(alloc, "({s} & {s})", .{ inner, mask });
-                },
-            }
-        },
-    };
-}
-
-fn appendStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
-    try out.appendSlice(alloc, s);
-}
-
-fn appendFmt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
-    const formatted = try std.fmt.allocPrint(alloc, fmt, args);
-    defer alloc.free(formatted);
-    try out.appendSlice(alloc, formatted);
-}
-
-fn emitIndent(out: *std.ArrayList(u8), alloc: std.mem.Allocator, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        try out.appendSlice(alloc, "    ");
-    }
-}
 
 // ============================================================================
 // Validation helpers
 // ============================================================================
 
-fn collectAssigned(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
+pub fn collectAssigned(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
     for (stmts) |stmt| {
         switch (stmt) {
             .nop, .assert_, .assume_, .cover_ => {},
@@ -1263,26 +1266,241 @@ fn addUniqueSym(alloc: std.mem.Allocator, list: *std.ArrayList(SymRef), ref: Sym
     try list.append(alloc, ref);
 }
 
-fn containsIdx(list: []const SymRef, idx: u32) bool {
-    for (list) |r| {
-        if (r.idx == idx) return true;
+/// Symbols read by an expression. Memory arrays are state, so a `mem_read`
+/// contributes its address but not the array itself.
+fn collectReads(alloc: std.mem.Allocator, expr: AnyExpr, list: *std.ArrayList(SymRef)) error{OutOfMemory}!void {
+    switch (expr.node) {
+        .ref => |r| try addUniqueSym(alloc, list, r),
+        .lit => {},
+        .bit => |b| try collectSelectBase(alloc, b.base, list),
+        .bit_dyn => |b| {
+            try collectSelectBase(alloc, b.base, list);
+            try collectReads(alloc, b.index.*, list);
+        },
+        .slice => |s| try collectSelectBase(alloc, s.base, list),
+        .concat => |items| for (items) |item| try collectReads(alloc, item, list),
+        .mem_read => |mr| try collectReads(alloc, mr.addr.*, list),
+        .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| try collectReads(alloc, n.*, list),
+        .replicate => |r| try collectReads(alloc, r.base.*, list),
+        .bin_op => |bo| {
+            try collectReads(alloc, bo.lhs.*, list);
+            try collectReads(alloc, bo.rhs.*, list);
+        },
+        .ternary => |t| {
+            try collectReads(alloc, t.cond.*, list);
+            try collectReads(alloc, t.then_e.*, list);
+            try collectReads(alloc, t.else_e.*, list);
+        },
+    }
+}
+
+fn collectSelectBase(alloc: std.mem.Allocator, base: SelectBase, list: *std.ArrayList(SymRef)) !void {
+    switch (base) {
+        .sym => |r| try addUniqueSym(alloc, list, r),
+        .expr => |e| try collectReads(alloc, e.*, list),
+    }
+}
+
+fn collectStmtReads(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .nop => {},
+            .assert_ => |a| try collectReads(alloc, a.cond, list),
+            .assume_ => |a| try collectReads(alloc, a.cond, list),
+            .cover_ => |a| try collectReads(alloc, a.cond, list),
+            .assign => |a| try collectReads(alloc, a.src, list),
+            .slice_assign => |a| try collectReads(alloc, a.src, list),
+            .mem_write => |a| {
+                try collectReads(alloc, a.addr, list);
+                try collectReads(alloc, a.src, list);
+            },
+            .mem_write_bytes => |a| {
+                try collectReads(alloc, a.addr, list);
+                try collectReads(alloc, a.src, list);
+                try collectReads(alloc, a.be, list);
+            },
+            .if_then => |it| {
+                try collectReads(alloc, it.cond, list);
+                try collectStmtReads(alloc, it.then_stmts, list);
+                try collectStmtReads(alloc, it.else_stmts, list);
+            },
+            .case_block => |cb| {
+                try collectReads(alloc, cb.sel, list);
+                for (cb.cases) |c| try collectStmtReads(alloc, c.stmts, list);
+                try collectStmtReads(alloc, cb.default_stmts, list);
+            },
+        }
+    }
+}
+
+fn markLiveSym(idx: u32, live: []bool, changed: *bool) void {
+    if (!live[idx]) {
+        live[idx] = true;
+        changed.* = true;
+    }
+}
+
+fn markSelectBaseLive(base: SelectBase, live: []bool, changed: *bool) void {
+    switch (base) {
+        .sym => |r| markLiveSym(r.idx, live, changed),
+        .expr => |e| markExprLive(e.*, live, changed),
+    }
+}
+
+/// Marks symbols read by an expression, including the arrays behind `mem_read`
+/// (unlike the loop detector, DCE must keep a read memory alive).
+fn markExprLive(expr: AnyExpr, live: []bool, changed: *bool) void {
+    switch (expr.node) {
+        .ref => |r| markLiveSym(r.idx, live, changed),
+        .lit => {},
+        .bit => |b| markSelectBaseLive(b.base, live, changed),
+        .bit_dyn => |b| {
+            markSelectBaseLive(b.base, live, changed);
+            markExprLive(b.index.*, live, changed);
+        },
+        .slice => |s| markSelectBaseLive(s.base, live, changed),
+        .concat => |items| for (items) |item| markExprLive(item, live, changed),
+        .mem_read => |mr| {
+            markLiveSym(mr.mem.idx, live, changed);
+            markExprLive(mr.addr.*, live, changed);
+        },
+        .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| markExprLive(n.*, live, changed),
+        .replicate => |r| markExprLive(r.base.*, live, changed),
+        .bin_op => |bo| {
+            markExprLive(bo.lhs.*, live, changed);
+            markExprLive(bo.rhs.*, live, changed);
+        },
+        .ternary => |t| {
+            markExprLive(t.cond.*, live, changed);
+            markExprLive(t.then_e.*, live, changed);
+            markExprLive(t.else_e.*, live, changed);
+        },
+    }
+}
+
+fn markStmtLive(stmts: []const Stmt, live: []bool, changed: *bool) void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .nop => {},
+            .assert_ => |a| markExprLive(a.cond, live, changed),
+            .assume_ => |a| markExprLive(a.cond, live, changed),
+            .cover_ => |a| markExprLive(a.cond, live, changed),
+            .assign => |a| markExprLive(a.src, live, changed),
+            .slice_assign => |a| markExprLive(a.src, live, changed),
+            .mem_write => |a| {
+                markExprLive(a.addr, live, changed);
+                markExprLive(a.src, live, changed);
+            },
+            .mem_write_bytes => |a| {
+                markExprLive(a.addr, live, changed);
+                markExprLive(a.src, live, changed);
+                markExprLive(a.be, live, changed);
+            },
+            .if_then => |it| {
+                markExprLive(it.cond, live, changed);
+                markStmtLive(it.then_stmts, live, changed);
+                markStmtLive(it.else_stmts, live, changed);
+            },
+            .case_block => |cb| {
+                markExprLive(cb.sel, live, changed);
+                for (cb.cases) |c| markStmtLive(c.stmts, live, changed);
+                markStmtLive(cb.default_stmts, live, changed);
+            },
+        }
+    }
+}
+
+/// True when a statement list contains a runtime-observable construct, so it
+/// cannot be eliminated even if it drives nothing.
+fn stmtObservable(stmts: []const Stmt) bool {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .assert_, .assume_, .cover_ => return true,
+            .if_then => |it| {
+                if (stmtObservable(it.then_stmts) or stmtObservable(it.else_stmts)) return true;
+            },
+            .case_block => |cb| {
+                for (cb.cases) |c| if (stmtObservable(c.stmts)) return true;
+                if (stmtObservable(cb.default_stmts)) return true;
+            },
+            else => {},
+        }
     }
     return false;
 }
 
-fn validateExpr(expr: AnyExpr) !void {
+/// Marks symbols that a statement list assigns on *every* path (partial slice
+/// assignments do not count), which is the no-latch condition for a comb
+/// process. `out` is indexed by symbol index within the module scope.
+fn definiteAssigned(alloc: std.mem.Allocator, stmts: []const Stmt, n: usize, out: []bool) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .nop, .assert_, .assume_, .cover_, .mem_write, .mem_write_bytes, .slice_assign => {},
+            .assign => |a| out[a.dst.idx] = true,
+            .if_then => |it| {
+                if (it.else_stmts.len == 0) continue;
+                const then_bits = try alloc.alloc(bool, n);
+                defer alloc.free(then_bits);
+                const else_bits = try alloc.alloc(bool, n);
+                defer alloc.free(else_bits);
+                @memset(then_bits, false);
+                @memset(else_bits, false);
+                try definiteAssigned(alloc, it.then_stmts, n, then_bits);
+                try definiteAssigned(alloc, it.else_stmts, n, else_bits);
+                for (0..n) |i| {
+                    if (then_bits[i] and else_bits[i]) out[i] = true;
+                }
+            },
+            .case_block => |cb| {
+                if (cb.default_stmts.len == 0 or cb.cases.len == 0) continue;
+                const acc = try alloc.alloc(bool, n);
+                defer alloc.free(acc);
+                @memset(acc, false);
+                try definiteAssigned(alloc, cb.cases[0].stmts, n, acc);
+                for (cb.cases[1..]) |arm| {
+                    const arm_bits = try alloc.alloc(bool, n);
+                    defer alloc.free(arm_bits);
+                    @memset(arm_bits, false);
+                    try definiteAssigned(alloc, arm.stmts, n, arm_bits);
+                    for (0..n) |i| acc[i] = acc[i] and arm_bits[i];
+                }
+                const dflt_bits = try alloc.alloc(bool, n);
+                defer alloc.free(dflt_bits);
+                @memset(dflt_bits, false);
+                try definiteAssigned(alloc, cb.default_stmts, n, dflt_bits);
+                for (0..n) |i| {
+                    if (acc[i] and dflt_bits[i]) out[i] = true;
+                }
+            },
+        }
+    }
+}
+
+fn validateSelectBase(base: SelectBase) !void {
+    switch (base) {
+        .sym => {},
+        .expr => |e| try validateExpr(e.*),
+    }
+}
+
+fn validateExpr(expr: AnyExpr) error{InvalidExpression}!void {
     switch (expr.node) {
         .ref, .lit => {},
         .bit => |b| {
-            if (b.index >= b.base.width()) {
-                std.log.err("js_asic: bit index {d} out of range for signal '{s}' ({d} bits)", .{ b.index, b.base.name(), b.base.width() });
+            try validateSelectBase(b.base);
+            if (b.index >= selectBaseWidth(b.base)) {
+                std.log.err("js_asic: bit index {d} out of range for '{s}' ({d} bits)", .{ b.index, selectBaseName(b.base), selectBaseWidth(b.base) });
                 return error.InvalidExpression;
             }
         },
-        .bit_dyn => |b| try validateExpr(b.index.*),
+        .bit_dyn => |b| {
+            try validateSelectBase(b.base);
+            try validateExpr(b.index.*);
+        },
         .slice => |s| {
-            if (s.hi >= s.base.width() or s.lo > s.hi) {
-                std.log.err("js_asic: slice [{d}:{d}] out of range for signal '{s}' ({d} bits)", .{ s.hi, s.lo, s.base.name(), s.base.width() });
+            try validateSelectBase(s.base);
+            if (s.hi >= selectBaseWidth(s.base) or s.lo > s.hi) {
+                std.log.err("js_asic: slice [{d}:{d}] out of range for '{s}' ({d} bits)", .{ s.hi, s.lo, selectBaseName(s.base), selectBaseWidth(s.base) });
                 return error.InvalidExpression;
             }
         },
@@ -1390,34 +1608,99 @@ fn validateStmts(stmts: []const Stmt) !void {
 }
 
 // ============================================================================
+// Bundles: nested structs of Signal(W) with optional direction metadata
+// ============================================================================
+
+/// True for `Signal(W)` handles (bundle leaves) as opposed to nested bundles.
+fn isSignalHandle(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_signal");
+}
+
+fn flipPortDir(dir: PortDir) PortDir {
+    return if (dir == .input) .output else .input;
+}
+
+/// Resolves the direction of `field_name` inside bundle `S`. A bundle may
+/// declare `pub const dirs = .{ .data = PortDir.output, ... }` from the
+/// producer's perspective; `flip` mirrors every declared direction and
+/// unlisted fields inherit `inherited`.
+fn bundleFieldDir(comptime S: type, comptime field_name: []const u8, comptime inherited: PortDir, comptime flip: bool) PortDir {
+    if (@hasDecl(S, "dirs") and @hasField(@TypeOf(S.dirs), field_name)) {
+        const dir: PortDir = @field(S.dirs, field_name);
+        return if (flip) flipPortDir(dir) else dir;
+    }
+    return inherited;
+}
+
+/// Number of `Signal(W)` leaves in a (possibly nested) bundle type.
+fn bundleLeafCount(comptime T: type) usize {
+    return comptime blk: {
+        if (isSignalHandle(T)) break :blk 1;
+        if (@typeInfo(T) != .@"struct") @compileError("bundle value must be Signal(W) or a nested struct, not " ++ @typeName(T));
+        var count: usize = 0;
+        for (@typeInfo(T).@"struct".fields) |field| count += bundleLeafCount(field.type);
+        break :blk count;
+    };
+}
+
+/// Compile-time validation of a port bundle tree declared in `Inputs`/`Outputs`.
+fn validatePortBundle(comptime T: type, comptime label: []const u8) void {
+    comptime {
+        if (isSignalHandle(T)) return;
+        if (@typeInfo(T) != .@"struct") @compileError(label ++ " must be Signal(W) or a nested struct bundle");
+        if (@hasDecl(T, "dirs")) {
+            const Dirs = @TypeOf(T.dirs);
+            if (@typeInfo(Dirs) != .@"struct") @compileError(label ++ ": dirs must be a struct of PortDir values");
+            for (@typeInfo(Dirs).@"struct".fields) |df| {
+                if (df.type != PortDir) @compileError(label ++ ": dirs." ++ df.name ++ " must be PortDir");
+                if (!@hasField(T, df.name)) @compileError(label ++ ": dirs names unknown field '" ++ df.name ++ "'");
+                const dir: PortDir = @field(T.dirs, df.name);
+                if (dir == .inout) @compileError(label ++ ": dirs." ++ df.name ++ " cannot be inout");
+            }
+        }
+        for (@typeInfo(T).@"struct".fields) |field| validatePortBundle(field.type, label ++ "." ++ field.name);
+    }
+}
+
+// ============================================================================
 // Block contract, Design registry, ModuleBuilder
 // ============================================================================
 
 /// Compile-time conformance check for the block contract. A block type exposes
-/// a mangled `name`, `Inputs`/`Outputs` structs whose fields are `Signal(W)`,
-/// and either a `build(mb: *ModuleBuilder) !void` entry point or a foreign
-/// `verilog` source string (black box).
+/// a mangled `name`, `Inputs`/`Outputs` structs whose fields are `Signal(W)` or
+/// nested bundle structs of `Signal(W)` (optionally with `dirs` metadata), and
+/// either a `build(mb: *ModuleBuilder) !void` entry point or a verbatim
+/// `foreign: ForeignSource` body (black box).
 pub fn assertBlock(comptime T: type) void {
     comptime {
         if (!@hasDecl(T, "name")) @compileError("block " ++ @typeName(T) ++ " is missing `pub const name`");
         if (!@hasDecl(T, "Inputs")) @compileError("block " ++ T.name ++ " is missing `pub const Inputs`");
         if (!@hasDecl(T, "Outputs")) @compileError("block " ++ T.name ++ " is missing `pub const Outputs`");
 
-        if (!@hasDecl(T, "build") and !@hasDecl(T, "verilog")) {
-            @compileError("block " ++ T.name ++ " needs `pub fn build` or `pub const verilog`");
+        if (!@hasDecl(T, "build") and !@hasDecl(T, "foreign")) {
+            @compileError("block " ++ T.name ++ " needs `pub fn build` or `pub const foreign: ForeignSource`");
+        }
+
+        if (@hasDecl(T, "foreign")) {
+            if (@TypeOf(T.foreign) != ForeignSource) {
+                @compileError("block " ++ T.name ++ ": foreign must be a ForeignSource (use ForeignSource.verilog(...))");
+            }
         }
 
         if (@typeInfo(T.Inputs) != .@"struct") @compileError("block " ++ T.name ++ ": Inputs must be a struct");
         if (@typeInfo(T.Outputs) != .@"struct") @compileError("block " ++ T.name ++ ": Outputs must be a struct");
 
-        for (@typeInfo(T.Inputs).@"struct".fields) |field| {
-            if (!@hasDecl(field.type, "width")) {
-                @compileError("block " ++ T.name ++ ": input '" ++ field.name ++ "' must be Signal(W)");
+        validatePortBundle(T.Inputs, "block " ++ T.name ++ ": input");
+        validatePortBundle(T.Outputs, "block " ++ T.name ++ ": output");
+
+        if (@hasDecl(T, "Params")) {
+            if (@typeInfo(T.Params) != .@"struct") {
+                @compileError("block " ++ T.name ++ ": Params must be a struct");
             }
-        }
-        for (@typeInfo(T.Outputs).@"struct".fields) |field| {
-            if (!@hasDecl(field.type, "width")) {
-                @compileError("block " ++ T.name ++ ": output '" ++ field.name ++ "' must be Signal(W)");
+            for (@typeInfo(T.Params).@"struct".fields) |field| {
+                if (!@hasDecl(field.type, "is_param")) {
+                    @compileError("block " ++ T.name ++ ": parameter '" ++ field.name ++ "' must be ParamSpec(W)");
+                }
             }
         }
 
@@ -1426,6 +1709,27 @@ pub fn assertBlock(comptime T: type) void {
             if (F.params.len != 1) @compileError("block " ++ T.name ++ ": build must take exactly one parameter (mb: *ModuleBuilder)");
             const ParamType = F.params[0].type orelse @compileError("block " ++ T.name ++ ": build parameter must be *ModuleBuilder");
             if (ParamType != *ModuleBuilder) @compileError("block " ++ T.name ++ ": build parameter must be *ModuleBuilder");
+        }
+    }
+}
+
+/// Checks that a block with a `Params` schema declared every advertised
+/// parameter through `ModuleBuilder.moduleParam` with a matching width, so the
+/// emitted module can legally accept `#(.NAME(...))` overrides.
+fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
+    if (!@hasDecl(BlockType, "Params")) return;
+    inline for (@typeInfo(BlockType.Params).@"struct".fields) |field| {
+        const sym = mb.scope.find(field.name) orelse {
+            std.log.err("js_asic: block '{s}' Params schema declares '{s}' but build never calls mb.moduleParam", .{ BlockType.name, field.name });
+            return error.MissingParameter;
+        };
+        if (sym.kind() != .module_param) {
+            std.log.err("js_asic: block '{s}' parameter '{s}' must be declared with mb.moduleParam, not mb.constant", .{ BlockType.name, field.name });
+            return error.InvalidParameter;
+        }
+        if (sym.width() != valWidth(field.type)) {
+            std.log.err("js_asic: block '{s}' parameter '{s}' schema width {d} does not match declaration width {d}", .{ BlockType.name, field.name, valWidth(field.type), sym.width() });
+            return error.InvalidParameter;
         }
     }
 }
@@ -1469,10 +1773,10 @@ pub const Design = struct {
         if (self.findModule(BlockType.name) != null) return;
         if (self.isInProgress(BlockType.name)) return;
 
-        if (@hasDecl(BlockType, "verilog")) {
+        if (@hasDecl(BlockType, "foreign")) {
             const scope = try Scope.init(self.allocator);
             const mod = try self.allocator.create(Module);
-            mod.* = .{ .name = BlockType.name, .scope = scope, .foreign_verilog = BlockType.verilog };
+            mod.* = .{ .name = BlockType.name, .scope = scope, .design = self, .foreign = BlockType.foreign };
             try self.register(mod);
             return;
         }
@@ -1490,24 +1794,15 @@ pub const Design = struct {
         var mb = try ModuleBuilder.init(self.allocator, self, BlockType.name);
         defer mb.deinit();
         try BlockType.build(&mb);
+        try checkParamSchema(BlockType, &mb);
         _ = try mb.finish();
     }
 
     pub fn elaborate(self: *Design, comptime BlockType: type) !*Module {
         try self.ensureModule(BlockType);
-        return self.findModule(BlockType.name).?;
-    }
-
-    /// Emits every registered module exactly once.
-    pub fn emitAll(self: *Design, allocator: std.mem.Allocator) ![]u8 {
-        var out = try std.ArrayList(u8).initCapacity(allocator, 16384);
-        defer out.deinit(allocator);
-        for (self.modules.items, 0..) |m, i| {
-            if (i > 0) try out.appendSlice(allocator, "\n");
-            const v = try m.emitVerilog(allocator);
-            try out.appendSlice(allocator, v);
-        }
-        return allocator.dupe(u8, out.items);
+        const mod = self.findModule(BlockType.name).?;
+        mod.is_top = true;
+        return mod;
     }
 };
 
@@ -1516,9 +1811,13 @@ pub const ModuleBuilder = struct {
     design: *Design,
     name: []const u8,
     scope: *Scope,
+    intern_table: InternTable,
     assigns: std.ArrayList(Assign),
     processes: std.ArrayList(Process),
     instances: std.ArrayList(Instance),
+    meta: std.ArrayList(EnumGroup),
+    clocks: std.ArrayList(ClockDomain),
+    bundles: std.ArrayList(Bundle),
 
     pub fn init(allocator: std.mem.Allocator, design: *Design, name: []const u8) !ModuleBuilder {
         return .{
@@ -1526,20 +1825,34 @@ pub const ModuleBuilder = struct {
             .design = design,
             .name = name,
             .scope = try Scope.init(allocator),
+            .intern_table = .empty,
             .assigns = .empty,
             .processes = .empty,
             .instances = .empty,
+            .meta = .empty,
+            .clocks = .empty,
+            .bundles = .empty,
         };
     }
 
     pub fn deinit(self: *ModuleBuilder) void {
+        self.intern_table.deinit(self.allocator);
         self.assigns.deinit(self.allocator);
         self.processes.deinit(self.allocator);
         self.instances.deinit(self.allocator);
+        self.meta.deinit(self.allocator);
+        self.clocks.deinit(self.allocator);
+        self.bundles.deinit(self.allocator);
     }
 
     pub fn exprs(self: *ModuleBuilder) ExprBuilder {
-        return ExprBuilder.init(self.allocator);
+        return ExprBuilder.initInterned(self.allocator, &self.intern_table);
+    }
+
+    /// Canonicalizes and constant-folds an expression root into this module's
+    /// intern table.
+    pub fn intern(self: *ModuleBuilder, x: anytype) AnyExpr {
+        return self.exprs().intern(x);
     }
 
     pub fn input(self: *ModuleBuilder, name: []const u8, comptime W: usize) !Signal(W) {
@@ -1570,12 +1883,39 @@ pub const ModuleBuilder = struct {
         return .{ .ref = try self.scope.add(.reg, name, W, init_val, 0) };
     }
 
-    pub fn localparam(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
-        return .{ .ref = try self.scope.add(.localparam, name, W, val, 0) };
+    /// Non-overridable named constant.
+    pub fn constant(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
+        return .{ .ref = try self.scope.add(.constant, name, W, val, 0) };
     }
 
-    pub fn parameter(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
-        return .{ .ref = try self.scope.add(.parameter, name, W, val, 0) };
+    /// Overridable module parameter, advertised via the block's `Params`
+    /// schema and overridden at instantiation.
+    pub fn moduleParam(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
+        return .{ .ref = try self.scope.add(.module_param, name, W, val, 0) };
+    }
+
+    /// Registers a named group of encoded values (FSM states, opcodes, field
+    /// IDs) so backends and the metadata sidecar can export it. Entry names
+    /// are the emitted symbol names the values correspond to.
+    pub fn addEnumGroup(self: *ModuleBuilder, name: []const u8, width: usize, entries: []const EnumEntry, fsm: ?FsmInfo) !void {
+        const copy = try self.allocator.dupe(EnumEntry, entries);
+        try self.meta.append(self.allocator, .{ .name = name, .width = width, .entries = copy, .fsm = fsm });
+    }
+
+    /// Registers a Zig enum's tag values as metadata-only enum group (opcodes
+    /// and field IDs); no IR symbols are created for the members.
+    pub fn addEnumType(self: *ModuleBuilder, name: []const u8, comptime E: type) !void {
+        const info = @typeInfo(E).@"enum";
+        var entries: [info.fields.len]EnumEntry = undefined;
+        inline for (info.fields, 0..) |field, i| {
+            entries[i] = .{ .name = field.name, .value = @intFromEnum(@field(E, field.name)) };
+        }
+        try self.addEnumGroup(name, @max(1, @bitSizeOf(E)), &entries, null);
+    }
+
+    /// Records a clock domain for timing metadata (SDC export).
+    pub fn addClockDomain(self: *ModuleBuilder, domain: ClockDomain) !void {
+        try self.clocks.append(self.allocator, domain);
     }
 
     pub fn mem(self: *ModuleBuilder, comptime W: usize, name: []const u8, depth: usize, opts: MemOpts) !Mem(W) {
@@ -1586,36 +1926,186 @@ pub const ModuleBuilder = struct {
         return .{ .ref = ref, .depth = depth };
     }
 
-    pub fn declareInputs(self: *ModuleBuilder, comptime Inputs: type) !Inputs {
-        var result: Inputs = undefined;
-        inline for (@typeInfo(Inputs).@"struct".fields) |field| {
-            @field(result, field.name) = try self.input(field.name, valWidth(field.type));
+    /// Recursively declares a bundle as module ports. Nested struct fields
+    /// become ports named `parent_child`; `Signal(W)` leaves become inputs when
+    /// `flip` is true and outputs otherwise. A bundle type may declare
+    /// `pub const dirs = .{ .data = PortDir.output, ... }` from the producer's
+    /// perspective; `flip` mirrors those directions, which is how sink-side
+    /// declarations and `Stream` ports work. Struct fields are recorded as
+    /// bundle shapes so aggregate-capable backends can emit packed structs.
+    pub fn declarePorts(self: *ModuleBuilder, comptime B: type, name: []const u8, comptime flip: bool) !B {
+        const result = try self.declarePortStruct(B, name, if (flip) PortDir.input else PortDir.output, flip);
+        if (name.len == 0) {
+            // Top-level Inputs/Outputs schema: each struct field is its own
+            // bundle, leaves stay individual ports.
+            inline for (@typeInfo(B).@"struct".fields) |field| {
+                if (comptime !isSignalHandle(field.type) and @typeInfo(field.type) == .@"struct") {
+                    try self.recordBundle(field.name, field.type, @field(result, field.name));
+                }
+            }
+        } else {
+            try self.recordBundle(name, B, result);
         }
         return result;
+    }
+
+    fn declarePortStruct(self: *ModuleBuilder, comptime S: type, prefix: []const u8, comptime inherited: PortDir, comptime flip: bool) !S {
+        if (@typeInfo(S) != .@"struct") @compileError("bundle ports must be structs, not " ++ @typeName(S));
+        var result: S = undefined;
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            const full = try self.scopedName(prefix, field.name);
+            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
+            if (comptime isSignalHandle(field.type)) {
+                @field(result, field.name) = switch (dir) {
+                    .input => try self.input(full, field.type.width),
+                    .output => try self.outputPort(full, field.type.width),
+                    .inout => @compileError("bundle leaves cannot be inout"),
+                };
+            } else if (@typeInfo(field.type) == .@"struct") {
+                @field(result, field.name) = try self.declarePortStruct(field.type, full, dir, flip);
+            } else {
+                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+            }
+        }
+        return result;
+    }
+
+    pub fn declareInputs(self: *ModuleBuilder, comptime Inputs: type) !Inputs {
+        return self.declarePorts(Inputs, "", true);
     }
 
     pub fn declareOutputs(self: *ModuleBuilder, comptime Outputs: type) !Outputs {
-        var result: Outputs = undefined;
-        inline for (@typeInfo(Outputs).@"struct".fields) |field| {
-            @field(result, field.name) = try self.outputPort(field.name, valWidth(field.type));
+        return self.declarePorts(Outputs, "", false);
+    }
+
+    /// Declares every leaf of a bundle as an internal wire, named
+    /// `parent_child` for nested fields, and records the bundle shape.
+    pub fn wireBundle(self: *ModuleBuilder, comptime B: type, name: []const u8) !B {
+        const result = try self.wireStruct(B, name);
+        try self.recordBundle(name, B, result);
+        return result;
+    }
+
+    fn wireStruct(self: *ModuleBuilder, comptime S: type, prefix: []const u8) !S {
+        if (@typeInfo(S) != .@"struct") @compileError("bundles must be structs, not " ++ @typeName(S));
+        var result: S = undefined;
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            const full = try self.scopedName(prefix, field.name);
+            if (comptime isSignalHandle(field.type)) {
+                @field(result, field.name) = try self.wire(full, field.type.width);
+            } else if (@typeInfo(field.type) == .@"struct") {
+                @field(result, field.name) = try self.wireStruct(field.type, full);
+            } else {
+                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+            }
         }
         return result;
     }
 
-    pub fn assign(self: *ModuleBuilder, dst: anytype, src: anytype) !void {
+    fn scopedName(self: *ModuleBuilder, prefix: []const u8, name: []const u8) ![]const u8 {
+        if (prefix.len == 0) return name;
+        return std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ prefix, name });
+    }
+
+    /// Records a declared bundle's shape: member symbols in field order with
+    /// their dotted paths, plus the total packed width.
+    fn recordBundle(self: *ModuleBuilder, name: []const u8, comptime B: type, value: B) !void {
+        var members = std.ArrayList(BundleMember).empty;
+        defer members.deinit(self.allocator);
+        var width: usize = 0;
+        try self.collectBundleMembers(B, value, "", &members, &width);
+        try self.bundles.append(self.allocator, .{
+            .name = name,
+            .type_name = comptime if (@hasDecl(B, "type_name")) B.type_name else "",
+            .width = width,
+            .members = try self.allocator.dupe(BundleMember, members.items),
+        });
+    }
+
+    fn collectBundleMembers(
+        self: *ModuleBuilder,
+        comptime S: type,
+        value: S,
+        comptime prefix: []const u8,
+        members: *std.ArrayList(BundleMember),
+        width: *usize,
+    ) !void {
+        if (@typeInfo(S) != .@"struct") @compileError("bundle must be a struct");
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            const path = comptime if (prefix.len == 0) field.name else prefix ++ "." ++ field.name;
+            if (comptime isSignalHandle(field.type)) {
+                try members.append(self.allocator, .{ .ref = asRef(@field(value, field.name)), .path = path });
+                width.* += field.type.width;
+            } else if (@typeInfo(field.type) == .@"struct") {
+                try self.collectBundleMembers(field.type, @field(value, field.name), path, members, width);
+            } else {
+                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+            }
+        }
+    }
+
+    /// Bulk connection of two structurally identical bundles. Bundle `dirs`
+    /// metadata decides flow: `.output` leaves (and their subtrees) are
+    /// assigned `dst = src`, `.input` leaves are assigned backwards
+    /// `src = dst`; bundles without `dirs` default to forward.
+    pub fn connect(self: *ModuleBuilder, src: anytype, dst: anytype) !void {
+        try self.connectStruct(@TypeOf(src), src, @TypeOf(dst), dst, false);
+    }
+
+    fn connectStruct(self: *ModuleBuilder, comptime S: type, src: S, comptime D: type, dst: D, comptime flip: bool) !void {
+        if (comptime isSignalHandle(S)) {
+            comptime {
+                if (!isSignalHandle(D)) @compileError("connect: source leaf must pair with a destination leaf");
+                if (S.width != D.width) @compileError("connect: bundle leaf width mismatch");
+            }
+            if (flip) return self.assign(src, dst);
+            return self.assign(dst, src);
+        }
         comptime {
-            if (valWidth(@TypeOf(dst)) != valWidth(@TypeOf(src))) {
+            if (@typeInfo(S) != .@"struct" or @typeInfo(D) != .@"struct") @compileError("connect: both sides must be bundles of Signal(W)");
+            if (@typeInfo(S).@"struct".fields.len != @typeInfo(D).@"struct".fields.len) @compileError("connect: bundle shapes differ");
+        }
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            if (comptime !@hasField(D, field.name)) @compileError("connect: destination is missing field '" ++ field.name ++ "'");
+            const sub_flip = comptime connectFieldFlip(S, field.name, flip);
+            try self.connectStruct(field.type, @field(src, field.name), @FieldType(D, field.name), @field(dst, field.name), sub_flip);
+        }
+    }
+
+    fn connectFieldFlip(comptime S: type, comptime field_name: []const u8, comptime flip: bool) bool {
+        if (@hasDecl(S, "dirs") and @hasField(@TypeOf(S.dirs), field_name)) {
+            const dir: PortDir = @field(S.dirs, field_name);
+            return if (dir == .input) !flip else flip;
+        }
+        return flip;
+    }
+
+    pub fn assign(self: *ModuleBuilder, dst: anytype, src: anytype) !void {
+        const W = comptime valWidth(@TypeOf(dst));
+        if (@TypeOf(src) == comptime_int) {
+            const lit = self.exprs().lit(W, src);
+            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e });
+            return;
+        }
+        comptime {
+            if (valWidth(@TypeOf(src)) != W) {
                 @compileError("assign width mismatch: dst has " ++
-                    std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(dst))}) ++ " bits, src has " ++
+                    std.fmt.comptimePrint("{d}", .{W}) ++ " bits, src has " ++
                     std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(src))}) ++ " bits");
             }
         }
-        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = asAny(src) });
+        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src) });
     }
 
     /// Continuous assignment; widths are checked again by `validate`.
     pub fn assignExpr(self: *ModuleBuilder, dst: anytype, src: anytype) !void {
-        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = asAny(src) });
+        const W = comptime valWidth(@TypeOf(dst));
+        if (@TypeOf(src) == comptime_int) {
+            const lit = self.exprs().lit(W, src);
+            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e });
+            return;
+        }
+        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src) });
     }
 
     pub fn seq(self: *ModuleBuilder, domain: ClockDomain, stmts: []const Stmt) !void {
@@ -1668,11 +2158,13 @@ pub const ModuleBuilder = struct {
     }
 
     pub fn createClockDomain(self: *ModuleBuilder, name: []const u8, clk_name: []const u8, rst_name: []const u8) !ClockDomain {
-        return .{
+        const domain = ClockDomain{
             .name = name,
             .clk = try self.input(clk_name, 1),
             .rst_n = try self.input(rst_name, 1),
         };
+        try self.addClockDomain(domain);
+        return domain;
     }
 
     /// Simple synchronous read port: `rdata <= mem[addr]` when `en`.
@@ -1681,8 +2173,8 @@ pub const ModuleBuilder = struct {
         const rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
         const rdata = try self.reg(rname, W, 0);
         const b = self.exprs();
-        try self.seq(domain, &[_]Stmt{
-            b.when(en, &[_]Stmt{b.assign(rdata, b.memRead(memory, addr))}, &.{}),
+        try self.seq(domain, &.{
+            b.when(en, &.{b.assign(rdata, b.memRead(memory, addr))}, &.{}),
         });
         return rdata;
     }
@@ -1703,20 +2195,20 @@ pub const ModuleBuilder = struct {
         const rdata = try self.reg(rname, W, 0);
         const b = self.exprs();
         const collision = b.and_(we, b.eq(waddr, addr));
-        const read = b.when(en, &[_]Stmt{b.assign(rdata, b.memRead(memory, addr))}, &.{});
+        const read = b.when(en, &.{b.assign(rdata, b.memRead(memory, addr))}, &.{});
 
         const stmts: []const Stmt = switch (memory.ref.symbol().write_mode) {
-            .read_first => &[_]Stmt{
+            .read_first => &.{
                 read,
-                b.when(we, &[_]Stmt{b.memWrite(memory, waddr, wdata)}, &.{}),
+                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
             },
-            .write_first => &[_]Stmt{
-                b.when(collision, &[_]Stmt{b.assign(rdata, wdata)}, &[_]Stmt{read}),
-                b.when(we, &[_]Stmt{b.memWrite(memory, waddr, wdata)}, &.{}),
+            .write_first => &.{
+                b.when(collision, &.{b.assign(rdata, wdata)}, &.{read}),
+                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
             },
-            .no_change => &[_]Stmt{
-                b.when(b.not(collision), &[_]Stmt{read}, &.{}),
-                b.when(we, &[_]Stmt{b.memWrite(memory, waddr, wdata)}, &.{}),
+            .no_change => &.{
+                b.when(b.not(collision), &.{read}, &.{}),
+                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
             },
         };
         try self.seq(domain, stmts);
@@ -1725,15 +2217,18 @@ pub const ModuleBuilder = struct {
 
     /// Instantiates a reusable block. Definitions build on first use and are
     /// cached in the Design, so any number of instances of any number of block
-    /// types share one emitted Verilog module.
+    /// types share one emitted module. `params` overrides the block's comptime
+    /// `Params` schema at the instance site; pass `.{}` for no overrides.
     pub fn instantiate(
         self: *ModuleBuilder,
         comptime BlockType: type,
         instance_name: []const u8,
         inputs: anytype,
         outputs_binding: anytype,
+        params: anytype,
     ) !BlockType.Outputs {
         try self.design.ensureModule(BlockType);
+        const param_list = try self.collectParams(BlockType, params);
 
         const inputs_info = @typeInfo(BlockType.Inputs);
         if (inputs_info != .@"struct") @compileError("BlockType.Inputs must be a struct");
@@ -1742,64 +2237,169 @@ pub const ModuleBuilder = struct {
         if (@typeInfo(@TypeOf(inputs)) != .@"struct") @compileError("instantiate inputs must be a struct");
         if (@typeInfo(@TypeOf(outputs_binding)) != .@"struct") @compileError("instantiate outputs_binding must be a struct");
 
-        inline for (inputs_info.@"struct".fields) |field| {
-            if (!@hasField(@TypeOf(inputs), field.name)) {
-                @compileError("Missing required input '" ++ field.name ++ "' when instantiating module '" ++ BlockType.name ++ "'");
-            }
-            const actual = @field(inputs, field.name);
-            comptime {
-                if (valWidth(field.type) != valWidth(@TypeOf(actual))) {
-                    @compileError("Port width mismatch on input '" ++ field.name ++ "' for module '" ++ BlockType.name ++
-                        "': expected " ++ std.fmt.comptimePrint("{d}", .{valWidth(field.type)}) ++
-                        " bits, got " ++ std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(actual))}) ++ " bits");
-                }
-            }
-        }
-
         inline for (@typeInfo(@TypeOf(outputs_binding)).@"struct".fields) |bind_field| {
             if (!@hasField(BlockType.Outputs, bind_field.name)) {
                 @compileError("Unknown output binding '" ++ bind_field.name ++ "' for module '" ++ BlockType.name ++ "'");
             }
-            const Target = @FieldType(BlockType.Outputs, bind_field.name);
-            comptime {
-                if (valWidth(Target) != valWidth(@TypeOf(@field(outputs_binding, bind_field.name)))) {
-                    @compileError("Output binding width mismatch on '" ++ bind_field.name ++ "'");
-                }
-            }
         }
 
-        const total = inputs_info.@"struct".fields.len + outputs_info.@"struct".fields.len;
+        const total = bundleLeafCount(BlockType.Inputs) + bundleLeafCount(BlockType.Outputs);
         const conns = try self.allocator.alloc(Connection, total);
         var c_idx: usize = 0;
 
-        inline for (inputs_info.@"struct".fields) |field| {
-            const actual = @field(inputs, field.name);
-            conns[c_idx] = .{ .port_name = field.name, .signal = asRef(actual), .direction = .input };
-            c_idx += 1;
-        }
+        try self.addInputConnections(BlockType.Inputs, BlockType.name, inputs, "", .input, true, conns, &c_idx);
 
         var result: BlockType.Outputs = undefined;
-        inline for (outputs_info.@"struct".fields) |field| {
-            if (@hasField(@TypeOf(outputs_binding), field.name)) {
-                const bound = @field(outputs_binding, field.name);
-                conns[c_idx] = .{ .port_name = field.name, .signal = asRef(bound), .direction = .output };
-                @field(result, field.name) = bound;
-            } else {
-                const wire_name = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ instance_name, field.name });
-                const w = try self.wire(wire_name, valWidth(field.type));
-                conns[c_idx] = .{ .port_name = field.name, .signal = w.ref, .direction = .output };
-                @field(result, field.name) = w;
-            }
-            c_idx += 1;
-        }
+        try self.addOutputConnections(BlockType.Outputs, BlockType.name, outputs_binding, instance_name, "", .output, false, conns, &c_idx, &result);
 
         try self.instances.append(self.allocator, .{
             .module_name = BlockType.name,
             .instance_name = instance_name,
             .connections = conns,
+            .params = param_list,
         });
 
         return result;
+    }
+
+    fn addInputConnections(
+        self: *ModuleBuilder,
+        comptime S: type,
+        comptime block_name: []const u8,
+        binding: anytype,
+        prefix: []const u8,
+        comptime inherited: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+    ) !void {
+        if (@typeInfo(@TypeOf(binding)) != .@"struct") @compileError("instantiate inputs must be a struct");
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            if (!@hasField(@TypeOf(binding), field.name)) {
+                @compileError("Missing required input '" ++ field.name ++ "' when instantiating module '" ++ block_name ++ "'");
+            }
+            const full = try self.scopedName(prefix, field.name);
+            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
+            const actual = @field(binding, field.name);
+            if (comptime isSignalHandle(field.type)) {
+                comptime {
+                    if (!isSignalHandle(@TypeOf(actual))) @compileError("input '" ++ field.name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
+                    if (field.type.width != @TypeOf(actual).width) @compileError("Port width mismatch on input '" ++ field.name ++ "' for module '" ++ block_name ++ "'");
+                }
+                conns[idx.*] = .{ .port_name = full, .signal = asRef(actual), .direction = dir };
+                idx.* += 1;
+            } else if (@typeInfo(field.type) == .@"struct") {
+                try self.addInputConnections(field.type, block_name, actual, full, dir, flip, conns, idx);
+            } else {
+                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+            }
+        }
+    }
+
+    fn addOutputConnections(
+        self: *ModuleBuilder,
+        comptime S: type,
+        comptime block_name: []const u8,
+        binding: anytype,
+        instance_name: []const u8,
+        prefix: []const u8,
+        comptime inherited: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+        result: *S,
+    ) !void {
+        if (@typeInfo(@TypeOf(binding)) != .@"struct") @compileError("instantiate outputs_binding must be a struct");
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            const full = try self.scopedName(prefix, field.name);
+            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
+            if (@hasField(@TypeOf(binding), field.name)) {
+                const bound = @field(binding, field.name);
+                if (comptime isSignalHandle(field.type)) {
+                    comptime {
+                        if (!isSignalHandle(@TypeOf(bound))) @compileError("output '" ++ field.name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
+                        if (field.type.width != @TypeOf(bound).width) @compileError("Output binding width mismatch on '" ++ field.name ++ "'");
+                    }
+                    conns[idx.*] = .{ .port_name = full, .signal = asRef(bound), .direction = dir };
+                    idx.* += 1;
+                    @field(result, field.name) = bound;
+                } else {
+                    var sub: field.type = undefined;
+                    try self.addOutputConnections(field.type, block_name, bound, instance_name, full, dir, flip, conns, idx, &sub);
+                    @field(result, field.name) = sub;
+                }
+            } else if (comptime isSignalHandle(field.type)) {
+                const w = try self.instanceWire(instance_name, full, field.type.width);
+                conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
+                idx.* += 1;
+                @field(result, field.name) = w;
+            } else {
+                var sub: field.type = undefined;
+                try self.addGeneratedOutputs(field.type, instance_name, full, dir, flip, conns, idx, &sub);
+                @field(result, field.name) = sub;
+            }
+        }
+    }
+
+    fn addGeneratedOutputs(
+        self: *ModuleBuilder,
+        comptime S: type,
+        instance_name: []const u8,
+        prefix: []const u8,
+        comptime inherited: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+        result: *S,
+    ) !void {
+        inline for (@typeInfo(S).@"struct".fields) |field| {
+            const full = try self.scopedName(prefix, field.name);
+            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
+            if (comptime isSignalHandle(field.type)) {
+                const w = try self.instanceWire(instance_name, full, field.type.width);
+                conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
+                idx.* += 1;
+                @field(result, field.name) = w;
+            } else if (@typeInfo(field.type) == .@"struct") {
+                var sub: field.type = undefined;
+                try self.addGeneratedOutputs(field.type, instance_name, full, dir, flip, conns, idx, &sub);
+                @field(result, field.name) = sub;
+            } else {
+                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+            }
+        }
+    }
+
+    fn instanceWire(self: *ModuleBuilder, instance_name: []const u8, port_path: []const u8, comptime W: usize) !Signal(W) {
+        const wire_name = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ instance_name, port_path });
+        return self.wire(wire_name, W);
+    }
+
+    fn collectParams(self: *ModuleBuilder, comptime BlockType: type, params: anytype) ![]const ParamOverride {
+        const EmptyParams = struct {};
+        const ParamsType = if (@hasDecl(BlockType, "Params")) BlockType.Params else EmptyParams;
+        if (@typeInfo(ParamsType) != .@"struct") @compileError("block " ++ BlockType.name ++ ": Params must be a struct");
+        if (@typeInfo(@TypeOf(params)) != .@"struct") @compileError("instantiate params must be a struct");
+
+        const fields = @typeInfo(@TypeOf(params)).@"struct".fields;
+        const list = try self.allocator.alloc(ParamOverride, fields.len);
+        var idx: usize = 0;
+        inline for (fields) |field| {
+            if (!@hasField(ParamsType, field.name)) {
+                @compileError("Unknown parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "'");
+            }
+            const Spec = @FieldType(ParamsType, field.name);
+            comptime {
+                if (!@hasDecl(Spec, "is_param")) @compileError("block " ++ BlockType.name ++ ": parameter '" ++ field.name ++ "' must be ParamSpec(W)");
+            }
+            const width = comptime valWidth(Spec);
+            if (width > 64) @compileError("parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "' is wider than 64 bits");
+            const value = std.math.cast(u64, @field(params, field.name)) orelse return error.ParameterOutOfRange;
+            if (width < 64 and value >= (@as(u64, 1) << @intCast(width))) return error.ParameterOutOfRange;
+            list[idx] = .{ .name = field.name, .width = width, .value = value };
+            idx += 1;
+        }
+        return list;
     }
 
     fn markRegisters(self: *ModuleBuilder) !void {
@@ -1820,7 +2420,7 @@ pub const ModuleBuilder = struct {
 
         for (self.assigns.items) |a| {
             const kind = a.dst.kind();
-            if (kind == .input or kind == .reg or kind == .mem or kind == .localparam or kind == .parameter) {
+            if (kind == .input or kind == .reg or kind == .mem or kind == .constant or kind == .module_param) {
                 std.log.err("js_asic: continuous assignment to non-net '{s}' in module '{s}'", .{ a.dst.name(), self.name });
                 return error.InvalidAssignment;
             }
@@ -1851,6 +2451,21 @@ pub const ModuleBuilder = struct {
                 }
                 drivers[r.idx] += 1;
             }
+            // Reset coverage is structural: the backend derives each process's
+            // reset branch from exactly the signals that process assigns, so
+            // every flop a process creates is reset by construction.
+            if (proc.sensitivity == .comb) {
+                const definite = try self.allocator.alloc(bool, n);
+                defer self.allocator.free(definite);
+                @memset(definite, false);
+                try definiteAssigned(self.allocator, proc.stmts, n, definite);
+                for (assigned.items) |r| {
+                    if (!definite[r.idx]) {
+                        std.log.warn("js_asic: comb process assigns '{s}' on only some paths in module '{s}' (latch inferred)", .{ r.name(), self.name });
+                        return error.LatchInference;
+                    }
+                }
+            }
         }
 
         for (self.instances.items) |inst| {
@@ -1860,10 +2475,90 @@ pub const ModuleBuilder = struct {
         }
 
         for (drivers, 0..) |count, i| {
+            const sym = self.scope.symbols.items[i];
             if (count > 1) {
-                const sym = self.scope.symbols.items[i];
                 std.log.err("js_asic: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
                 return error.MultipleDrivers;
+            }
+            if (sym.kind == .output and count == 0) {
+                std.log.warn("js_asic: output '{s}' is never driven in module '{s}'", .{ sym.name, self.name });
+                return error.UndrivenOutput;
+            }
+        }
+
+        // Combinational loop detection: dependency graph among symbols driven
+        // by continuous assigns or comb processes.
+        const comb_driven = try self.allocator.alloc(bool, n);
+        defer self.allocator.free(comb_driven);
+        @memset(comb_driven, false);
+        var deps = try self.allocator.alloc(std.ArrayList(u32), n);
+        defer {
+            for (deps) |*d| d.deinit(self.allocator);
+            self.allocator.free(deps);
+        }
+        for (deps) |*d| d.* = .empty;
+
+        for (self.assigns.items) |a| comb_driven[a.dst.idx] = true;
+        for (self.processes.items) |proc| {
+            if (proc.sensitivity != .comb) continue;
+            var assigned = std.ArrayList(SymRef).empty;
+            defer assigned.deinit(self.allocator);
+            try collectAssigned(self.allocator, proc.stmts, &assigned);
+            for (assigned.items) |r| {
+                if (r.scope == self.scope) comb_driven[r.idx] = true;
+            }
+        }
+        for (self.assigns.items) |a| {
+            var reads = std.ArrayList(SymRef).empty;
+            defer reads.deinit(self.allocator);
+            try collectReads(self.allocator, a.src, &reads);
+            for (reads.items) |r| {
+                if (r.scope == self.scope and comb_driven[r.idx]) try deps[a.dst.idx].append(self.allocator, r.idx);
+            }
+        }
+        for (self.processes.items) |proc| {
+            if (proc.sensitivity != .comb) continue;
+            var reads = std.ArrayList(SymRef).empty;
+            defer reads.deinit(self.allocator);
+            try collectStmtReads(self.allocator, proc.stmts, &reads);
+            var assigned = std.ArrayList(SymRef).empty;
+            defer assigned.deinit(self.allocator);
+            try collectAssigned(self.allocator, proc.stmts, &assigned);
+            for (assigned.items) |r| {
+                if (r.scope != self.scope) continue;
+                for (reads.items) |rd| {
+                    if (rd.scope == self.scope and comb_driven[rd.idx]) try deps[r.idx].append(self.allocator, rd.idx);
+                }
+            }
+        }
+
+        const color = try self.allocator.alloc(u8, n);
+        defer self.allocator.free(color);
+        @memset(color, 0);
+        var stack = std.ArrayList(struct { node: u32, next: usize }).empty;
+        defer stack.deinit(self.allocator);
+        for (0..n) |start| {
+            if (!comb_driven[start] or color[start] != 0) continue;
+            color[start] = 1;
+            try stack.append(self.allocator, .{ .node = @intCast(start), .next = 0 });
+            while (stack.items.len > 0) {
+                const top = &stack.items[stack.items.len - 1];
+                if (top.next >= deps[top.node].items.len) {
+                    color[top.node] = 2;
+                    _ = stack.pop();
+                    continue;
+                }
+                const dep = deps[top.node].items[top.next];
+                top.next += 1;
+                if (!comb_driven[dep]) continue;
+                if (color[dep] == 1) {
+                    std.log.warn("js_asic: combinational loop on '{s}' in module '{s}'", .{ self.scope.symbols.items[dep].name, self.name });
+                    return error.CombinationalLoop;
+                }
+                if (color[dep] == 0) {
+                    color[dep] = 1;
+                    try stack.append(self.allocator, .{ .node = dep, .next = 0 });
+                }
             }
         }
 
@@ -1877,17 +2572,101 @@ pub const ModuleBuilder = struct {
         }
     }
 
+    /// Dead-code elimination: mark symbols unreachable from ports, parameters,
+    /// assertions and instance connections, then drop dead continuous assigns
+    /// and processes. Kept processes pin the symbols they assign so no emitted
+    /// statement can reference an omitted declaration.
+    fn eliminateDead(self: *ModuleBuilder) !void {
+        const alloc = self.allocator;
+        const n = self.scope.symbols.items.len;
+        const live = try alloc.alloc(bool, n);
+        defer alloc.free(live);
+        @memset(live, false);
+
+        for (self.scope.symbols.items, 0..) |sym, i| {
+            switch (sym.kind) {
+                .input, .output, .inout, .module_param, .constant => live[i] = true,
+                else => {},
+            }
+        }
+        for (self.instances.items) |inst| {
+            for (inst.connections) |conn| live[conn.signal.idx] = true;
+        }
+
+        var assigned = std.ArrayList(SymRef).empty;
+        defer assigned.deinit(alloc);
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.assigns.items) |a| {
+                if (!live[a.dst.idx]) continue;
+                markExprLive(a.src, live, &changed);
+            }
+            for (self.processes.items) |proc| {
+                assigned.clearRetainingCapacity();
+                try collectAssigned(alloc, proc.stmts, &assigned);
+                var keep = stmtObservable(proc.stmts);
+                if (!keep) {
+                    for (assigned.items) |r| {
+                        if (live[r.idx]) {
+                            keep = true;
+                            break;
+                        }
+                    }
+                }
+                if (!keep) continue;
+                for (assigned.items) |r| markLiveSym(r.idx, live, &changed);
+                markStmtLive(proc.stmts, live, &changed);
+            }
+        }
+
+        for (self.scope.symbols.items, 0..) |*sym, i| {
+            if (!live[i]) sym.dead = true;
+        }
+
+        var kept_assigns = std.ArrayList(Assign).empty;
+        for (self.assigns.items) |a| {
+            if (live[a.dst.idx]) try kept_assigns.append(alloc, a);
+        }
+        self.assigns.deinit(alloc);
+        self.assigns = kept_assigns;
+
+        var kept_processes = std.ArrayList(Process).empty;
+        for (self.processes.items) |proc| {
+            assigned.clearRetainingCapacity();
+            try collectAssigned(alloc, proc.stmts, &assigned);
+            var keep = stmtObservable(proc.stmts);
+            if (!keep) {
+                for (assigned.items) |r| {
+                    if (live[r.idx]) {
+                        keep = true;
+                        break;
+                    }
+                }
+            }
+            if (keep) try kept_processes.append(alloc, proc);
+        }
+        self.processes.deinit(alloc);
+        self.processes = kept_processes;
+    }
+
     pub fn finish(self: *ModuleBuilder) !*Module {
         try self.markRegisters();
         try self.validate();
+        try self.eliminateDead();
 
         const mod = try self.allocator.create(Module);
         mod.* = .{
             .name = self.name,
             .scope = self.scope,
+            .design = self.design,
             .assigns = try self.assigns.toOwnedSlice(self.allocator),
             .processes = try self.processes.toOwnedSlice(self.allocator),
             .instances = try self.instances.toOwnedSlice(self.allocator),
+            .meta = try self.meta.toOwnedSlice(self.allocator),
+            .clocks = try self.clocks.toOwnedSlice(self.allocator),
+            .bundles = try self.bundles.toOwnedSlice(self.allocator),
         };
         try self.design.register(mod);
         return mod;
@@ -1898,14 +2677,17 @@ pub const ModuleBuilder = struct {
 // Black boxes
 // ============================================================================
 
-/// Declares a foreign module emitted verbatim, with a typed port schema so it
-/// can be wired like any other block.
+/// Declares a foreign module body emitted verbatim by the matching backend,
+/// with a typed port schema so it can be wired like any other block. An
+/// optional `params` struct of `ParamSpec(W)` fields advertises overridable
+/// module parameters.
 pub fn BlackBox(comptime spec: anytype) type {
     return struct {
         pub const name: []const u8 = spec.name;
         pub const Inputs = spec.inputs;
         pub const Outputs = spec.outputs;
-        pub const verilog: []const u8 = spec.verilog;
+        pub const Params = if (@hasField(@TypeOf(spec), "params")) spec.params else struct {};
+        pub const foreign: ForeignSource = spec.foreign;
     };
 }
 
@@ -1913,468 +2695,251 @@ pub fn BlackBox(comptime spec: anytype) type {
 // Tests
 // ============================================================================
 
-const DummyBlock = struct {
-    pub const name = "dummy_block";
-    pub const Inputs = struct {
-        clk: Signal(1),
-        data_in: Signal(8),
-    };
-    pub const Outputs = struct {
-        data_out: Signal(8),
-        valid: Signal(1),
-    };
-
-    pub fn build(mb: *ModuleBuilder) !void {
-        const ins = try mb.declareInputs(Inputs);
-        const outs = try mb.declareOutputs(Outputs);
-        const b = mb.exprs();
-        try mb.assign(outs.data_out, ins.data_in);
-        try mb.assign(outs.valid, b.eq(ins.data_in, b.lit(8, 0xFF)));
-    }
-};
-
-test "width inference and width-checked assignment" {
+test "instance parameter value must fit its schema width" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const W = struct {
-        pub const Inputs = struct { a: Signal(8), b: Signal(4) };
-        pub const Outputs = struct { sum: Signal(8), prod: Signal(8), cat: Signal(12), bitv: Signal(1) };
-        pub const name = "widths";
+    const Mask = struct {
+        pub const name = "mask_block_err";
+        pub const Params = struct { MASK: ParamSpec(8) };
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-
-            const sum = b.add(ins.a, ins.b);
-            try std.testing.expectEqual(@as(usize, 8), @TypeOf(sum).width);
-            try mb.assign(outs.sum, sum);
-
-            const prod = b.mul(ins.a, b.lit(8, 3));
-            try mb.assign(outs.prod, prod);
-
-            const cat = b.concat(.{ ins.a, ins.b });
-            try std.testing.expectEqual(@as(usize, 12), @TypeOf(cat).width);
-            try mb.assign(outs.cat, cat);
-
-            try mb.assign(outs.bitv, ins.a.bit(3));
+            _ = try mb.moduleParam("MASK", 8, 0xFF);
+            try mb.assign(outs.y, ins.a);
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
     const a = try top.input("a", 8);
-    const b4 = try top.input("b", 4);
-    _ = try top.instantiate(W, "u_w", .{ .a = a, .b = b4 }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign cat = {a, b};") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + b);") != null);
+    const y = try top.outputPort("y", 8);
+    try std.testing.expectError(error.ParameterOutOfRange, top.instantiate(Mask, "u_bad", .{ .a = a }, .{ .y = y }, .{ .MASK = 0x1FF }));
+    try std.testing.expectError(error.ParameterOutOfRange, top.instantiate(Mask, "u_neg", .{ .a = a }, .{ .y = y }, .{ .MASK = -1 }));
 }
 
-test "signed expressions emit $signed and arithmetic shift" {
+test "constants and module parameters are distinct IR symbols" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const S = struct {
-        pub const Inputs = struct { a: Signal(4), b: Signal(4) };
-        pub const Outputs = struct { ext: Signal(8), cmp: Signal(1), shifted: Signal(4) };
-        pub const name = "signed_ops";
+    const Cfg = struct {
+        pub const name = "cfg_ir";
+        pub const Params = struct { WIDTH: ParamSpec(8) };
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            const sa = b.asSigned(ins.a);
-            const sb = b.asSigned(ins.b);
-            try mb.assign(outs.ext, b.sext(sa, 8));
-            try mb.assign(outs.cmp, b.slt(ins.a, ins.b));
-            try mb.assign(outs.shifted, b.shr(sa, b.lit(4, 1)));
-            _ = sb;
+            _ = try mb.moduleParam("WIDTH", 8, 8);
+            _ = try mb.constant("MODE", 2, 3);
+            try mb.assign(outs.y, ins.a);
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
-    const a = try top.input("a", 4);
-    const b4 = try top.input("b", 4);
-    _ = try top.instantiate(S, "u_s", .{ .a = a, .b = b4 }, .{});
+    const a = try top.input("a", 8);
+    const y = try top.outputPort("y", 8);
+    _ = try top.instantiate(Cfg, "u_cfg", .{ .a = a }, .{ .y = y }, .{ .WIDTH = 16 });
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign ext = $signed({{4{a[3]}}, a});") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "($signed(a) < $signed(b))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, ">>> 4'd1") != null);
+    const cfg = design.findModule(Cfg.name).?;
+    const width = cfg.scope.find("WIDTH").?;
+    const mode = cfg.scope.find("MODE").?;
+    try std.testing.expectEqual(SymbolKind.module_param, width.kind());
+    try std.testing.expectEqual(@as(usize, 8), width.width());
+    try std.testing.expectEqual(SymbolKind.constant, mode.kind());
+    try std.testing.expectEqual(@as(u64, 3), mode.symbol().init_val);
 }
 
-test "localparam symbols are usable in expressions and case labels" {
+test "sink-side bundle declarations flip directions in the scope" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const Fsm = struct {
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), go: Signal(1) };
-        pub const Outputs = struct { state: Signal(2), busy: Signal(1) };
-        pub const name = "fsm_params";
+    const Bus = struct {
+        pub const dirs = .{ .addr = PortDir.output, .req = PortDir.output, .ack = PortDir.input };
+        addr: Signal(8),
+        req: Signal(1),
+        ack: Signal(1),
+    };
+    const Blk = struct {
+        pub const name = "bundle_ir";
+        pub const Inputs = struct { bus: Bus };
+        pub const Outputs = struct { out: Bus };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.out.addr, ins.bus.addr);
+            try mb.assign(outs.out.req, ins.bus.req);
+            try mb.assign(ins.bus.ack, outs.out.ack);
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const bus = try top.wireBundle(Bus, "bus");
+    _ = try top.instantiate(Blk, "u_blk", .{ .bus = bus }, .{}, .{});
+    _ = try top.finish();
+
+    const blk = design.findModule(Blk.name).?;
+    // Sink side flips: addr/req become inputs, ack becomes an output.
+    try std.testing.expectEqual(SymbolKind.input, blk.scope.find("bus_addr").?.kind());
+    try std.testing.expectEqual(SymbolKind.input, blk.scope.find("bus_req").?.kind());
+    try std.testing.expectEqual(SymbolKind.output, blk.scope.find("bus_ack").?.kind());
+    // Source side keeps declared directions.
+    try std.testing.expectEqual(SymbolKind.output, blk.scope.find("out_addr").?.kind());
+    try std.testing.expectEqual(SymbolKind.input, blk.scope.find("out_ack").?.kind());
+}
+
+test "constant folding and structural interning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    var mb = try ModuleBuilder.init(alloc, &design, "fold");
+    defer mb.deinit();
+    const b = mb.exprs();
+    const a = try mb.input("a", 8);
+
+    // Wrapping arithmetic folds to a literal with the expression's width.
+    const folded = b.intern(b.add(b.lit(8, 200), b.lit(8, 100)));
+    try std.testing.expectEqual(@as(?u64, 44), folded.known);
+    try std.testing.expectEqual(@as(u64, 44), folded.node.lit);
+    try std.testing.expectEqual(@as(usize, 8), folded.width);
+
+    // Sign extension and comparisons fold with bit-precise semantics.
+    const sexted = b.intern(b.sext(b.lit(4, 8), 8));
+    try std.testing.expectEqual(@as(?u64, 0xF8), sexted.known);
+    const cmp = b.intern(b.eq(b.lit(4, 5), b.lit(4, 5)));
+    try std.testing.expectEqual(@as(?u64, 1), cmp.known);
+
+    // Signal-dependent nodes stay symbolic.
+    const symbolic = b.intern(b.add(a, 1));
+    try std.testing.expect(symbolic.known == null);
+
+    // Structurally identical subexpressions share canonical children.
+    const x1 = b.intern(b.band(a, 0x0F));
+    const x2 = b.intern(b.band(a, 0x0F));
+    try std.testing.expectEqual(x1.node.bin_op.lhs, x2.node.bin_op.lhs);
+    try std.testing.expectEqual(x1.node.bin_op.rhs, x2.node.bin_op.rhs);
+
+    // `c ? x : x` collapses even when the condition is a signal.
+    const cond = b.lt(a, 3);
+    const same = b.intern(b.ternary(cond, a, a));
+    try std.testing.expect(same.node == .ref);
+    try std.testing.expectEqual(a.ref.idx, same.node.ref.idx);
+}
+
+test "comb processes must assign every signal on all paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    const Latch = struct {
+        pub const name = "latch_block";
+        pub const Inputs = struct { en: Signal(1), d: Signal(8) };
+        pub const Outputs = struct { q: Signal(8) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
-            const idle = try mb.localparam("IDLE", 2, 0);
-            const run = try mb.localparam("RUN", 2, 1);
-            const done = try mb.localparam("DONE", 2, 2);
-            const state_r = try mb.reg("state_r", 2, 0);
-            try mb.assign(outs.state, state_r.expr());
-            try mb.assign(outs.busy, b.ne(state_r.expr(), idle));
-
-            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &[_]Stmt{
-                b.case_(state_r.expr(), &.{
-                    b.caseBranchSym(idle, &[_]Stmt{
-                        b.when(ins.go, &[_]Stmt{b.assign(state_r, run)}, &.{}),
-                    }),
-                    b.caseBranchSym(run, &[_]Stmt{
-                        b.assign(state_r, done),
-                    }),
-                    b.caseBranchSym(done, &[_]Stmt{
-                        b.assign(state_r, idle),
-                    }),
-                }, &.{}),
+            const q_r = try mb.reg("q_r", 8, 0);
+            try mb.assign(outs.q, q_r);
+            try mb.comb(&.{
+                b.when(ins.en, &.{b.assign(q_r, ins.d)}, &.{}),
             });
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const go = try top.input("go", 1);
-    _ = try top.instantiate(Fsm, "u_fsm", .{ .clk = clk, .rst_n = rst, .go = go }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [1:0] IDLE = 2'd0;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "IDLE: begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "state_r <= RUN;") != null);
-}
-
-test "memory init, sync read and byte-enable writes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const MemUser = struct {
-        pub const Inputs = struct {
-            clk: Signal(1),
-            rst_n: Signal(1),
-            we: Signal(1),
-            waddr: Signal(8),
-            wdata: Signal(32),
-            raddr: Signal(8),
-            be: Signal(4),
-        };
-        pub const Outputs = struct {
-            rdata: Signal(32),
-            q: Signal(32),
-        };
-        pub const name = "mem_user";
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            const mem = try mb.mem(32, "code", 256, .{ .init_file = "code.hex" });
-
-            try mb.assign(outs.rdata, b.memRead(mem, ins.raddr));
-
-            const q_r = try mb.reg("q_r", 32, 0);
-            try mb.assign(outs.q, q_r.expr());
-            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &[_]Stmt{
-                b.when(ins.we, &[_]Stmt{
-                    b.memWriteBytes(mem, ins.waddr, ins.wdata, ins.be),
-                }, &.{}),
-                b.assign(q_r, b.memRead(mem, ins.raddr)),
-            });
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const we = try top.input("we", 1);
-    const waddr = try top.input("waddr", 8);
-    const wdata = try top.input("wdata", 32);
-    const raddr = try top.input("raddr", 8);
-    const be = try top.input("be", 4);
-    _ = try top.instantiate(MemUser, "u_mem", .{
-        .clk = clk,
-        .rst_n = rst,
-        .we = we,
-        .waddr = waddr,
-        .wdata = wdata,
-        .raddr = raddr,
-        .be = be,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "$readmemh(\"code.hex\", code);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "if (be[0]) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "q_r <= code[raddr];") != null);
-}
-
-test "read/write port honors write_first semantics" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const Rw = struct {
-        pub const Inputs = struct {
-            clk: Signal(1),
-            rst_n: Signal(1),
-            en: Signal(1),
-            addr: Signal(4),
-            we: Signal(1),
-            waddr: Signal(4),
-            wdata: Signal(16),
-        };
-        pub const Outputs = struct { rdata: Signal(16) };
-        pub const name = "rw_port";
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const mem = try mb.mem(16, "rf", 16, .{ .write_mode = .write_first });
-            const rd = try mb.readWritePort(mem, .{ .clk = ins.clk, .rst_n = ins.rst_n }, ins.en, ins.addr, ins.we, ins.waddr, ins.wdata);
-            try mb.assign(outs.rdata, rd);
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
     const en = try top.input("en", 1);
-    const addr = try top.input("addr", 4);
-    const we = try top.input("we", 1);
-    const waddr = try top.input("waddr", 4);
-    const wdata = try top.input("wdata", 16);
-    _ = try top.instantiate(Rw, "u_rw", .{
-        .clk = clk,
-        .rst_n = rst,
-        .en = en,
-        .addr = addr,
-        .we = we,
-        .waddr = waddr,
-        .wdata = wdata,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "if ((we && (waddr == addr))) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "rf[waddr] <= wdata;") != null);
+    const d = try top.input("d", 8);
+    const q = try top.outputPort("q", 8);
+    try std.testing.expectError(error.LatchInference, top.instantiate(Latch, "u_latch", .{ .en = en, .d = d }, .{ .q = q }, .{}));
 }
 
-test "black box emits verbatim and is shared across instances" {
+test "combinational loops are rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
 
-    const Pll = BlackBox(.{
-        .name = "pll_120m",
-        .inputs = struct { clk: Signal(1), rst_n: Signal(1) },
-        .outputs = struct { clk_out: Signal(1), locked: Signal(1) },
-        .verilog =
-        \\module pll_120m (input clk, input rst_n, output clk_out, output locked);
-        \\    assign clk_out = clk;
-        \\    assign locked = ~rst_n;
-        \\endmodule
-        ,
-    });
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const o0 = try top.outputPort("clk0", 1);
-    const o1 = try top.outputPort("clk1", 1);
-    _ = try top.instantiate(Pll, "u_pll0", .{ .clk = clk, .rst_n = rst }, .{ .clk_out = o0 });
-    _ = try top.instantiate(Pll, "u_pll1", .{ .clk = clk, .rst_n = rst }, .{ .clk_out = o1 });
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "module pll_120m"));
-    try std.testing.expect(std.mem.indexOf(u8, v, "pll_120m u_pll0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "pll_120m u_pll1") != null);
-}
-
-test "typed handles, scope names, and repeated block instantiation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top_test");
-    const clk = try top.input("clk", 1);
-    const a = try top.input("a", 8);
-    const b_in = try top.input("b", 8);
-    const out_a = try top.outputPort("out_a", 8);
-
-    const inst0 = try top.instantiate(DummyBlock, "u_dummy0", .{
-        .clk = clk,
-        .data_in = a,
-    }, .{
-        .data_out = out_a,
-    });
-    const inst1 = try top.instantiate(DummyBlock, "u_dummy1", .{
-        .clk = clk,
-        .data_in = b_in,
-    }, .{});
-
-    try std.testing.expectEqualStrings("out_a", inst0.data_out.name());
-    try std.testing.expectEqualStrings("u_dummy1_valid", inst1.valid.name());
-    try std.testing.expectEqualStrings("u_dummy1_data_out", inst1.data_out.name());
-
-    _ = try top.finish();
-    const v = try design.emitAll(alloc);
-
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "module dummy_block"));
-    try std.testing.expect(std.mem.indexOf(u8, v, "module top_test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "dummy_block u_dummy0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "dummy_block u_dummy1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, ".data_in(a)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, ".data_out(out_a)") != null);
-}
-
-test "per-process reset only resets registers owned by that process" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const TwoDomains = struct {
-        pub const name = "two_domains";
-        pub const Inputs = struct {
-            clk_a: Signal(1),
-            rst_a_n: Signal(1),
-            clk_b: Signal(1),
-            rst_b_n: Signal(1),
-        };
-        pub const Outputs = struct {
-            done: Signal(1),
-        };
+    const Loop = struct {
+        pub const name = "loop_block";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
-            const a_count = try mb.reg("a_count", 8, 0);
-            const b_count = try mb.reg("b_count", 8, 0);
-            try mb.seq(.{ .clk = ins.clk_a, .rst_n = ins.rst_a_n }, &[_]Stmt{
-                b.assign(a_count, b.add(a_count, b.lit(8, 1))),
-                b.when(b.eq(a_count, b.lit(8, 0xFF)), &[_]Stmt{b.assign(outs.done, b.lit(1, 1))}, &.{}),
-            });
-            try mb.seq(.{ .clk = ins.clk_b, .rst_n = ins.rst_b_n }, &[_]Stmt{
-                b.assign(b_count, b.add(b_count, b.lit(8, 1))),
-            });
+            const w = try mb.wire("w", 1);
+            try mb.assign(w, b.bxor(ins.a, w.expr()));
+            try mb.assign(outs.y, w);
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk_a = try top.input("clk_a", 1);
-    const rst_a = try top.input("rst_a_n", 1);
-    const clk_b = try top.input("clk_b", 1);
-    const rst_b = try top.input("rst_b_n", 1);
-    _ = try top.instantiate(TwoDomains, "u_two", .{
-        .clk_a = clk_a,
-        .rst_a_n = rst_a,
-        .clk_b = clk_b,
-        .rst_b_n = rst_b,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    const reset_a = "always @(posedge clk_a or negedge rst_a_n) begin\n        if (!rst_a_n) begin\n            done <= 1'b0;\n            a_count <= 8'd0;\n        end";
-    const reset_b = "always @(posedge clk_b or negedge rst_b_n) begin\n        if (!rst_b_n) begin\n            b_count <= 8'd0;\n        end";
-    try std.testing.expect(std.mem.indexOf(u8, v, reset_a) != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, reset_b) != null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "a_count <= 8'd0;"));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "b_count <= 8'd0;"));
+    const a = try top.input("a", 1);
+    const y = try top.outputPort("y", 1);
+    try std.testing.expectError(error.CombinationalLoop, top.instantiate(Loop, "u_loop", .{ .a = a }, .{ .y = y }, .{}));
 }
 
-test "reset kinds control sensitivity and polarity" {
+test "undriven outputs are rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
 
-    const R = struct {
-        pub const name = "reset_kinds";
-        pub const Inputs = struct {
-            clk: Signal(1),
-            rl: Signal(1),
-            rh: Signal(1),
-            sl: Signal(1),
-            sh: Signal(1),
-            d: Signal(4),
-        };
-        pub const Outputs = struct { a: Signal(4), b: Signal(4), c: Signal(4), e: Signal(4) };
+    const Open = struct {
+        pub const name = "open_block";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            const ra = try mb.reg("ra", 4, 0);
-            const rb = try mb.reg("rb", 4, 0);
-            const rc = try mb.reg("rc", 4, 0);
-            const re = try mb.reg("re", 4, 0);
-            try mb.assign(outs.a, ra);
-            try mb.assign(outs.b, rb);
-            try mb.assign(outs.c, rc);
-            try mb.assign(outs.e, re);
-            try mb.seqReset(ins.clk, .{ .signal = ins.rl, .kind = .async_low }, &[_]Stmt{b.assign(ra, ins.d)});
-            try mb.seqReset(ins.clk, .{ .signal = ins.rh, .kind = .async_high }, &[_]Stmt{b.assign(rb, ins.d)});
-            try mb.seqReset(ins.clk, .{ .signal = ins.sl, .kind = .sync_low }, &[_]Stmt{b.assign(rc, ins.d)});
-            try mb.seqReset(ins.clk, .{ .signal = ins.sh, .kind = .sync_high }, &[_]Stmt{b.assign(re, ins.d)});
+            _ = try mb.declareInputs(Inputs);
+            _ = try mb.declareOutputs(Outputs);
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rl = try top.input("rl", 1);
-    const rh = try top.input("rh", 1);
-    const sl = try top.input("sl", 1);
-    const sh = try top.input("sh", 1);
-    const d = try top.input("d", 4);
-    _ = try top.instantiate(R, "u_r", .{ .clk = clk, .rl = rl, .rh = rh, .sl = sl, .sh = sh, .d = d }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "always @(posedge clk or negedge rl) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "always @(posedge clk or posedge rh) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "always @(posedge clk) begin\n        if (!sl) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "always @(posedge clk) begin\n        if (sh) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "if (rh) begin") != null);
+    const a = try top.input("a", 1);
+    const y = try top.outputPort("y", 1);
+    try std.testing.expectError(error.UndrivenOutput, top.instantiate(Open, "u_open", .{ .a = a }, .{ .y = y }, .{}));
 }
 
-test "assertions emit guarded SVA with messages" {
+test "dead code elimination prunes unreachable logic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const A = struct {
-        pub const name = "asserting";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(4), b: Signal(4) };
-        pub const Outputs = struct { y: Signal(4) };
+    const Dead = struct {
+        pub const name = "dead_block";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
-            const y_r = try mb.reg("y_r", 4, 0);
-            try mb.assign(outs.y, y_r);
-            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &[_]Stmt{
-                b.assign(y_r, ins.a),
-                b.assert_(b.eq(ins.a, ins.b), "a must equal b"),
-                b.cover_(b.andAll(ins.a), "all ones seen"),
-            });
+            const dead_w = try mb.wire("dead_w", 1);
+            try mb.assign(dead_w, ins.a);
+            const dead_r = try mb.reg("dead_r", 1, 0);
+            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{b.assign(dead_r, ins.a)});
+            try mb.assign(outs.y, ins.a);
         }
     };
 
@@ -2382,41 +2947,131 @@ test "assertions emit guarded SVA with messages" {
     var top = try ModuleBuilder.init(alloc, &design, "top");
     const clk = try top.input("clk", 1);
     const rst = try top.input("rst_n", 1);
-    const a = try top.input("a", 4);
-    const b4 = try top.input("b", 4);
-    _ = try top.instantiate(A, "u_a", .{ .clk = clk, .rst_n = rst, .a = a, .b = b4 }, .{});
+    const a = try top.input("a", 1);
+    const y = try top.outputPort("y", 1);
+    _ = try top.instantiate(Dead, "u_dead", .{ .clk = clk, .rst_n = rst, .a = a }, .{ .y = y }, .{});
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "`ifdef JS_ASIC_ASSERT") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assert ((a == b)) else $error(\"a must equal b\");") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "cover ((&a));") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "`endif") != null);
+    const dead = design.findModule(Dead.name).?;
+    try std.testing.expect(dead.scope.find("dead_w").?.symbol().dead);
+    try std.testing.expect(dead.scope.find("dead_r").?.symbol().dead);
+    try std.testing.expectEqual(@as(usize, 1), dead.assigns.len);
+    try std.testing.expectEqual(@as(usize, 0), dead.processes.len);
 }
 
-test "fill replicates a bit vector" {
+test "resize truncates, zero-extends and sign-extends" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const F = struct {
-        pub const name = "filling";
-        pub const Inputs = struct { a: Signal(4) };
-        pub const Outputs = struct { x: Signal(16) };
+    var design = Design.init(alloc);
+    var mb = try ModuleBuilder.init(alloc, &design, "resize");
+    defer mb.deinit();
+    const b = mb.exprs();
+
+    const truncated = b.intern(b.resize(b.lit(8, 0xAB), 4));
+    try std.testing.expectEqual(@as(usize, 4), truncated.width);
+    try std.testing.expectEqual(@as(?u64, 0xB), truncated.known);
+
+    const zero_extended = b.intern(b.resize(b.lit(4, 0xF), 8));
+    try std.testing.expectEqual(@as(?u64, 0x0F), zero_extended.known);
+
+    const signed = b.sext(b.lit(4, 0xF), 8);
+    const sign_extended = b.intern(b.resize(signed, 16));
+    try std.testing.expectEqual(@as(?u64, 0xFFFF), sign_extended.known);
+}
+
+test "metadata registrations are carried on the module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Op = enum(u4) { NOP = 0, ADD = 1 };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "meta_top");
+    const clk = try top.input("clk", 1);
+    const rst = try top.input("rst_n", 1);
+    const a = try top.input("a", 1);
+    const y = try top.outputPort("y", 1);
+    const state = try top.reg("state", 2, 0);
+    try top.addEnumGroup("state", 2, &[_]EnumEntry{
+        .{ .name = "state_IDLE", .value = 0 },
+        .{ .name = "state_RUN", .value = 1 },
+    }, .{ .state = state.ref, .encoding = "binary", .reset = 0 });
+    try top.addEnumType("opcode", Op);
+    try top.addClockDomain(.{ .clk = clk, .rst_n = rst, .freq_hz = 120_000_000 });
+    try top.assign(y, a);
+    const mod = try top.finish();
+
+    try std.testing.expectEqual(@as(usize, 2), mod.meta.len);
+    try std.testing.expectEqualStrings("state", mod.meta[0].name);
+    try std.testing.expectEqual(@as(usize, 2), mod.meta[0].width);
+    try std.testing.expectEqual(@as(u64, 1), mod.meta[0].entries[1].value);
+    try std.testing.expectEqualStrings("binary", mod.meta[0].fsm.?.encoding);
+    try std.testing.expectEqual(@as(?u64, 0), mod.meta[0].fsm.?.reset);
+    try std.testing.expectEqual(state.ref.idx, mod.meta[0].fsm.?.state.idx);
+
+    try std.testing.expectEqualStrings("opcode", mod.meta[1].name);
+    try std.testing.expectEqual(@as(usize, 4), mod.meta[1].width);
+    try std.testing.expectEqualStrings("ADD", mod.meta[1].entries[1].name);
+    try std.testing.expect(mod.meta[1].fsm == null);
+
+    try std.testing.expectEqual(@as(usize, 1), mod.clocks.len);
+    try std.testing.expectEqualStrings("sys", mod.clocks[0].name);
+    try std.testing.expectEqual(@as(u64, 120_000_000), mod.clocks[0].freq_hz);
+}
+
+test "bundle declarations record member paths and widths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Bus = struct {
+        addr: Signal(8),
+        req: Signal(1),
+    };
+    const Frame = struct {
+        pub const type_name = "frame_t";
+        bus: Bus,
+        tag: Signal(2),
+    };
+    const Blk = struct {
+        pub const name = "bundle_meta";
+        pub const Inputs = struct { frame: Frame };
+        pub const Outputs = struct { out: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            try mb.assign(outs.x, b.fill(ins.a, 4));
+            const w = try mb.wireBundle(Frame, "w");
+            try mb.assign(w.bus.addr, ins.frame.bus.addr);
+            try mb.assign(w.bus.req, ins.frame.bus.req);
+            try mb.assign(w.tag, ins.frame.tag);
+            try mb.assign(outs.out, w.bus.req);
         }
     };
 
     var design = Design.init(alloc);
     var top = try ModuleBuilder.init(alloc, &design, "top");
-    const a = try top.input("a", 4);
-    _ = try top.instantiate(F, "u_f", .{ .a = a }, .{});
+    const in_frame = try top.wireBundle(Frame, "in_frame");
+    _ = try top.instantiate(Blk, "u_blk", .{ .frame = in_frame }, .{}, .{});
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign x = {4{a}};") != null);
+    const blk = design.findModule(Blk.name).?;
+    try std.testing.expectEqual(@as(usize, 2), blk.bundles.len);
+
+    const frame = blk.bundles[0];
+    try std.testing.expectEqualStrings("frame", frame.name);
+    try std.testing.expectEqualStrings("frame_t", frame.type_name);
+    try std.testing.expectEqual(@as(usize, 11), frame.width);
+    try std.testing.expectEqual(@as(usize, 3), frame.members.len);
+    try std.testing.expectEqualStrings("bus.addr", frame.members[0].path);
+    try std.testing.expectEqualStrings("bus.req", frame.members[1].path);
+    try std.testing.expectEqualStrings("tag", frame.members[2].path);
+    try std.testing.expectEqual(SymbolKind.input, frame.members[0].ref.kind());
+
+    const w = blk.bundles[1];
+    try std.testing.expectEqualStrings("w", w.name);
+    try std.testing.expectEqualStrings("frame_t", w.type_name);
+    try std.testing.expectEqual(SymbolKind.wire, w.members[0].ref.kind());
 }

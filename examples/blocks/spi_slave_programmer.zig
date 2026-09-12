@@ -1,6 +1,7 @@
 const std = @import("std");
 const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
+const verilog = js_asic.backend.verilog;
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;
@@ -39,58 +40,58 @@ pub const SpiSlaveProgrammerBlock = struct {
         const sclk_d = try mb.reg("sclk_d", 1, 0);
 
         const sclk_rise = b.and_(ins.prog_sclk.expr(), b.not(sclk_d.expr()));
-        const cs_idle = b.eq(ins.prog_cs_n.expr(), b.lit(1, 1));
+        const cs_idle = b.eq(ins.prog_cs_n.expr(), 1);
 
-        const is_8 = b.eq(bit_cnt.expr(), b.lit(6, 8));
-        const is_16 = b.eq(bit_cnt.expr(), b.lit(6, 16));
-        const is_48 = b.eq(bit_cnt.expr(), b.lit(6, 48));
+        const is_8 = b.eq(bit_cnt.expr(), 8);
+        const is_16 = b.eq(bit_cnt.expr(), 16);
+        const is_48 = b.eq(bit_cnt.expr(), 48);
 
-        const is_cmd_1 = b.eq(cmd_reg.expr(), b.lit(8, 1)); // WRITE_IRAM
-        const is_cmd_2 = b.eq(cmd_reg.expr(), b.lit(8, 2)); // START
-        const is_cmd_3 = b.eq(cmd_reg.expr(), b.lit(8, 3)); // STOP
+        const is_cmd_1 = b.eq(cmd_reg.expr(), 1); // WRITE_IRAM
+        const is_cmd_2 = b.eq(cmd_reg.expr(), 2); // START
+        const is_cmd_3 = b.eq(cmd_reg.expr(), 3); // STOP
 
         const rx_next = b.concat(.{ rx_shift.slice(30, 0), ins.prog_mosi });
-        const cnt_plus_1 = b.add(bit_cnt.expr(), b.lit(6, 1));
+        const cnt_plus_1 = b.add(bit_cnt.expr(), 1);
         const rx_low8 = rx_shift.slice(7, 0);
 
-        const stmts = &[_]Stmt{
-            b.assign(outs.host_we, b.lit(1, 0)),
-            b.assign(outs.ctrl_start, b.lit(1, 0)),
-            b.assign(outs.ctrl_stop, b.lit(1, 0)),
+        const stmts = &.{
+            b.assign(outs.host_we, 0),
+            b.assign(outs.ctrl_start, 0),
+            b.assign(outs.ctrl_stop, 0),
             b.assign(sclk_d, ins.prog_sclk.expr()),
 
-            b.when(cs_idle, &[_]Stmt{
-                b.assign(bit_cnt, b.lit(6, 0)),
-                b.assign(rx_shift, b.lit(32, 0)),
-                b.assign(cmd_reg, b.lit(8, 0)),
-            }, &[_]Stmt{
-                b.when(sclk_rise, &[_]Stmt{
+            b.when(cs_idle, &.{
+                b.assign(bit_cnt, 0),
+                b.assign(rx_shift, 0),
+                b.assign(cmd_reg, 0),
+            }, &.{
+                b.when(sclk_rise, &.{
                     b.assign(rx_shift, rx_next),
                     b.assign(bit_cnt, cnt_plus_1),
-                    b.when(is_8, &[_]Stmt{
+                    b.when(is_8, &.{
                         b.assign(cmd_reg, rx_low8),
-                        b.when(is_cmd_3, &[_]Stmt{
-                            b.assign(outs.ctrl_stop, b.lit(1, 1)),
-                            b.assign(bit_cnt, b.lit(6, 0)),
+                        b.when(is_cmd_3, &.{
+                            b.assign(outs.ctrl_stop, 1),
+                            b.assign(bit_cnt, 0),
                         }, &.{}),
-                    }, &[_]Stmt{
-                        b.when(is_16, &[_]Stmt{
-                            b.when(is_cmd_2, &[_]Stmt{
-                                b.assign(outs.ctrl_start, b.lit(1, 1)),
+                    }, &.{
+                        b.when(is_16, &.{
+                            b.when(is_cmd_2, &.{
+                                b.assign(outs.ctrl_start, 1),
                                 b.assign(outs.start_pc, rx_low8),
-                                b.assign(bit_cnt, b.lit(6, 0)),
-                            }, &[_]Stmt{
-                                b.when(is_cmd_1, &[_]Stmt{
+                                b.assign(bit_cnt, 0),
+                            }, &.{
+                                b.when(is_cmd_1, &.{
                                     b.assign(addr_reg, rx_low8),
                                 }, &.{}),
                             }),
-                        }, &[_]Stmt{
-                            b.when(is_48, &[_]Stmt{
-                                b.when(is_cmd_1, &[_]Stmt{
-                                    b.assign(outs.host_we, b.lit(1, 1)),
+                        }, &.{
+                            b.when(is_48, &.{
+                                b.when(is_cmd_1, &.{
+                                    b.assign(outs.host_we, 1),
                                     b.assign(outs.host_addr, addr_reg.expr()),
                                     b.assign(outs.host_wdata, rx_shift.expr()),
-                                    b.assign(bit_cnt, b.lit(6, 0)),
+                                    b.assign(bit_cnt, 0),
                                 }, &.{}),
                             }, &.{}),
                         }),
@@ -102,7 +103,7 @@ pub const SpiSlaveProgrammerBlock = struct {
 
         // MISO is not driven yet (read-back is a roadmap item); tie it low so
         // the port is always driven.
-        try mb.assignExpr(outs.prog_miso, b.lit(1, 0));
+        try mb.assignExpr(outs.prog_miso, 0);
     }
 };
 
@@ -126,11 +127,11 @@ test "two spi programmers share one module definition" {
             .prog_sclk = sclk,
             .prog_mosi = mosi,
             .prog_cs_n = cs_n,
-        }, .{});
+        }, .{}, .{});
     }
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
+    const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "module spi_slave_programmer"));
     try std.testing.expect(std.mem.indexOf(u8, v, "spi_slave_programmer u_spi0") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "spi_slave_programmer u_spi1") != null);

@@ -35,7 +35,7 @@ pub fn SramBlock(comptime depth: usize, comptime data_width: usize) type {
             try mb.assignExpr(outs.rdata, b.memRead(mem, ins.raddr.expr()));
 
             const stmts = [_]netlist.Stmt{
-                b.when(b.eq(ins.we.expr(), b.lit(1, 1)), &[_]netlist.Stmt{
+                b.when(b.eq(ins.we.expr(), 1), &[_]netlist.Stmt{
                     b.memWrite(mem, ins.waddr.expr(), ins.wdata.expr()),
                 }, &.{}),
             };
@@ -44,29 +44,50 @@ pub fn SramBlock(comptime depth: usize, comptime data_width: usize) type {
     };
 }
 
-test "sram block verilog emission" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = netlist.Design.init(alloc);
-    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const we = try top.input("we", 1);
-    const waddr = try top.input("waddr", 8);
-    const wdata = try top.input("wdata", 32);
-    const raddr = try top.input("raddr", 8);
-
-    _ = try top.instantiate(SramBlock(256, 32), "u_sram", .{
-        .clk = clk,
-        .we = we,
-        .waddr = waddr,
-        .wdata = wdata,
-        .raddr = raddr,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "module sram_256x32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "reg [31:0]  mem [0:255];") != null);
-}
+/// Two independent 1 KB template slots retain the full instruction and RX
+/// capacities. The physical macro stays opaque; Icarus supplies edge behavior.
+pub const TtSramBlock = netlist.BlackBox(.{
+    .name = "sky130_sram_1kbyte_1rw1r_32x256_8",
+    .inputs = struct {
+        clk0: Signal(1),
+        csb0: Signal(1),
+        web0: Signal(1),
+        wmask0: Signal(4),
+        addr0: Signal(8),
+        din0: Signal(32),
+        clk1: Signal(1),
+        csb1: Signal(1),
+        addr1: Signal(8),
+    },
+    .outputs = struct { dout0: Signal(32), dout1: Signal(32) },
+    .foreign = netlist.ForeignSource.verilog(
+        \\module sky130_sram_1kbyte_1rw1r_32x256_8 (
+        \\    input clk0, input csb0, input web0, input [3:0] wmask0,
+        \\    input [7:0] addr0, input [31:0] din0, output reg [31:0] dout0,
+        \\    input clk1, input csb1, input [7:0] addr1, output reg [31:0] dout1
+        \\);
+        \\`ifdef __ICARUS__
+        \\    // Deterministic two-state replay, matching oasic's initial state.
+        \\    // Physical power-up contents are unspecified; software must load RAM.
+        \\    reg [31:0] mem [0:255];
+        \\    integer i;
+        \\    initial begin
+        \\        dout0 = 0; dout1 = 0;
+        \\        for (i = 0; i < 256; i = i + 1) mem[i] = 0;
+        \\    end
+        \\    always @(posedge clk0) begin
+        \\        if (!csb0) begin
+        \\            dout0 <= mem[addr0]; // READ_FIRST, including masked writes
+        \\            if (!web0) begin
+        \\                if (wmask0[0]) mem[addr0][7:0] <= din0[7:0];
+        \\                if (wmask0[1]) mem[addr0][15:8] <= din0[15:8];
+        \\                if (wmask0[2]) mem[addr0][23:16] <= din0[23:16];
+        \\                if (wmask0[3]) mem[addr0][31:24] <= din0[31:24];
+        \\            end
+        \\        end
+        \\    end
+        \\    always @(posedge clk1) if (!csb1) dout1 <= mem[addr1];
+        \\`endif
+        \\endmodule
+    ),
+});

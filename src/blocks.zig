@@ -9,6 +9,7 @@ pub const edge_det = @import("blocks/edge_det.zig");
 pub const counter = @import("blocks/counter.zig");
 
 pub const SramBlock = sram.SramBlock;
+pub const TtSramBlock = sram.TtSramBlock;
 pub const FifoBlock = fifo.FifoBlock;
 pub const ShiftRegisterBlock = shift_reg.ShiftRegisterBlock;
 pub const ShiftDirection = shift_reg.ShiftDirection;

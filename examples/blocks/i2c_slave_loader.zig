@@ -1,6 +1,7 @@
 const std = @import("std");
 const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
+const verilog = js_asic.backend.verilog;
 const lib = js_asic.lib;
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
@@ -54,6 +55,10 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const reg_ptr = try mb.reg("reg_ptr", 8, 0);
             const tx_byte = try mb.reg("tx_byte", 8, 0);
             const tx_bit = try mb.reg("tx_bit", 4, 0);
+            const read_word = try mb.reg("read_word", 32, 0);
+            const reload_cnt = try mb.reg("reload_cnt", 2, 0);
+            const ack_wait = try mb.reg("ack_wait", 1, 0);
+            const commit_pending = try mb.reg("commit_pending", 1, 0);
 
             // Edge detections and bus conditions
             const scl_rise = b.and_(scl_d0.expr(), b.not(scl_d1.expr()));
@@ -65,109 +70,142 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const i2c_stop = b.and_(sda_rise, scl_d0.expr());
 
             const rx_next = b.concat(.{ rx_byte.slice(6, 0), sda_d0 });
-            const bit_cnt_inc = b.add(bit_cnt.expr(), b.lit(4, 1));
-            const bit_cnt_lt_8 = b.lt(bit_cnt.expr(), b.lit(4, 8));
-            const bit_cnt_is_8 = b.eq(bit_cnt.expr(), b.lit(4, 8));
+            const bit_cnt_inc = b.add(bit_cnt.expr(), 1);
+            const bit_cnt_lt_8 = b.lt(bit_cnt.expr(), 8);
+            const bit_cnt_is_8 = b.eq(bit_cnt.expr(), 8);
             const addr_match = b.eq(rx_byte.expr(), b.lit(8, @as(u64, device_addr) << 1));
             const read_match = b.eq(rx_byte.expr(), b.lit(8, (@as(u64, device_addr) << 1) | 1));
 
-            const is_reg_f0 = b.eq(reg_ptr.expr(), b.lit(8, 0xF0));
-            const is_reg_f2 = b.eq(reg_ptr.expr(), b.lit(8, 0xF2));
-            const reg_ptr_inc = b.add(reg_ptr.expr(), b.lit(8, 1));
+            const is_reg_f0 = b.eq(reg_ptr.expr(), 0xF0);
+            const is_reg_f2 = b.eq(reg_ptr.expr(), 0xF2);
+            const reg_ptr_inc = b.add(reg_ptr.expr(), 1);
 
-            const is_byte_0 = b.eq(byte_cnt.expr(), b.lit(2, 0));
-            const is_byte_1 = b.eq(byte_cnt.expr(), b.lit(2, 1));
-            const is_byte_2 = b.eq(byte_cnt.expr(), b.lit(2, 2));
-            const is_byte_3 = b.eq(byte_cnt.expr(), b.lit(2, 3));
+            const is_byte_0 = b.eq(byte_cnt.expr(), 0);
+            const is_byte_1 = b.eq(byte_cnt.expr(), 1);
+            const is_byte_2 = b.eq(byte_cnt.expr(), 2);
+            const is_byte_3 = b.eq(byte_cnt.expr(), 3);
 
             const word_b0 = b.concat(.{ rx_byte, rx_word.slice(15, 0) });
             const word_b1 = b.concat(.{ rx_word.slice(23, 16), rx_byte, rx_word.slice(7, 0) });
             const word_b2 = b.concat(.{ rx_word.slice(23, 8), rx_byte });
             const wdata_32 = b.concat(.{ rx_word, rx_byte });
 
-            const is_oe_0 = b.eq(outs.i2c_sda_oe.expr(), b.lit(1, 0));
-            const rx_bit0_is_1 = b.eq(rx_byte.bit(0), b.lit(1, 1));
-            const rx_bit1_is_1 = b.eq(rx_byte.bit(1), b.lit(1, 1));
+            const is_oe_0 = b.eq(outs.i2c_sda_oe.expr(), 0);
+            const rx_bit0_is_1 = b.eq(rx_byte.bit(0), 1);
+            const rx_bit1_is_1 = b.eq(rx_byte.bit(1), 1);
 
             const is_read = b.eq(fsm.current(), fsm.param(.read));
-            const tx_bit_lt_8 = b.lt(tx_bit.expr(), b.lit(4, 8));
+            const tx_bit_lt_8 = b.lt(tx_bit.expr(), 8);
 
             // Transmit engine: driven by SCL falling edges while in `.read`.
             const tx_stmts = [_]Stmt{
-                b.when(tx_bit_lt_8, &[_]Stmt{
+                b.when(tx_bit_lt_8, &.{
                     b.assign(outs.i2c_sda_out, tx_byte.bit(7)),
-                    b.assign(outs.i2c_sda_oe, b.lit(1, 1)),
+                    b.assign(outs.i2c_sda_oe, 1),
                     b.assign(tx_byte, b.concat(.{ tx_byte.slice(6, 0), b.lit(1, 0) })),
-                    b.assign(tx_bit, b.add(tx_bit.expr(), b.lit(4, 1))),
-                    // Preload the next word's address while sending the last byte.
-                    b.when(b.and_(is_byte_3, b.eq(tx_bit.expr(), b.lit(4, 0))), &[_]Stmt{
+                    b.assign(tx_bit, b.add(tx_bit.expr(), 1)),
+                    // Fetch the next word while its last byte is shifting; the
+                    // pointer commits only if the master ACKs the last byte.
+                    b.when(b.and_(is_byte_3, b.eq(tx_bit.expr(), 0)), &.{
                         b.assign(outs.host_raddr, reg_ptr_inc),
-                        b.assign(reg_ptr, reg_ptr_inc),
+                        b.assign(reload_cnt, 2),
                     }, &.{}),
-                }, &[_]Stmt{
-                    // ACK slot: release SDA, advance to the next byte.
-                    b.assign(outs.i2c_sda_oe, b.lit(1, 0)),
-                    b.assign(tx_bit, b.lit(4, 0)),
+                }, &.{
+                    // ACK slot (fall after the 8th bit): release SDA and load
+                    // the next byte. The master drives ACK/NACK on the 9th bit;
+                    // it is sampled on the following SCL rise.
+                    b.assign(outs.i2c_sda_oe, 0),
+                    b.assign(tx_bit, 0),
+                    b.assign(ack_wait, 1),
                     b.case_(byte_cnt.expr(), &.{
-                        b.caseBranch(0, &[_]Stmt{
-                            b.assign(tx_byte, ins.host_rdata.slice(23, 16)),
-                            b.assign(byte_cnt, b.lit(2, 1)),
+                        b.caseBranch(0, &.{
+                            b.assign(tx_byte, read_word.slice(23, 16)),
+                            b.assign(byte_cnt, 1),
                         }),
-                        b.caseBranch(1, &[_]Stmt{
-                            b.assign(tx_byte, ins.host_rdata.slice(15, 8)),
-                            b.assign(byte_cnt, b.lit(2, 2)),
+                        b.caseBranch(1, &.{
+                            b.assign(tx_byte, read_word.slice(15, 8)),
+                            b.assign(byte_cnt, 2),
                         }),
-                        b.caseBranch(2, &[_]Stmt{
-                            b.assign(tx_byte, ins.host_rdata.slice(7, 0)),
-                            b.assign(byte_cnt, b.lit(2, 3)),
+                        b.caseBranch(2, &.{
+                            b.assign(tx_byte, read_word.slice(7, 0)),
+                            b.assign(byte_cnt, 3),
                         }),
-                    }, &[_]Stmt{
-                        b.assign(tx_byte, ins.host_rdata.slice(31, 24)),
-                        b.assign(byte_cnt, b.lit(2, 0)),
+                    }, &.{
+                        // Whole word sent; stream the next word and remember
+                        // that this word commits only if the master ACKs.
+                        b.assign(tx_byte, read_word.slice(31, 24)),
+                        b.assign(byte_cnt, 0),
+                        b.assign(commit_pending, 1),
                     }),
                 }),
             };
 
-            const stmts = &[_]Stmt{
+            const stmts = &.{
                 // 1. Default pulse outputs and synchronizers
-                b.assign(outs.host_we, b.lit(1, 0)),
-                b.assign(outs.ctrl_start, b.lit(1, 0)),
-                b.assign(outs.ctrl_stop, b.lit(1, 0)),
+                b.assign(outs.host_we, 0),
+                b.assign(outs.ctrl_start, 0),
+                b.assign(outs.ctrl_stop, 0),
                 b.assign(scl_d0, ins.i2c_scl.expr()),
                 b.assign(scl_d1, scl_d0.expr()),
                 b.assign(sda_d0, ins.i2c_sda_in.expr()),
                 b.assign(sda_d1, sda_d0.expr()),
 
+                // Latch the next read word once the synchronous SRAM read for
+                // the prefetched address has landed (request + 2 clocks).
+                b.when(b.ne(reload_cnt.expr(), 0), &.{
+                    b.when(b.eq(reload_cnt.expr(), 1), &.{
+                        b.assign(read_word, ins.host_rdata),
+                    }, &.{}),
+                    b.assign(reload_cnt, b.sub(reload_cnt.expr(), 1)),
+                }, &.{}),
+
                 // 2. I2C bus framing (START / STOP conditions)
                 b.when(
                     i2c_stop,
-                    &[_]Stmt{
+                    &.{
                         fsm.goto(.idle),
-                        b.assign(outs.i2c_sda_oe, b.lit(1, 0)),
-                        b.assign(bit_cnt, b.lit(4, 0)),
-                        b.assign(byte_cnt, b.lit(2, 0)),
-                        b.assign(tx_bit, b.lit(4, 0)),
+                        b.assign(outs.i2c_sda_oe, 0),
+                        b.assign(bit_cnt, 0),
+                        b.assign(byte_cnt, 0),
+                        b.assign(tx_bit, 0),
+                        b.assign(ack_wait, 0),
+                        b.assign(commit_pending, 0),
                     },
-                    &[_]Stmt{
+                    &.{
                         b.when(
                             i2c_start,
-                            &[_]Stmt{
+                            &.{
                                 fsm.goto(.dev_addr), // STATE 1: DEV_ADDR
-                                b.assign(outs.i2c_sda_oe, b.lit(1, 0)),
-                                b.assign(bit_cnt, b.lit(4, 0)),
-                                b.assign(byte_cnt, b.lit(2, 0)),
-                                b.assign(tx_bit, b.lit(4, 0)),
+                                b.assign(outs.i2c_sda_oe, 0),
+                                b.assign(bit_cnt, 0),
+                                b.assign(byte_cnt, 0),
+                                b.assign(tx_bit, 0),
                                 // Make the read word available before it is needed.
                                 b.assign(outs.host_raddr, reg_ptr.expr()),
                             },
-                            &[_]Stmt{
+                            &.{
                                 // Shift received bits on SCL rising edges (write path).
                                 b.when(
                                     scl_rise,
-                                    &[_]Stmt{
-                                        b.when(b.and_(bit_cnt_lt_8, b.not(is_read)), &[_]Stmt{
+                                    &.{
+                                        b.when(b.and_(bit_cnt_lt_8, b.not(is_read)), &.{
                                             b.assign(rx_byte, rx_next),
                                             b.assign(bit_cnt, bit_cnt_inc),
+                                        }, &.{}),
+                                        // 9th rise in a read: sample the master's ACK/NACK.
+                                        b.when(b.and_(is_read, ack_wait.expr()), &.{
+                                            b.when(sda_d0.expr(), &.{
+                                                // NACK: stop; the read pointer stays put.
+                                                fsm.goto(.idle),
+                                                b.assign(ack_wait, 0),
+                                                b.assign(commit_pending, 0),
+                                            }, &.{
+                                                b.when(commit_pending.expr(), &.{
+                                                    b.assign(reg_ptr, reg_ptr_inc),
+                                                }, &.{}),
+                                                b.assign(ack_wait, 0),
+                                                b.assign(commit_pending, 0),
+                                            }),
                                         }, &.{}),
                                     },
                                     &.{},
@@ -175,79 +213,84 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                                 // SCL falling edge: transmit in read mode, otherwise receive/ACK.
                                 b.when(
                                     scl_fall,
-                                    &[_]Stmt{
-                                        b.when(is_read, &tx_stmts, &[_]Stmt{
-                                            b.when(bit_cnt_is_8, &[_]Stmt{
-                                                b.when(is_oe_0, &[_]Stmt{
+                                    &.{
+                                        b.when(is_read, &tx_stmts, &.{
+                                            b.when(bit_cnt_is_8, &.{
+                                                b.when(is_oe_0, &.{
                                                     // After the 8th data bit: evaluate & assert ACK
                                                     fsm.case_(&.{
-                                                        fsm.arm(.dev_addr, &[_]Stmt{
-                                                            b.when(addr_match, &[_]Stmt{
-                                                                b.assign(outs.i2c_sda_oe, b.lit(1, 1)),
-                                                                b.assign(outs.i2c_sda_out, b.lit(1, 0)),
-                                                            }, &[_]Stmt{
-                                                                b.when(read_match, &[_]Stmt{
-                                                                    b.assign(outs.i2c_sda_oe, b.lit(1, 1)),
-                                                                    b.assign(outs.i2c_sda_out, b.lit(1, 0)),
+                                                        fsm.arm(.dev_addr, &.{
+                                                            b.when(addr_match, &.{
+                                                                b.assign(outs.i2c_sda_oe, 1),
+                                                                b.assign(outs.i2c_sda_out, 0),
+                                                            }, &.{
+                                                                b.when(read_match, &.{
+                                                                    b.assign(outs.i2c_sda_oe, 1),
+                                                                    b.assign(outs.i2c_sda_out, 0),
                                                                     fsm.goto(.read),
+                                                                    // Latch the whole word once; bytes never mix
+                                                                    // across capture generations.
+                                                                    b.assign(read_word, ins.host_rdata),
                                                                     b.assign(tx_byte, ins.host_rdata.slice(31, 24)),
-                                                                    b.assign(tx_bit, b.lit(4, 0)),
-                                                                    b.assign(byte_cnt, b.lit(2, 0)),
-                                                                }, &[_]Stmt{
+                                                                    b.assign(tx_bit, 0),
+                                                                    b.assign(byte_cnt, 0),
+                                                                    b.assign(ack_wait, 0),
+                                                                    b.assign(commit_pending, 0),
+                                                                }, &.{
                                                                     fsm.goto(.idle),
                                                                 }),
                                                             }),
                                                         }),
-                                                        fsm.arm(.reg_addr, &[_]Stmt{
+                                                        fsm.arm(.reg_addr, &.{
                                                             b.assign(reg_ptr, rx_byte.expr()),
-                                                            b.assign(outs.i2c_sda_oe, b.lit(1, 1)),
-                                                            b.assign(outs.i2c_sda_out, b.lit(1, 0)),
-                                                            b.assign(byte_cnt, b.lit(2, 0)),
+                                                            b.assign(outs.i2c_sda_oe, 1),
+                                                            b.assign(outs.i2c_sda_out, 0),
+                                                            b.assign(byte_cnt, 0),
                                                         }),
-                                                        fsm.arm(.data, &[_]Stmt{
-                                                            b.when(is_reg_f0, &[_]Stmt{
-                                                                b.when(rx_bit0_is_1, &[_]Stmt{b.assign(outs.ctrl_start, b.lit(1, 1))}, &.{}),
-                                                                b.when(rx_bit1_is_1, &[_]Stmt{b.assign(outs.ctrl_stop, b.lit(1, 1))}, &.{}),
-                                                            }, &[_]Stmt{
-                                                                b.when(is_reg_f2, &[_]Stmt{
+                                                        fsm.arm(.data, &.{
+                                                            b.when(is_reg_f0, &.{
+                                                                b.when(rx_bit0_is_1, &.{b.assign(outs.ctrl_start, 1)}, &.{}),
+                                                                b.when(rx_bit1_is_1, &.{b.assign(outs.ctrl_stop, 1)}, &.{}),
+                                                            }, &.{
+                                                                b.when(is_reg_f2, &.{
                                                                     b.assign(outs.start_pc, rx_byte.expr()),
-                                                                }, &[_]Stmt{
+                                                                }, &.{
                                                                     // 32-bit word accumulation (4 bytes)
-                                                                    b.when(is_byte_0, &[_]Stmt{
+                                                                    b.when(is_byte_0, &.{
                                                                         b.assign(rx_word, word_b0),
-                                                                        b.assign(byte_cnt, b.lit(2, 1)),
-                                                                    }, &[_]Stmt{
-                                                                        b.when(is_byte_1, &[_]Stmt{
+                                                                        b.assign(byte_cnt, 1),
+                                                                    }, &.{
+                                                                        b.when(is_byte_1, &.{
                                                                             b.assign(rx_word, word_b1),
-                                                                            b.assign(byte_cnt, b.lit(2, 2)),
-                                                                        }, &[_]Stmt{
-                                                                            b.when(is_byte_2, &[_]Stmt{
+                                                                            b.assign(byte_cnt, 2),
+                                                                        }, &.{
+                                                                            b.when(is_byte_2, &.{
                                                                                 b.assign(rx_word, word_b2),
-                                                                                b.assign(byte_cnt, b.lit(2, 3)),
-                                                                            }, &[_]Stmt{
+                                                                                b.assign(byte_cnt, 3),
+                                                                            }, &.{
                                                                                 // Byte 3: 32-bit word complete
-                                                                                b.assign(outs.host_we, b.lit(1, 1)),
+                                                                                b.assign(outs.host_we, 1),
                                                                                 b.assign(outs.host_addr, reg_ptr.expr()),
                                                                                 b.assign(outs.host_wdata, wdata_32),
                                                                                 b.assign(reg_ptr, reg_ptr_inc),
-                                                                                b.assign(byte_cnt, b.lit(2, 0)),
+                                                                                b.assign(byte_cnt, 0),
                                                                             }),
                                                                         }),
                                                                     }),
                                                                 }),
                                                             }),
-                                                            b.assign(outs.i2c_sda_oe, b.lit(1, 1)),
-                                                            b.assign(outs.i2c_sda_out, b.lit(1, 0)),
+                                                            b.assign(outs.i2c_sda_oe, 1),
+                                                            b.assign(outs.i2c_sda_out, 0),
                                                         }),
                                                     }, &.{}),
-                                                }, &[_]Stmt{
+                                                }, &.{
                                                     // Falling edge of ACK pulse: release SDA, advance state
-                                                    b.assign(outs.i2c_sda_oe, b.lit(1, 0)),
-                                                    b.assign(bit_cnt, b.lit(4, 0)),
-                                                    b.when(b.eq(fsm.current(), fsm.param(.dev_addr)), &[_]Stmt{
+                                                    b.assign(outs.i2c_sda_oe, 0),
+                                                    b.assign(bit_cnt, 0),
+                                                    b.when(b.eq(fsm.current(), fsm.param(.dev_addr)), &.{
                                                         fsm.goto(.reg_addr), // DEV_ADDR -> REG_ADDR
-                                                    }, &[_]Stmt{
-                                                        b.when(b.eq(fsm.current(), fsm.param(.reg_addr)), &[_]Stmt{
+                                                    }, &.{
+                                                        b.when(b.eq(fsm.current(), fsm.param(.reg_addr)), &.{
                                                             fsm.goto(.data), // REG_ADDR -> DATA
                                                         }, &.{}),
                                                     }),
@@ -286,15 +329,16 @@ test "i2c slave loader emission" {
         .i2c_scl = scl,
         .i2c_sda_in = sda,
         .host_rdata = rdata,
-    }, .{});
+    }, .{}, .{});
     _ = try top.finish();
 
-    const v = try design.emitAll(alloc);
+    const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(std.mem.indexOf(u8, v, "module i2c_slave_loader_42") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "(rx_byte == 8'd132)") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "(rx_byte == 8'd133)") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [2:0] state_idle = 3'd0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "state <= state_dev_addr;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "i2c_sda_out <= tx_byte[7];") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "host_raddr <= (reg_ptr + 8'd1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "= (reg_ptr + 8'd1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "host_raddr <= tmp") != null);
 }

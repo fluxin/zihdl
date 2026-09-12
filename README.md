@@ -2,10 +2,24 @@
 
 A pure Zig (0.16.0) hardware construction library and synthesizable ASIC generator.
 
-- **`src/`**: Pure hardware construction library (`netlist.zig` core, `lib.zig` conveniences like FSMs and register helpers, `blocks.zig` elemental blocks).
-- **`examples/`**: Reference 120 MHz programmable protocol emulator ASIC with I2C/SPI loader, custom ISA, and testbenches.
+- **`src/`**: Pure hardware construction library (`netlist.zig` IR, `lib.zig` conveniences like FSMs, register helpers, `muxLookup` and structural temporal helpers, `blocks.zig` elemental blocks, `backend/` renderers and artifact writers). The IR is target-language neutral; HDL is only involved at export.
+- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the 120 MHz I2C/SPI-programmable ISA core with iverilog testbenches), shared example design blocks in `blocks/`, and the `z80/` scaffold for the FOSSi Z80 port (Track D).
 
 See [PLAN.md](PLAN.md) for full architecture details, roadmap, and next phases.
+
+## Artifacts
+
+`zig build run` writes:
+
+| File | Contents |
+|---|---|
+| `out/asic_core.v` | Verilog-2001 RTL (portable default target) |
+| `out/design.json` | Metadata sidecar: hierarchy, widths, FSMs, opcodes, clocks, assertions |
+| `out/asic_core.sdc` | Timing constraints for oasic's `timing/sta.odin` |
+
+Add `--sv` (`zig build run -- --sv`) to also emit `out/asic_core.sv`: the same
+design with `logic`, `always_comb`/`always_ff`, FSM `enum` typedefs and packed
+struct bundle ports.
 
 ## Quick Start
 
@@ -13,12 +27,16 @@ See [PLAN.md](PLAN.md) for full architecture details, roadmap, and next phases.
 # Run unit tests
 zig build test
 
-# Synthesize complete Verilog RTL (asic_core.v)
+# Synthesize complete RTL plus metadata and constraints
 zig build run
 
-# Lint with Verilator
-verilator --lint-only -Wno-MULTITOP asic_core.v
+# Lint the generated Verilog-2001 / SystemVerilog with Verilator
+zig build lint
+zig build lint-sv        # also emits out/asic_core.sv
 
-# Run end-to-end simulation
-iverilog -Wall -g2001 -o asic_core_iv asic_core.v examples/asic_i2c_tb.v && vvp asic_core_iv
+# Transitional behavioral regressions (iverilog; oasic's simulator replaces them)
+zig build sim
+
+# Lint and simulate every emitted artifact
+zig build verify
 ```

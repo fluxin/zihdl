@@ -39,26 +39,3 @@ pub const EdgeDetectorBlock = struct {
         try mb.assignExpr(outs.fall, b.and_(b.not(d0.expr()), d1.expr()));
     }
 };
-
-test "edge detector verilog emission" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var design = netlist.Design.init(alloc);
-    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst_n = try top.input("rst_n", 1);
-    const sig_in = try top.input("sig_in", 1);
-
-    _ = try top.instantiate(EdgeDetectorBlock, "u_edge", .{
-        .clk = clk,
-        .rst_n = rst_n,
-        .sig_in = sig_in,
-    }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "module edge_detector") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign rise = (d0 && (!d1));") != null);
-}

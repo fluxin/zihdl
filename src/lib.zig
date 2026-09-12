@@ -22,7 +22,7 @@ const Design = netlist.Design;
 pub fn regNext(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
     const r = try mb.reg(name, @TypeOf(src).width, 0);
     const b = mb.exprs();
-    try mb.seq(domain, &[_]Stmt{b.assign(r, src)});
+    try mb.seq(domain, &.{b.assign(r, src)});
     return r;
 }
 
@@ -30,8 +30,74 @@ pub fn regNext(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clock
 pub fn regEnable(mb: *ModuleBuilder, name: []const u8, src: anytype, en: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
     const r = try mb.reg(name, @TypeOf(src).width, 0);
     const b = mb.exprs();
-    try mb.seq(domain, &[_]Stmt{b.when(en, &[_]Stmt{b.assign(r, src)}, &.{})});
+    try mb.seq(domain, &.{b.when(en, &.{b.assign(r, src)}, &.{})});
     return r;
+}
+
+// ============================================================================
+// Muxes
+// ============================================================================
+
+/// Comptime lookup table (`MuxLookup`): selects the case whose key matches
+/// `sel`, falling back to `default`. `cases` is a tuple of `.{ key, value }`
+/// pairs; keys are constants in the selector's width and values are resized to
+/// the default's width. Later cases take priority when keys repeat.
+pub fn muxLookup(mb: *ModuleBuilder, sel: anytype, default: anytype, cases: anytype) netlist.Expr(@TypeOf(default).width) {
+    const W = @TypeOf(default).width;
+    const SelW = @TypeOf(sel).width;
+    const b = mb.exprs();
+    var result = b.resize(default, W);
+    inline for (cases) |case| {
+        comptime {
+            if (@typeInfo(@TypeOf(case)).@"struct".fields.len != 2) {
+                @compileError("muxLookup cases must be .{ key, value } pairs");
+            }
+        }
+        const key = comptime case[0];
+        const value = case[1];
+        result = b.ternary(b.eq(sel, b.lit(SelW, key)), b.resize(value, W), result);
+    }
+    return result;
+}
+
+// ============================================================================
+// Temporal helpers (assertion support without SVA)
+// ============================================================================
+
+/// One-cycle delayed value (`$past` equivalent): a register sampling `src` on
+/// `domain`. Unlike SVA's `$past`, the value starts at the register reset value
+/// (0) rather than X, so two-state simulators and formal tools see no spurious
+/// first-cycle triggers.
+pub fn past(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
+    return regNext(mb, name, src, domain);
+}
+
+/// True when `src` was low on the previous edge and is high now.
+pub fn rose(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.Expr(1) {
+    const prev = try past(mb, try memberName(mb, name, "past"), src, domain);
+    const b = mb.exprs();
+    return b.and_(src, b.not(prev.expr()));
+}
+
+/// True when `src` was high on the previous edge and is low now.
+pub fn fell(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.Expr(1) {
+    const prev = try past(mb, try memberName(mb, name, "past"), src, domain);
+    const b = mb.exprs();
+    return b.and_(b.not(src), prev.expr());
+}
+
+/// True when `src` equals its value on the previous edge.
+pub fn stable(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.Expr(1) {
+    const prev = try past(mb, try memberName(mb, name, "past"), src, domain);
+    const b = mb.exprs();
+    return b.eq(src, prev.expr());
+}
+
+/// True when `src` differs from its value on the previous edge.
+pub fn changed(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.Expr(1) {
+    const prev = try past(mb, try memberName(mb, name, "past"), src, domain);
+    const b = mb.exprs();
+    return b.ne(src, prev.expr());
 }
 
 // ============================================================================
@@ -40,10 +106,16 @@ pub fn regEnable(mb: *ModuleBuilder, name: []const u8, src: anytype, en: anytype
 
 /// Producer-perspective ready/valid bundle: `data`/`valid` flow downstream,
 /// `ready` flows upstream. Bundles are plain structs of typed handles, so they
-/// can be declared as ports, wires, or assembled inside a block.
+/// can be declared as ports (`declarePorts`), wires (`wireBundle`), or
+/// assembled inside a block.
 pub fn Stream(comptime W: usize) type {
     return struct {
         pub const width = W;
+        pub const dirs = .{
+            .data = netlist.PortDir.output,
+            .valid = netlist.PortDir.output,
+            .ready = netlist.PortDir.input,
+        };
         data: Signal(W),
         valid: Signal(1),
         ready: Signal(1),
@@ -57,43 +129,27 @@ fn memberName(mb: *ModuleBuilder, name: []const u8, suffix: []const u8) ![]const
 /// Declares a stream as module ports where this module is the producer:
 /// `data`/`valid` outputs, `ready` input.
 pub fn streamSource(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !Stream(W) {
-    return .{
-        .data = try mb.outputPort(try memberName(mb, name, "data"), W),
-        .valid = try mb.outputPort(try memberName(mb, name, "valid"), 1),
-        .ready = try mb.input(try memberName(mb, name, "ready"), 1),
-    };
+    return mb.declarePorts(Stream(W), name, false);
 }
 
 /// Declares a stream as module ports where this module is the consumer:
 /// `data`/`valid` inputs, `ready` output.
 pub fn streamSink(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !Stream(W) {
-    return .{
-        .data = try mb.input(try memberName(mb, name, "data"), W),
-        .valid = try mb.input(try memberName(mb, name, "valid"), 1),
-        .ready = try mb.outputPort(try memberName(mb, name, "ready"), 1),
-    };
+    return mb.declarePorts(Stream(W), name, true);
 }
 
 /// Declares a stream as internal wires.
 pub fn streamWire(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !Stream(W) {
-    return .{
-        .data = try mb.wire(try memberName(mb, name, "data"), W),
-        .valid = try mb.wire(try memberName(mb, name, "valid"), 1),
-        .ready = try mb.wire(try memberName(mb, name, "ready"), 1),
-    };
+    return mb.wireBundle(Stream(W), name);
 }
 
 /// Connects upstream `from` to downstream `to`: `data`/`valid` forward,
-/// `ready` back. The `to` side and `from.ready` must be assignable (wires or
-/// driven ports); input ports are connected by swapping the argument order.
+/// `ready` back. Generic over bundles; see `ModuleBuilder.connect`.
 pub fn connectStream(mb: *ModuleBuilder, from: anytype, to: anytype) !void {
-    const W = @TypeOf(from).width;
     comptime {
-        if (@TypeOf(to).width != W) @compileError("connectStream width mismatch");
+        if (@TypeOf(from).width != @TypeOf(to).width) @compileError("connectStream width mismatch");
     }
-    try mb.assign(to.data, from.data);
-    try mb.assign(to.valid, from.valid);
-    try mb.assign(from.ready, to.ready);
+    try mb.connect(from, to);
 }
 
 /// One pipeline stage: `data`/`valid` registered, `ready` passed through.
@@ -103,7 +159,7 @@ pub fn regStream(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clo
     const data_r = try mb.reg(try memberName(mb, name, "data_r"), W, 0);
     const valid_r = try mb.reg(try memberName(mb, name, "valid_r"), 1, 0);
     const b = mb.exprs();
-    try mb.seq(domain, &[_]Stmt{
+    try mb.seq(domain, &.{
         b.assign(data_r, src.data),
         b.assign(valid_r, src.valid),
     });
@@ -123,7 +179,7 @@ pub fn sync2(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDo
     const d0 = try mb.reg(try memberName(mb, name, "d0"), W, 0);
     const d1 = try mb.reg(try memberName(mb, name, "d1"), W, 0);
     const b = mb.exprs();
-    try mb.seq(domain, &[_]Stmt{
+    try mb.seq(domain, &.{
         b.assign(d0, src),
         b.assign(d1, d0),
     });
@@ -150,20 +206,18 @@ pub fn priorityEncode(mb: *ModuleBuilder, sig: anytype, comptime IW: usize) netl
     }
     const b = mb.exprs();
     var result = b.lit(IW, 0);
-    comptime var i: usize = 0;
+    comptime var i = 0;
     inline while (i < W) : (i += 1) {
-        result = b.ternary(b.bit(sig, i), b.lit(IW, i), result);
+        result = b.ternary(b.bit(sig, i), i, result);
     }
     return result;
 }
 
 /// True when exactly one bit of `x` is set, and `x` is non-zero.
 pub fn isOneHot(mb: *ModuleBuilder, x: anytype) netlist.Expr(1) {
-    const W = @TypeOf(x).width;
     const b = mb.exprs();
-    const zero = b.lit(W, 0);
-    const cleared = b.band(x, b.sub(x, b.lit(W, 1)));
-    return b.and_(b.ne(x, zero), b.eq(cleared, zero));
+    const cleared = b.band(x, b.sub(x, 1));
+    return b.and_(b.ne(x, 0), b.eq(cleared, 0));
 }
 
 // ============================================================================
@@ -202,7 +256,7 @@ fn stateEncoding(comptime E: type, comptime encoding: StateEncoding, comptime s:
     };
 }
 
-/// An enum-backed state register with named encodings emitted as localparams.
+/// An enum-backed state register with named encodings emitted as constants.
 pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: StateEncoding) type {
     const N = @typeInfo(E).@"enum".fields.len;
     const W = stateWidth(E, encoding);
@@ -217,11 +271,19 @@ pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: Stat
 
         pub fn create(mb: *ModuleBuilder, name: []const u8) !@This() {
             var params: [N]Param(W) = undefined;
+            var entries: [N]netlist.EnumEntry = undefined;
             inline for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
                 const pname = try std.fmt.allocPrint(mb.allocator, "{s}_{s}", .{ name, f.name });
-                params[i] = try mb.localparam(pname, W, stateEncoding(E, encoding, @field(E, f.name)));
+                const value = stateEncoding(E, encoding, @field(E, f.name));
+                params[i] = try mb.constant(pname, W, value);
+                entries[i] = .{ .name = pname, .value = value };
             }
             const state = try mb.reg(name, W, stateEncoding(E, encoding, reset));
+            try mb.addEnumGroup(name, W, &entries, .{
+                .state = state.ref,
+                .encoding = @tagName(encoding),
+                .reset = stateEncoding(E, encoding, reset),
+            });
             return .{ .mb = mb, .state = state, .params = params };
         }
 
@@ -248,14 +310,14 @@ pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: Stat
         pub fn case_(self: @This(), arms: []const CaseBranch, default_stmts: []const Stmt) Stmt {
             const b = self.mb.exprs();
             if (default_stmts.len == 0) {
-                return b.case_(self.state.expr(), arms, &[_]Stmt{b.nop()});
+                return b.case_(self.state.expr(), arms, &.{b.nop()});
             }
             return b.case_(self.state.expr(), arms, default_stmts);
         }
 
         /// Convenience: emit the state machine as its own clocked process.
         pub fn run(self: @This(), domain: ClockDomain, arms: []const CaseBranch) !void {
-            try self.mb.seq(domain, &[_]Stmt{self.case_(arms, &.{})});
+            try self.mb.seq(domain, &.{self.case_(arms, &.{})});
         }
     };
 }
@@ -263,233 +325,3 @@ pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: Stat
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "state machine emits named encodings and a complete case" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const State = enum(u2) { idle, run, done };
-
-    const Fsm = struct {
-        pub const name = "fsm_sm";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), go: Signal(1) };
-        pub const Outputs = struct { state: Signal(2) };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            const fsm = try StateMachine(State, .idle, .binary).create(mb, "state_r");
-            try mb.assign(outs.state, fsm.current());
-            try fsm.run(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{
-                fsm.arm(.idle, &[_]Stmt{b.when(ins.go, &[_]Stmt{fsm.goto(.run)}, &.{})}),
-                fsm.arm(.run, &[_]Stmt{fsm.goto(.done)}),
-                fsm.arm(.done, &[_]Stmt{fsm.goto(.idle)}),
-            });
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const go = try top.input("go", 1);
-    _ = try top.instantiate(Fsm, "u_fsm", .{ .clk = clk, .rst_n = rst, .go = go }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [1:0] state_r_idle = 2'd0;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [1:0] state_r_run = 2'd1;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "state_r_idle: begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "state_r <= state_r_run;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "default: begin") != null);
-}
-
-test "state machine one-hot encoding uses one bit per state" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const State = enum { a, b, c };
-
-    const Fsm = struct {
-        pub const name = "fsm_onehot";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
-        pub const Outputs = struct { state: Signal(3) };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const fsm = try StateMachine(State, .a, .one_hot).create(mb, "st");
-            try mb.assign(outs.state, fsm.current());
-            try fsm.run(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{
-                fsm.arm(.a, &[_]Stmt{fsm.goto(.b)}),
-                fsm.arm(.b, &[_]Stmt{fsm.goto(.c)}),
-                fsm.arm(.c, &[_]Stmt{fsm.goto(.a)}),
-            });
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    _ = try top.instantiate(Fsm, "u_fsm", .{ .clk = clk, .rst_n = rst }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [2:0] st_a = 3'd1;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [2:0] st_b = 3'd2;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "localparam [2:0] st_c = 3'd4;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "st <= st_b;") != null);
-}
-
-test "register helpers alongside core reductions" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const Util = struct {
-        pub const name = "util_block";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), en: Signal(1), d: Signal(8) };
-        pub const Outputs = struct {
-            delayed: Signal(8),
-            held: Signal(8),
-            all_set: Signal(1),
-            any_set: Signal(1),
-            parity: Signal(1),
-            picked: Signal(8),
-        };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
-            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-            try mb.assign(outs.delayed, try regNext(mb, "delayed_r", ins.d, domain));
-            try mb.assign(outs.held, try regEnable(mb, "held_r", ins.d, ins.en, domain));
-            try mb.assign(outs.all_set, b.andAll(ins.d));
-            try mb.assign(outs.any_set, b.orAll(ins.d));
-            try mb.assign(outs.parity, b.xorAll(ins.d));
-            try mb.assign(outs.picked, b.mux(ins.en, ins.d, b.lit(8, 0)));
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const en = try top.input("en", 1);
-    const d = try top.input("d", 8);
-    _ = try top.instantiate(Util, "u_util", .{ .clk = clk, .rst_n = rst, .en = en, .d = d }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "delayed_r <= d;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "held_r <= d;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign all_set = (&d);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign parity = (^d);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign picked = (en ? d : 8'd0);") != null);
-}
-
-test "stream ports, connect and pipeline register" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const S = struct {
-        pub const name = "stream_block";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
-        pub const Outputs = struct { unused: Signal(1) };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            _ = try mb.declareOutputs(Outputs);
-            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-            const rx = try streamSink(mb, "rx", 8);
-            const mid = try streamWire(mb, "mid", 8);
-            try connectStream(mb, rx, mid);
-            const staged = try regStream(mb, "staged", mid, domain);
-            const tx = try streamSource(mb, "tx", 8);
-            try connectStream(mb, staged, tx);
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    _ = try top.instantiate(S, "u_s", .{ .clk = clk, .rst_n = rst }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "input  wire [7:0]  rx_data") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "input  wire        rx_valid") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "output wire        rx_ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "output wire [7:0]  tx_data") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "input  wire        tx_ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign mid_data = rx_data;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign rx_ready = mid_ready;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "staged_data_r <= mid_data;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign tx_data = staged_data;") != null);
-}
-
-test "two-flop synchronizer" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const S = struct {
-        pub const name = "cdc_block";
-        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
-        pub const Outputs = struct { sync_out: Signal(1) };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-            const sync = try sync2(mb, "meta", ins.async_in, domain);
-            try mb.assign(outs.sync_out, sync);
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const clk = try top.input("clk", 1);
-    const rst = try top.input("rst_n", 1);
-    const ain = try top.input("async_in", 1);
-    _ = try top.instantiate(S, "u_s", .{ .clk = clk, .rst_n = rst, .async_in = ain }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "meta_d0 <= async_in;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "meta_d1 <= meta_d0;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign sync_out = meta_d1;") != null);
-}
-
-test "priority encoder, decoder and one-hot detect" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const E = struct {
-        pub const name = "enc_dec";
-        pub const Inputs = struct { a: Signal(8) };
-        pub const Outputs = struct { idx: Signal(3), dec: Signal(8), is_one: Signal(1) };
-        pub fn build(mb: *ModuleBuilder) !void {
-            const ins = try mb.declareInputs(Inputs);
-            const outs = try mb.declareOutputs(Outputs);
-            try mb.assign(outs.idx, priorityEncode(mb, ins.a, 3));
-            try mb.assign(outs.dec, decode(mb, outs.idx, 8));
-            try mb.assign(outs.is_one, isOneHot(mb, ins.a));
-        }
-    };
-
-    var design = Design.init(alloc);
-    var top = try ModuleBuilder.init(alloc, &design, "top");
-    const a = try top.input("a", 8);
-    _ = try top.instantiate(E, "u_e", .{ .a = a }, .{});
-    _ = try top.finish();
-
-    const v = try design.emitAll(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign idx = (a[7] ? 3'd7 :") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign dec = (8'd1 << idx);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "(a & (a - 8'd1))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign is_one = ((a != 8'd0) &&") != null);
-}

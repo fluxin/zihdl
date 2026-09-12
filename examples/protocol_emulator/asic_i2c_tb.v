@@ -103,7 +103,7 @@ module asic_i2c_tb;
     endtask
 
     initial begin
-        $dumpfile("asic_i2c_tb.vcd");
+        $dumpfile("out/asic_i2c_tb.vcd");
         $dumpvars(0, asic_i2c_tb);
 
         clk = 0;

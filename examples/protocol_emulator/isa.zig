@@ -1,74 +1,74 @@
 const std = @import("std");
 
 pub const Opcode = enum(u4) {
-    JMP  = 0, // Conditional jump
+    JMP = 0, // Conditional jump
     WAIT = 1, // Stall on cycles or pin condition
-    IN   = 2, // Shift bits from source into ISR
-    OUT  = 3, // Shift bits from OSR into target
+    IN = 2, // Shift bits from source into ISR
+    OUT = 3, // Shift bits from OSR into target
     PUSH = 4, // Push ISR into RX FIFO
     PULL = 5, // Pull word from TX FIFO into OSR
-    MOV  = 6, // Copy between registers
-    SET  = 7, // Immediately set destination value
+    MOV = 6, // Copy between registers
+    SET = 7, // Immediately set destination value
 };
 
 pub const JmpCondition = enum(u3) {
-    ALWAYS       = 0,
-    NOT_X        = 1, // Jump if X == 0
-    X_DEC        = 2, // Jump if X != 0; post-decrement X
-    NOT_Y        = 3, // Jump if Y == 0
-    Y_DEC        = 4, // Jump if Y != 0; post-decrement Y
-    PIN_HIGH     = 5, // Jump if selected input pin is 1
+    ALWAYS = 0,
+    NOT_X = 1, // Jump if X == 0
+    X_DEC = 2, // Jump if X != 0; post-decrement X
+    NOT_Y = 3, // Jump if Y == 0
+    Y_DEC = 4, // Jump if Y != 0; post-decrement Y
+    PIN_HIGH = 5, // Jump if selected input pin is 1
     OSR_NOT_FULL = 6, // Jump if OSR still has bits
 };
 
 pub const WaitCondition = enum(u2) {
-    CYCLES   = 0, // Stall for payload clock cycles
-    PIN_LOW  = 1, // Stall until selected pin == 0
+    CYCLES = 0, // Stall for payload clock cycles
+    PIN_LOW = 1, // Stall until selected pin == 0
     PIN_HIGH = 2, // Stall until selected pin == 1
 };
 
 pub const InSource = enum(u3) {
     PINS = 0,
-    X    = 1,
-    Y    = 2,
+    X = 1,
+    Y = 2,
     NULL = 3, // Shift in 0s
-    ISR  = 4,
-    OSR  = 5,
+    ISR = 4,
+    OSR = 5,
 };
 
 pub const OutTarget = enum(u3) {
-    PINS     = 0,
+    PINS = 0,
     PIN_DIRS = 1,
-    X        = 2,
-    Y        = 3,
-    NULL     = 4, // Discard bits
-    ISR      = 5,
-    EXEC     = 6, // Execute shifted bits as an instruction
+    X = 2,
+    Y = 3,
+    NULL = 4, // Discard bits
+    ISR = 5,
+    EXEC = 6, // Execute shifted bits as an instruction
 };
 
 pub const SetTarget = enum(u3) {
-    PINS     = 0, // Output pin values
+    PINS = 0, // Output pin values
     PIN_DIRS = 1, // Pin directions (0=input/Hi-Z, 1=output)
-    X        = 2, // Set low 5 bits of X
-    Y        = 3, // Set low 5 bits of Y
+    X = 2, // Set low 5 bits of X
+    Y = 3, // Set low 5 bits of Y
 };
 
 pub const MovDest = enum(u3) {
-    PINS     = 0,
+    PINS = 0,
     PIN_DIRS = 1,
-    X        = 2,
-    Y        = 3,
-    ISR      = 4,
-    OSR      = 5,
+    X = 2,
+    Y = 3,
+    ISR = 4,
+    OSR = 5,
 };
 
 pub const MovSrc = enum(u3) {
     PINS = 0,
-    X    = 1,
-    Y    = 2,
+    X = 1,
+    Y = 2,
     NULL = 3,
-    ISR  = 4,
-    OSR  = 5,
+    ISR = 4,
+    OSR = 5,
 };
 
 /// 32-bit General-Purpose Timing Instruction
@@ -76,9 +76,9 @@ pub const MovSrc = enum(u3) {
 /// [27:16] Parameter payload (12 bits)
 /// [15:0]  Delay (16 bits: 0 to 65,535 clock cycles at 120 MHz = 0 to 546 us)
 pub const Instruction = packed struct(u32) {
-    delay: u16,    // [15:0] Cycle stall after execution (8.33 ns resolution)
-    data:  u12,    // [27:16] Parameter payload
-    op:    Opcode, // [31:28] Primary opcode
+    delay: u16, // [15:0] Cycle stall after execution (8.33 ns resolution)
+    data: u12, // [27:16] Parameter payload
+    op: Opcode, // [31:28] Primary opcode
 
     pub fn toU32(self: Instruction) u32 {
         return @bitCast(self);

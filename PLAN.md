@@ -30,25 +30,37 @@ typed design directly into synthesizable Verilog-2001.
 
 ```
 src/                         <-- Generic hardware construction library (js_asic)
-├── root.zig                 # Module root: exports netlist, lib & blocks
-├── netlist.zig              # Core: Scope, Signal/Param/Mem, Expr/Stmt, ModuleBuilder, Design, Verilog backend
-├── lib.zig                  # Convenience layer: StateMachine, register helpers (built on the public builder API)
+├── root.zig                 # Module root: exports IR, lib, blocks & backends
+├── netlist.zig              # Core IR: Scope, Signal/Param/Mem, Expr/Stmt, ModuleBuilder, Design
+├── lib.zig                  # Convenience layer: StateMachine, register/stream helpers (built on the public builder API)
 ├── blocks.zig               # Elemental primitives export hub
-└── blocks/
-    ├── sram.zig             # Parameterized Dual-Port SRAM (1W1R)
-    ├── fifo.zig             # Parameterized Synchronous FIFO
-    ├── shift_reg.zig        # Parameterized Shift Register (SIPO / PISO)
-    ├── edge_det.zig         # 2-FF Synchronizer & Edge Detector
-    └── counter.zig          # Parameterized Up/Down Timer & Cycle Counter
+├── blocks/
+│   ├── sram.zig             # Parameterized Dual-Port SRAM (1W1R) + TT-SRAM foreign macro
+│   ├── fifo.zig             # Parameterized Synchronous FIFO
+│   ├── shift_reg.zig        # Parameterized Shift Register (SIPO / PISO)
+│   ├── edge_det.zig         # 2-FF Synchronizer & Edge Detector
+│   └── counter.zig          # Parameterized Up/Down Timer & Cycle Counter
+└── backend/
+    ├── render.zig           # Shared hoisting pre-pass + expression/statement text
+    ├── verilog.zig          # Verilog-2001 target: portable default
+    ├── systemverilog.zig    # SystemVerilog target: logic, always_*, enums, packed structs
+    ├── metadata.zig         # design.json sidecar (hierarchy, widths, FSMs, opcodes, assertions)
+    ├── sdc.zig              # SDC constraints (create_clock, uncertainty, false paths)
+    └── *_test.zig           # Emission conformance, golden, metadata and SDC tests
 
-examples/                    <-- Reference Programmable ASIC Design & Runner
-├── main.zig                 # Runner: elaborate root block, emit asic_core.v
-├── isa.zig                  # The 32-bit microcode instruction set
-├── timing_execution_unit.zig# 120 MHz microsequencer core executing the ISA
-├── i2c_slave_loader.zig     # I2C host programming controller (parameterized address)
-├── spi_slave_programmer.zig # SPI host programming controller
-├── programmable_asic.zig    # ProgrammableAsicBlock(loader, addr) top-level composition
-└── asic_i2c_tb.v            # iverilog simulation testbench
+examples/                    <-- Reference projects built on js_asic
+├── blocks/                  # Example design blocks shared across projects
+│   ├── blocks.zig           # `protocol_blocks` hub module
+│   ├── i2c_slave_loader.zig # I2C host programming controller (parameterized address)
+│   └── spi_slave_programmer.zig # SPI host programming controller
+├── protocol_emulator/       # Programmable protocol emulator ASIC (I2C/SPI + ISA)
+│   ├── main.zig             # Runner: elaborate root block, emit RTL + design.json + SDC
+│   ├── isa.zig              # The 32-bit microcode instruction set
+│   ├── timing_execution_unit.zig# 120 MHz microsequencer core executing the ISA
+│   ├── programmable_asic.zig# ProgrammableAsicBlock(loader, addr) top-level composition
+│   ├── asic_i2c_tb.v        # iverilog I2C programming testbench
+│   └── asic_rx_tb.v         # iverilog RX loopback testbench
+└── z80/                     # FOSSi Z80 clone (Track D; empty scaffold)
 ```
 
 ---
@@ -67,7 +79,7 @@ contract, never at shared memory or shared code.
 
 Composed flows:
 
-- **F1 — pre-layout functional:** `asic_core.v` → `sim/verilog_synth.odin` →
+- **F1 — pre-layout functional:** `out/asic_core.v` → `sim/verilog_synth.odin` →
   `Circuit_Model` → `formal/unroll.odin` → miter/BMC against an ISA-level
   reference or captured traces.
 - **F2 — synthesis equivalence:** RTL model ↔ post-synthesis cell model.
@@ -82,6 +94,21 @@ proofs and simulations run through `zig build sim` / `zig build verify`;
 interactive use, if ever needed, goes through a persistent `oasic --serve`
 worker rather than a `.so`.
 
+Integration performance (measured 2026-09-12): the loop is not IPC-bound.
+`zig build run` emits every artifact in ~30 ms, `oasic -synth -sta` parses and
+synthesizes the reference ASIC (3414 gates, 279 DFFs) and reports timing in
+~8 ms, and `zig build verify` (emit + both Verilator lints + three iverilog
+regressions) is ~280 ms warm. Process exec and file I/O are single-digit
+milliseconds, so a shared library would save under 1% while coupling the two
+languages through an ABI and putting Odin's runtime inside the js_asic process.
+If latency becomes a problem (much larger designs, many variants, interactive
+tools), the order is: (1) content-hash caching in `oasic` keyed by artifact +
+flags, (2) `oasic --serve` with warm caches over the same CLI/JSON schema,
+(3) batch mode and process fan-out, and only then (4) an optional exported C
+ABI for a concrete per-cycle co-simulation workload, behind a non-default build
+step. The file/JSON seam stays the contract either way: checker independence is
+a verification property, not just packaging.
+
 ### Simulation authority
 
 **oasic's Verilog simulator is the one semantic reference, and we develop it
@@ -89,7 +116,7 @@ rather than depending on `iverilog`.** The path is
 `parsers/verilog.odin` → `sim/verilog_synth.odin` → `sim/circuit_sim.odin`
 (eventually the compiled `codegen/circuit_model.odin` fast path). iverilog and
 Verilator remain lint/regression tools only; the checked-in
-`examples/asic_i2c_tb.v` is transitional until the F1-sim path replays it.
+`examples/protocol_emulator/asic_i2c_tb.v` is transitional until the F1-sim path replays it.
 
 oasic-side development required for this:
 
@@ -124,12 +151,13 @@ oasic-side development required for this:
    `asSigned` / `asUnsigned`, sign extension.
 3. **Memory modes.** `Mem(W)`: comb vs sync read, read-during-write behavior
    (read-first / write-first / no-change), byte enables, `$readmemh` init.
-4. **Parameters and symbolic constants.** Verilog `parameter` / `localparam`
-   symbols usable in expressions and `case` labels; named FSM encodings, opcode
-   IDs, register addresses. Keeps generated RTL readable and reduces per-value
+4. **Parameters and symbolic constants.** `moduleParam` / `constant` symbols
+   usable in expressions and `case` labels; named FSM encodings, opcode IDs,
+   register addresses. Keeps generated RTL readable and reduces per-value
    module duplication.
-5. **BlackBox / inline Verilog.** Foreign modules with a port schema, emitted
-   verbatim, for IO cells, PLLs, vendor macros and ROM initialization.
+5. **BlackBox / foreign source.** Language-tagged `ForeignSource` modules with
+   a port schema, emitted verbatim by the matching backend, for IO cells, PLLs,
+   vendor macros and ROM initialization.
 
 ### Phase 1 — authoring expressiveness (done)
 
@@ -141,40 +169,94 @@ oasic-side development required for this:
 7. **Register/utility library (done).** `regNext`, `regEnable`, `mux`,
    reductions (`andAll` / `orAll` / `xorAll`), replication (`fill`), priority
    encoder (`priorityEncode`), decoder (`decode`), one-hot detect (`isOneHot`),
-   dynamic bit-select (`bitDyn`), `Cat` via `concat`. A `muxLookup` helper can
-   be added when a design needs it.
+   dynamic bit-select (`bitDyn`), `Cat` via `concat`, and `muxLookup` (comptime
+   lookup table with a default and width resizing).
 8. **Bundles and interfaces (done).** `lib.Stream(W)` with `streamSource` /
    `streamSink` / `streamWire` port and wire helpers, `connectStream` (forward
-   data/valid, backward ready) and `regStream` pipeline stage. Larger bundles
-   follow the same pattern (plain structs of typed handles).
+   data/valid, backward ready) and `regStream` pipeline stage. Bundles are
+   recursive structs of `Signal(W)`: `declareInputs` / `declareOutputs` /
+   `declarePorts` flatten nested fields to `parent_child` ports, a bundle's
+   `dirs` decl (producer perspective) selects per-leaf direction and is flipped
+   for sink-side declarations, `wireBundle` creates bundle wires, and
+   `connect(src, dst)` bulk-wires whole bundles with direction-aware flow.
+   `instantiate` binds bundle ports recursively, generating wires for unbound
+   outputs.
 9. **Clock/reset semantics (done).** `Reset` with async/sync × active-low/high
    kinds (`seqReset`, `seqResetEnable`), clock enables (`seqEnable`), multiple
    clock domains (already per-process), and `sync2` two-flop synchronizer for
    CDC. An async FIFO is deferred to the Phase 3 IP library.
-10. **Assertions in the AST (done).** `assert_` / `assume_` / `cover_` emitted
-    as immediate SVA guarded by `` `ifdef JS_ASIC_ASSERT `` (opt-in, so the
-    portable Verilog-2001 baseline and lint remain clean). Neutral export to
-    oasic is a Phase 2 item.
+10. **Assertions (partial).** `assert_` / `assume_` / `cover_` are emitted as
+    immediate SVA guarded by `` `ifdef JS_ASIC_ASSERT `` (opt-in, so the
+    portable Verilog-2001 baseline and lint stay clean), and exported as text in
+    `design.json`. Temporal checks are expressed structurally, not as concurrent
+    SVA: `lib.past` / `rose` / `fell` / `stable` / `changed` lower to flops and
+    comparisons, so they work in every OSS tool (iverilog immediate-only,
+    Verilator's growing SVA subset, SymbiYosys immediate + `$past`). Full
+    sequence/property SVA remains an optional future target; the open front end
+    for it (Yosys Property IR, Verific-free) is still landing through 2026.
 
-### Phase 2 — backend targets and artifact contract
+### Phase 1.5 — parameterization, bundles, and elaboration passes (next)
 
-11. **SystemVerilog backend** behind a target option (`always_comb`/`always_ff`,
-    `logic`, enums/structs); Verilog-2001 remains the portable default.
-12. **Metadata sidecar** (`design.json`): hierarchy, widths, FSM encodings,
-    opcodes, assertions, for oasic's recovery and program views.
-13. **SDC export** for `timing/sta.odin`.
-14. **Build integration**: `zig build lint` (Verilator) done; `zig build sim`
-    (oasic simulator) and `zig build verify` (invoke oasic on the emitted
-    artifact) pending the oasic front end. Golden-file and
-    emission-determinism tests, plus `` `timescale `` emission and
-    `` `default_nettype `` restore.
+- **Verilog parameter emission and instance-site overrides (done).** A comptime
+  `Params` schema (`ParamSpec(W)` fields) on blocks and black boxes, with
+  `instantiate(..., .{ .NAME = value })` emitting `module #(.NAME(value)) inst
+  (...)`. Structure checks reject unknown parameters, widths over 64 bits and
+  out-of-range values; elaborated blocks verify the schema against their
+  `mb.parameter` declarations. Structural parameters (widths, port counts,
+  memory depth, FSM encodings) stay comptime/type-level as they are today; this
+  targets value parameters and external parameterized modules (the TT SRAM
+  macro, PLL/IO wrappers, vendor IP) that cannot be specialized by elaboration.
+  `BlackBox` gains a parameter list.
+- **Bundle ports and bulk connect (done).** Recursive
+  `declareInputs`/`declareOutputs` over nested structs of `Signal(W)`,
+  direction flip via `dirs` metadata, `wireBundle` and a direction-aware
+  `connect(src, dst)` for whole bundles, so `Stream` and future bus interfaces
+  can be block ports without hand wiring. `instantiate` binds nested bundles and
+  emits flattened port connections.
+- **Elaboration passes (done).** Structural CSE via hash-consing and
+  width/sign-aware constant folding run as expressions enter the IR
+  (`ExprBuilder.dup`); dead-code elimination prunes unreachable symbols,
+  assigns, and processes; the Verilog backend hoists subexpressions shared by
+  two or more statement roots into deterministic `tmpN` wires. `finish()`
+  rejects latch inference in comb processes, combinational loops, and undriven
+  outputs, while reset coverage is structural (each process resets exactly
+  what it assigns).
+
+### Phase 2 — backend targets and artifact contract (done)
+
+11. **SystemVerilog backend (done).** `backend.zig` exposes a `Target` hub;
+    `verilog.zig` remains the portable default. `systemverilog.zig` emits
+    `logic`, `always_comb`/`always_ff`, FSM `enum` typedefs and inline packed
+    structs for declared bundles (grouped instance connections, flat fallback
+    for mixed-direction bundles). Verilog-2001 rejects `.systemverilog` foreign
+    bodies; SystemVerilog accepts both languages.
+12. **Metadata sidecar (done).** `backend/metadata.zig` writes `design.json`
+    (`schema: js_asic.design/1`): module hierarchy, ports and signal widths,
+    parameters, memories (modes/init files), bundle shapes, FSM/opcode enum
+    groups, clock domains, and assertions with rendered expressions, for
+    oasic's recovery and program views.
+13. **SDC export (done).** `backend/sdc.zig` writes `asic_core.sdc`:
+    `create_clock` per registered clock domain (period from `freq_hz`), clock
+    uncertainty, and reset false paths for `timing/sta.odin`.
+14. **Build integration (done; oasic simulator swap pending).** `zig build run`
+    emits `asic_core.v` + `design.json` + `asic_core.sdc` (`--sv` adds
+    `asic_core.sv`); `zig build lint` / `lint-sv` / `sim` / `verify` wrap
+    Verilator and the transitional Icarus regressions. Every emitted module
+    carries `` `timescale `` and restores `` `default_nettype wire ``.
+    Embedded golden literals plus emit-twice byte-determinism tests pin the
+    emission shape. `zig build sim` / `verify` are repointed at oasic's
+    simulator and F1 flow once its Verilog front end lands.
 
 ### Phase 3 — IP library
 
 15. **Protocol blocks**: AXI4-Lite, UART, SPI master/target, I2C target, async
     FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers.
 16. **Testbench scaffolding**: emit TB skeletons and trace-driven checks
-    (execution stays external).
+    (execution stays external). First instance done: `examples/blocks/vector_tb.zig`
+    (a generated vector player with sampled-input checks) plus
+    `examples/protocol_emulator/loader_read_tb.zig`, emitted by `zig build tb`;
+    only the generic simulation harness (clock, bus combine, VCD, verdict glue)
+    is a tagged `ForeignSource`.
 17. **Optional structural export**: cell/netlist or a neutral IR to skip Verilog
     parsing for tighter round-trips.
 
@@ -196,18 +278,28 @@ simulation:
 # 1. Zig unit tests across library and example modules
 zig build test
 
-# 2. Synthesize complete ASIC Verilog netlist (asic_core.v)
+# 2. Synthesize complete ASIC Verilog netlist (out/asic_core.v, out/design.json,
+#    out/asic_core.sdc); add --sv for out/asic_core.sv
 zig build run
 
 # 3. Verilator multi-module RTL linting (0 warnings, 0 errors)
 zig build lint
+zig build lint-sv          # also emits and lints out/asic_core.sv
+
+# 3b. Enforced lint + behavioral simulation of every artifact
+zig build verify
 
 # 4. Icarus Verilog regressions (transitional; oasic's simulator replaces them)
+#    all generated artifacts (netlist, binaries, VCDs) land in out/
 #    a. host programs microcode over I2C -> 120 MHz GPIO execution
-iverilog -g2001 -o asic_i2c_iv asic_core.v examples/asic_i2c_tb.v && vvp asic_i2c_iv
+zig build sim
 #    b. full RX loopback: host loads IN microcode, core samples gpio_in into
 #       RX SRAM, host reads the word back over I2C read transactions (0x85)
-iverilog -g2001 -o asic_rx_iv asic_core.v examples/asic_rx_tb.v && vvp asic_rx_iv
+
+# The raw commands behind `zig build sim` / `verify`:
+iverilog -g2001 -o out/asic_i2c_iv out/asic_core.v examples/protocol_emulator/asic_i2c_tb.v && vvp out/asic_i2c_iv
+iverilog -g2001 -o out/asic_rx_iv out/asic_core.v examples/protocol_emulator/asic_rx_tb.v && vvp out/asic_rx_iv
+iverilog -g2012 -o out/asic_i2c_sv out/asic_core.sv examples/protocol_emulator/asic_i2c_tb.v && vvp out/asic_i2c_sv
 ```
 
 Planned build integration (Phase 2): `zig build sim` (js_asic → oasic simulator,
@@ -219,11 +311,11 @@ simulation claims above become enforced in CI rather than scripted.
 ## 5. Application Roadmap
 
 ### Track A — Physical layout & formal round-trip in `../oasic`
-1. **(done) Verilog front end → synthesis → placement → GDS.** `asic_core.v`
-   parses (4 modules), synthesizes (3455 gates, 278 DFFs), places
-   (0.400mm x 0.240mm), and exports GDSII:
+1. **(done) Verilog front end → synthesis → placement → GDS.**
+   `js_asic/out/asic_core.v` parses (4 modules), synthesizes (3455 gates,
+   278 DFFs), places (0.400mm x 0.240mm), and exports GDSII:
    ```bash
-   ./oasic -synth asic_core.v -synth-top programmable_asic_i2c_42 \
+   ./oasic -synth ../js_asic/out/asic_core.v -synth-top programmable_asic_i2c_42 \
            -sta --clock-mhz 120 --gds-out asic_core.gds
    ```
    Cross-project regressions live in `oasic`: `parsers/verilog_test.odin`,
@@ -248,7 +340,7 @@ simulation claims above become enforced in CI rather than scripted.
    streams four bytes per word MSB-first, ACKs each byte (master NACK ends the
    transfer), and advances the read pointer, with `host_raddr`/`host_rdata`
    wired to the RX SRAM.
-3. **Verification (done):** `examples/asic_rx_tb.v` programs `IN` microcode over
+3. **Verification (done):** `examples/protocol_emulator/asic_rx_tb.v` programs `IN` microcode over
    I2C, samples a constant `gpio_in = 4'h5`, and reads back `0x55555555` from
    the RX SRAM. The I2C write regression (`asic_i2c_tb.v`) still passes.
 
@@ -257,3 +349,24 @@ simulation claims above become enforced in CI rather than scripted.
 2. **USB 1.1 Low-Speed:** NRZI encoder, bit-stuffing, SE0 EOP and bus reset.
 3. **SPI master engine:** configurable CPOL/CPHA, baud divider.
 4. **JTAG TAP controller:** IEEE 1149.1 16-state TAP FSM.
+
+### Track D — FOSSi Z80 in js_asic (`examples/z80/`)
+
+1. **Reference:** [openz80](https://github.com/rejunity/z80-open-silicon)
+   (Apache-2.0): a silicon-proven Z80 clone built around Guy Hutchison's TV80
+   Verilog core, taped out through Tiny Tapeout/OpenROAD on SKY130, IHP SG13g2
+   and GF180, with ZEXALL/ZEXDOC as the correctness bar. Its bus interface and
+   40-pin DIP40 pinout define the behavioral contract to match.
+2. **Goal:** author the js_asic equivalent — a cycle-accurate Z80 core with the
+   full DIP40 bus (`M1`//`RFSH`, `/MREQ`, `/IORQ`, `/RD`, `/WR`, `/WAIT`,
+   `/INT`, `/NMI`, `/HALT`, `/BUSRQ`, `/BUSAK`), documented and undocumented
+   instruction semantics and flags, emitting RTL + `design.json` + SDC like any
+   other root design so oasic can run F1/F2/F3 against it.
+3. **Planned breakdown:** `examples/z80/` gets its own blocks module with the
+   datapath (8-bit ALU, register file incl. shadow registers, flags),
+   instruction decode + microcycle sequencer, and bus interface; a test
+   harness loads ZEXALL/ZEXDOC ROM images and replays them over the bus, first
+   under iverilog, later through oasic's F1 flow with trace comparison.
+4. **Milestones:** instruction subset in RTL → ZEXALL pass in simulation →
+   timing/pin-compatibility checks against the openz80 reference → oasic
+   equivalence and 120 MHz-class STA.

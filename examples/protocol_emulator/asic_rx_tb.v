@@ -143,7 +143,7 @@ module asic_rx_tb;
     reg [7:0] rd0, rd1, rd2, rd3;
 
     initial begin
-        $dumpfile("asic_rx_tb.vcd");
+        $dumpfile("out/asic_rx_tb.vcd");
         $dumpvars(0, asic_rx_tb);
 
         clk = 0;

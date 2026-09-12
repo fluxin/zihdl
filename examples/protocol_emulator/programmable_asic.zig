@@ -1,13 +1,16 @@
 const std = @import("std");
 const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
+const verilog = js_asic.backend.verilog;
 const Signal = netlist.Signal;
 const ClockDomain = netlist.ClockDomain;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const i2c_loader = @import("i2c_slave_loader.zig");
-const spi_loader = @import("spi_slave_programmer.zig");
+const blocks = @import("protocol_blocks");
+const i2c_loader = blocks.i2c_slave_loader;
+const spi_loader = blocks.spi_slave_programmer;
 const timing_core = @import("timing_execution_unit.zig");
+const isa = @import("isa.zig");
 
 pub const LoaderKind = enum {
     i2c,
@@ -60,6 +63,8 @@ pub fn ProgrammableAsicBlock(comptime loader: LoaderKind, comptime i2c_addr: u7)
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+            try mb.addClockDomain(domain);
+            try mb.addEnumType("opcode", isa.Opcode);
 
             // Internal interconnect
             const host_we = try mb.wire("host_we", 1);
@@ -95,10 +100,10 @@ pub fn ProgrammableAsicBlock(comptime loader: LoaderKind, comptime i2c_addr: u7)
                     .ctrl_start = ctrl_start,
                     .ctrl_stop = ctrl_stop,
                     .start_pc = start_pc,
-                });
+                }, .{});
             } else {
                 // The SPI programmer has no read path; park the RX read address.
-                try mb.assignExpr(host_raddr, b.lit(8, 0));
+                try mb.assignExpr(host_raddr, 0);
                 _ = try mb.instantiate(spi_loader.SpiSlaveProgrammerBlock, "u_spi_prog", .{
                     .clk = ins.clk,
                     .rst_n = ins.rst_n,
@@ -113,30 +118,47 @@ pub fn ProgrammableAsicBlock(comptime loader: LoaderKind, comptime i2c_addr: u7)
                     .ctrl_start = ctrl_start,
                     .ctrl_stop = ctrl_stop,
                     .start_pc = start_pc,
-                });
+                }, .{});
             }
 
-            // Generic dual-port SRAM (256x32 = 1KB), wired as instruction memory
-            _ = try mb.instantiate(js_asic.blocks.SramBlock(256, 32), "u_sram", .{
-                .clk = domain.clk,
-                .we = host_we,
-                .waddr = host_addr,
-                .wdata = host_wdata,
-                .raddr = core_pc,
+            const host_csb = try mb.wire("host_csb", 1);
+            const rx_csb = try mb.wire("rx_csb", 1);
+            const sram_selected = try mb.wire("sram_selected", 1);
+            const sram_mask = try mb.wire("sram_mask", 4);
+            try mb.assignExpr(host_csb, b.not(host_we.expr()));
+            try mb.assignExpr(rx_csb, b.not(rx_we.expr()));
+            try mb.assignExpr(sram_selected, 0);
+            try mb.assignExpr(sram_mask, 15);
+
+            // Two 1 KB template slots preserve 256 instruction words and 256 RX words.
+            _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_sram", .{
+                .clk0 = domain.clk,
+                .csb0 = host_csb,
+                .web0 = host_csb,
+                .wmask0 = sram_mask,
+                .addr0 = host_addr,
+                .din0 = host_wdata,
+                .clk1 = domain.clk,
+                .csb1 = sram_selected,
+                .addr1 = core_pc,
             }, .{
-                .rdata = inst_word,
-            });
+                .dout1 = inst_word,
+            }, .{});
 
             // RX sample buffer for the core's IN opcode (host reads it over I2C)
-            _ = try mb.instantiate(js_asic.blocks.SramBlock(256, 32), "u_rx_sram", .{
-                .clk = domain.clk,
-                .we = rx_we,
-                .waddr = rx_addr,
-                .wdata = rx_wdata,
-                .raddr = host_raddr,
+            _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_rx_sram", .{
+                .clk0 = domain.clk,
+                .csb0 = rx_csb,
+                .web0 = rx_csb,
+                .wmask0 = sram_mask,
+                .addr0 = rx_addr,
+                .din0 = rx_wdata,
+                .clk1 = domain.clk,
+                .csb1 = sram_selected,
+                .addr1 = host_raddr,
             }, .{
-                .rdata = host_rdata,
-            });
+                .dout1 = host_rdata,
+            }, .{});
 
             // 120 MHz timing sequencer core
             _ = try mb.instantiate(timing_core.TimingExecutionUnitBlock, "u_core", .{
@@ -155,7 +177,7 @@ pub fn ProgrammableAsicBlock(comptime loader: LoaderKind, comptime i2c_addr: u7)
                 .rx_we = rx_we,
                 .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,
-            });
+            }, .{});
         }
     };
 }
@@ -168,9 +190,9 @@ test "programmable asic block elaborates for i2c and spi" {
     inline for (.{ LoaderKind.i2c, LoaderKind.spi }) |kind| {
         var design = netlist.Design.init(alloc);
         _ = try design.elaborate(ProgrammableAsicBlock(kind, 0x42));
-        const v = try design.emitAll(alloc);
+        const v = try verilog.emitDesign(alloc, &design, .{});
         try std.testing.expect(std.mem.indexOf(u8, v, "module programmable_asic_") != null);
-        try std.testing.expect(std.mem.indexOf(u8, v, "module sram_256x32") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module timing_execution_unit") != null);
     }
 }
