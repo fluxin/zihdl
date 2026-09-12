@@ -125,6 +125,8 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const osr_src_cnt = b.ternary(b.eq(osr_cnt.expr(), 0), b.lit(6, 32), b.resize(osr_cnt.expr(), 6));
             const out_count_raw5 = b.ternary(b.eq(out_count_raw, 0), b.lit(5, 16), out_count_raw);
             const out_count = b.resize(out_count_raw5, 6);
+            // Low `out_count` bits of the source, the value OUT writes to X.
+            const out_mask = b.sub(b.shl(b.lit(32, 1), out_count_raw5), 1);
 
             // Branch resolution is combinational from the executing
             // instruction, so the fetch address redirects in the same cycle.
@@ -148,8 +150,13 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             );
             // Exactly the condition of the execute branch below. FIFO pops and
             // OSR autopull are gated by it so a held instruction (delayed,
-            // waiting, blocked or halted) can never consume stream data.
-            const executing = b.and_(running.expr(), b.not(hold_fetch));
+            // waiting, blocked or halted) can never consume stream data. A
+            // ctrl_start or ctrl_stop coincident with an OUT/PULL suppresses
+            // the execute as well, so control changes never drain the FIFO.
+            const executing = b.and_(
+                b.and_(running.expr(), b.not(hold_fetch)),
+                b.and_(b.not(ins.ctrl_start), b.not(ins.ctrl_stop)),
+            );
             const autopull = b.and_(b.and_(executing, is_out), b.eq(osr_cnt.expr(), 0));
             const fifo_pop = b.and_(executing, b.and_(b.not(fifo_empty), b.or_(autopull, is_pull)));
             const starved_out = b.and_(autopull, fifo_empty);
@@ -182,7 +189,10 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @intFromEnum(isa.SetTarget.Y))));
             const out_target_ok = b.or_(
                 b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.PINS))),
-                b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.X))),
+                b.or_(
+                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.X))),
+                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.NULL))),
+                ),
             );
             const out_ok = b.and_(is_out, b.and_(
                 out_target_ok,
@@ -254,8 +264,9 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                             b.when(b.lt(b.lit(5, 3), out_count_raw5), &.{b.sliceAssign(outs.pin_out, 3, 3, b.bit(osr_src, 3))}, &.{}),
                         }),
                         b.caseBranch(@intFromEnum(isa.OutTarget.X), &.{
-                            b.assign(x_reg, b.resize(osr_src, x_bits)),
+                            b.assign(x_reg, b.resize(b.band(osr_src, out_mask), x_bits)),
                         }),
+                        b.caseBranch(@intFromEnum(isa.OutTarget.NULL), &.{}),
                     }, &.{}),
                     b.assign(osr, b.shr(osr_src, out_count_raw5)),
                     b.assign(osr_cnt, b.sub(osr_src_cnt, out_count)),

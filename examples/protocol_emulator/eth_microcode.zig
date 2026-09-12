@@ -403,21 +403,31 @@ pub fn assembleZioPayload(alloc: std.mem.Allocator, payload: []const u8, opts: Z
     for (0..preamble_bytes) |i| raw[i] = preamble_octet;
     raw[preamble_bytes] = sfd_octet;
     @memcpy(raw[preamble_bytes + 1 ..], payload);
-    const frame_words = try packOctets(alloc, raw);
+    const data_words = try packOctets(alloc, raw);
+    // Header word: bit count minus one, so `JMP Y--` runs exactly N bits and
+    // stops before the zero padding of the last data word can leak out.
+    const stream = try alloc.alloc(u32, data_words.len + 1);
+    stream[0] = @intCast(levels.len / 2 - 1);
+    @memcpy(stream[1..], data_words);
+    alloc.free(data_words);
 
-    const program = try alloc.alloc(u32, 9);
-    program[0] = isa.out(.X, 1, 0).toU32();
-    program[1] = isa.movInv(.PINS, .X, zioDelayFor(half)).toU32();
-    program[2] = isa.mov(.PINS, .X, zioDelayFor(half - 2)).toU32();
-    program[3] = isa.jmp(.OSR_NOT_FULL, 0, 0).toU32();
-    program[4] = isa.waitCycles(0).toU32();
-    program[5] = isa.set(.PINS, 0, 0).toU32();
-    program[6] = isa.set(.PINS, 1, zioDelayFor(half)).toU32();
-    program[7] = isa.set(.PINS, 0, zioDelayFor(opts.nlp_period_cycles - half - 1)).toU32();
-    program[8] = isa.jmp(.ALWAYS, 6, 0).toU32();
+    const program = try alloc.alloc(u32, 13);
+    program[0] = isa.pull(false, 0).toU32();
+    program[1] = isa.mov(.Y, .OSR, 0).toU32();
+    program[2] = isa.out(.NULL, 16, 0).toU32();
+    program[3] = isa.out(.NULL, 16, 0).toU32();
+    program[4] = isa.out(.X, 1, 0).toU32();
+    program[5] = isa.movInv(.PINS, .X, zioDelayFor(half)).toU32();
+    program[6] = isa.mov(.PINS, .X, zioDelayFor(half - 2)).toU32();
+    program[7] = isa.jmp(.Y_DEC, 4, 0).toU32();
+    program[8] = isa.waitCycles(0).toU32();
+    program[9] = isa.set(.PINS, 0, 0).toU32();
+    program[10] = isa.set(.PINS, 1, zioDelayFor(half)).toU32();
+    program[11] = isa.set(.PINS, 0, zioDelayFor(opts.nlp_period_cycles - half - 1)).toU32();
+    program[12] = isa.jmp(.ALWAYS, 10, 0).toU32();
 
     return .{
-        .stream = frame_words,
+        .stream = stream,
         .program = program,
         .runs = runs,
         .frame_bits = @intCast(levels.len / 2),
@@ -432,13 +442,14 @@ test "zio payload encoder emits exact half-bit grid at 60 and 120 MHz" {
 
     inline for (.{ 3, 6 }) |half| {
         const frame = try assembleZioPayload(alloc, &.{ 0x00, 0xFF }, .{ .half_cycles = half, .nlp_period_cycles = 240 });
-        // 10 octets x 8 bits (7 preamble + SFD + 2 payload).
+        // Header word plus 10 octets x 8 bits (7 preamble + SFD + 2 payload).
         try std.testing.expectEqual(@as(u32, 80), frame.frame_bits);
-        try std.testing.expectEqual(@as(usize, 3), frame.stream.len);
+        try std.testing.expectEqual(@as(usize, 4), frame.stream.len);
+        try std.testing.expectEqual(@as(u32, 79), frame.stream[0]);
 
-        const out = isa.Instruction.fromU32(frame.program[0]);
-        const first = isa.Instruction.fromU32(frame.program[1]);
-        const second = isa.Instruction.fromU32(frame.program[2]);
+        const out = isa.Instruction.fromU32(frame.program[4]);
+        const first = isa.Instruction.fromU32(frame.program[5]);
+        const second = isa.Instruction.fromU32(frame.program[6]);
         try std.testing.expectEqual(isa.Opcode.OUT, out.op);
         try std.testing.expectEqual(isa.Opcode.MOV, first.op);
         try std.testing.expectEqual(isa.Opcode.MOV, second.op);
@@ -465,12 +476,14 @@ test "raw payload image packs octets little-endian in 32-bit FIFO words" {
     const alloc = arena.allocator();
 
     const frame = try assembleZioPayload(alloc, &.{0x80}, .{ .half_cycles = 3, .nlp_period_cycles = 240 });
-    // Word 0 holds preamble octets 0xAA,0xAA,0xAA,0xAA.
-    try std.testing.expectEqual(@as(u32, 0xAAAAAAAA), frame.stream[0]);
-    // Word 1 holds 0xAA,0xAA,0xAA,0xD5.
-    try std.testing.expectEqual(@as(u32, 0xD5AAAAAA), frame.stream[1]);
-    // Word 2 holds the payload 0x80.
-    try std.testing.expectEqual(@as(u32, 0x80), frame.stream[2]);
+    // Stream word 0 is the bit-count header (72 bits -> 71).
+    try std.testing.expectEqual(@as(u32, 71), frame.stream[0]);
+    // Word 1 holds preamble octets 0xAA,0xAA,0xAA,0xAA.
+    try std.testing.expectEqual(@as(u32, 0xAAAAAAAA), frame.stream[1]);
+    // Word 2 holds 0xAA,0xAA,0xAA,0xD5.
+    try std.testing.expectEqual(@as(u32, 0xD5AAAAAA), frame.stream[2]);
+    // Word 3 holds the payload 0x80.
+    try std.testing.expectEqual(@as(u32, 0x80), frame.stream[3]);
 }
 
 fn expectRun(run: Run, level: u1, halves: u32) !void {

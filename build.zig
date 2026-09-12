@@ -165,11 +165,29 @@ pub fn build(b: *std.Build) void {
     });
     const eth_tb_gen = b.addRunArtifact(eth_tb_exe);
 
-    const tb_step = b.step("tb", "Generate the loader read, partition, width and 10BASE-T testbenches from Zig");
+    // Integrated ZIO witness bundles (RTL, design.json, SDC, microcode,
+    // payload, harness, model-checked JSONL) for 60 and 120 MHz.
+    const zio_wit_exe = b.addExecutable(.{
+        .name = "js_asic_zio_witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/zio_witness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+                .{ .name = "protocol_blocks", .module = blocks_mod },
+            },
+        }),
+    });
+    const zio_wit_gen = b.addRunArtifact(zio_wit_exe);
+    zio_wit_gen.step.dependOn(&run_cmd.step);
+
+    const tb_step = b.step("tb", "Generate the loader read, partition, width, 10BASE-T and ZIO testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
     tb_step.dependOn(&part_tb_gen.step);
     tb_step.dependOn(&width_tb_gen.step);
     tb_step.dependOn(&eth_tb_gen.step);
+    tb_step.dependOn(&zio_wit_gen.step);
 
     // Lint the generated Verilog with Verilator. Depends on the run step, which
     // writes out/asic_core.v.
@@ -243,6 +261,28 @@ pub fn build(b: *std.Build) void {
     const eth_run = b.addSystemCommand(&.{ "vvp", "out/ethernet_10base_t_tb_iv" });
     eth_run.step.dependOn(&eth_compile.step);
 
+    // Integrated ZIO witnesses: compile and run each clock, then check the
+    // trace cycle by cycle against the interpreter model. The `inject` run
+    // proves the checker reports the exact failing cycle.
+    const zio_step = b.step("zio", "Generate, run and model-check the ZIO waveform witnesses");
+    inline for (.{ "60", "120" }) |tag| {
+        const compile = b.addSystemCommand(&.{
+            "iverilog",                      "-g2001",                       "-s",                              "zio_witness_tb", "-o",
+            "out/zio_asic_" ++ tag ++ "_iv", "out/zio_asic_" ++ tag ++ ".v", "out/zio_asic_" ++ tag ++ "_tb.v",
+        });
+        compile.step.dependOn(&zio_wit_gen.step);
+        const run = b.addSystemCommand(&.{ "vvp", "out/zio_asic_" ++ tag ++ "_iv" });
+        run.step.dependOn(&compile.step);
+        const check = b.addRunArtifact(zio_wit_exe);
+        check.addArgs(&.{ "convert", "out/zio_asic_" ++ tag ++ "_edges.txt", "out/zio_asic_" ++ tag ++ ".jsonl" });
+        check.step.dependOn(&run.step);
+        const fault = b.addRunArtifact(zio_wit_exe);
+        fault.addArgs(&.{ "convert", "out/zio_asic_" ++ tag ++ "_edges.txt", "out/zio_asic_" ++ tag ++ "_inject.jsonl", "3" });
+        fault.step.dependOn(&run.step);
+        zio_step.dependOn(&check.step);
+        zio_step.dependOn(&fault.step);
+    }
+
     const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
     sim_step.dependOn(&i2c_run.step);
     sim_step.dependOn(&rx_run.step);
@@ -252,6 +292,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&part_run.step);
     sim_step.dependOn(&width_run.step);
     sim_step.dependOn(&eth_run.step);
+    sim_step.dependOn(zio_step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
     verify_step.dependOn(&lint_cmd.step);
@@ -266,6 +307,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&part_run.step);
     verify_step.dependOn(&width_run.step);
     verify_step.dependOn(&eth_run.step);
+    verify_step.dependOn(zio_step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.
