@@ -143,6 +143,15 @@ pub fn mov(dest: MovDest, src: MovSrc, delay: u16) Instruction {
     return .{ .op = .MOV, .data = data_field, .delay = delay };
 }
 
+/// ZIO transfer extension: MOV with the source bit-inverted. Transfers stay
+/// protocol-agnostic; Manchester, NRZI and similar encoders select the level
+/// from the inverted or plain shift register bit. Data bit 6 is the invert
+/// flag (`inst[22]`); bits 7..11 of the 12-bit field stay reserved.
+pub fn movInv(dest: MovDest, src: MovSrc, delay: u16) Instruction {
+    const data_field: u12 = (@as(u12, @intFromEnum(dest)) << 3) | @as(u12, @intFromEnum(src)) | (@as(u12, 1) << 6);
+    return .{ .op = .MOV, .data = data_field, .delay = delay };
+}
+
 test "isa instruction encoding" {
     const inst = set(.PIN_DIRS, 0b0011, 150);
     try std.testing.expectEqual(Opcode.SET, inst.op);

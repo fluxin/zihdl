@@ -98,4 +98,6 @@ test {
     _ = @import("width_tb.zig");
     _ = @import("ethernet_10base_t.zig");
     _ = @import("ethernet_10base_t_tb.zig");
+    _ = @import("eth_microcode.zig");
+    _ = @import("zio_timing_unit.zig");
 }
