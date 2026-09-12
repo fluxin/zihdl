@@ -117,8 +117,25 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const tb_gen = b.addRunArtifact(tb_exe);
-    const tb_step = b.step("tb", "Generate the loader read testbench from Zig");
+
+    // Partition testbench generator: reference-model vectors for the shared
+    // 256x32 macro partition (arbiter, skid, ring, status).
+    const part_tb_exe = b.addExecutable(.{
+        .name = "js_asic_partition_tbgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/partition_tb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+                .{ .name = "protocol_blocks", .module = blocks_mod },
+            },
+        }),
+    });
+    const part_tb_gen = b.addRunArtifact(part_tb_exe);
+    const tb_step = b.step("tb", "Generate the loader read and partition testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
+    tb_step.dependOn(&part_tb_gen.step);
 
     // Lint the generated Verilog with Verilator. Depends on the run step, which
     // writes out/asic_core.v.
@@ -148,6 +165,19 @@ pub fn build(b: *std.Build) void {
     const rx_run = b.addSystemCommand(&.{ "vvp", "out/asic_rx_iv" });
     rx_run.step.dependOn(&rx_compile.step);
 
+    // A/B regressions: the same I2C and RX fixtures run against the historical
+    // two-macro composition emitted alongside the default single-macro build.
+    const split_lint_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/asic_core_split.v" });
+    split_lint_cmd.step.dependOn(&run_cmd.step);
+    const i2c_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_split_iv", "out/asic_core_split.v", "examples/protocol_emulator/asic_i2c_tb.v" });
+    i2c_split_compile.step.dependOn(&run_cmd.step);
+    const i2c_split_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_split_iv" });
+    i2c_split_run.step.dependOn(&i2c_split_compile.step);
+    const rx_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_split_iv", "out/asic_core_split.v", "examples/protocol_emulator/asic_rx_tb.v" });
+    rx_split_compile.step.dependOn(&run_cmd.step);
+    const rx_split_run = b.addSystemCommand(&.{ "vvp", "out/asic_rx_split_iv" });
+    rx_split_run.step.dependOn(&rx_split_compile.step);
+
     const sv_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-o", "out/asic_i2c_sv", "out/asic_core.sv", "examples/protocol_emulator/asic_i2c_tb.v" });
     sv_compile.step.dependOn(&sv_cmd.step);
     const sv_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_sv" });
@@ -160,18 +190,32 @@ pub fn build(b: *std.Build) void {
     const read_run = b.addSystemCommand(&.{ "vvp", "out/loader_read_iv" });
     read_run.step.dependOn(&read_compile.step);
 
+    // Partition testbench: reference-model vectors drive the shared-macro
+    // arbiter, skid buffer, capture ring and status words.
+    const part_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "partition_tb_harness", "-o", "out/partition_tb_iv", "out/partition_tb.v" });
+    part_compile.step.dependOn(&part_tb_gen.step);
+    const part_run = b.addSystemCommand(&.{ "vvp", "out/partition_tb_iv" });
+    part_run.step.dependOn(&part_compile.step);
+
     const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
     sim_step.dependOn(&i2c_run.step);
     sim_step.dependOn(&rx_run.step);
+    sim_step.dependOn(&i2c_split_run.step);
+    sim_step.dependOn(&rx_split_run.step);
     sim_step.dependOn(&read_run.step);
+    sim_step.dependOn(&part_run.step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
     verify_step.dependOn(&lint_cmd.step);
     verify_step.dependOn(&lint_sv_cmd.step);
+    verify_step.dependOn(&split_lint_cmd.step);
     verify_step.dependOn(&i2c_run.step);
     verify_step.dependOn(&rx_run.step);
     verify_step.dependOn(&sv_run.step);
+    verify_step.dependOn(&i2c_split_run.step);
+    verify_step.dependOn(&rx_split_run.step);
     verify_step.dependOn(&read_run.step);
+    verify_step.dependOn(&part_run.step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

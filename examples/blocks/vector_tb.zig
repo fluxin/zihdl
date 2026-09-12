@@ -91,3 +91,147 @@ pub fn VectorPlayer(comptime init_file: []const u8, comptime depth: usize) type 
         }
     };
 }
+
+/// One cycle of the partition testbench: drives the host bus plus a simulated
+/// core request, and (when `expect_valid`) compares every partition output
+/// against the reference model in `partition_tb.zig`. The 256-bit record is
+/// packed LSB-first.
+pub const PartitionVector = struct {
+    host_wdata: u32 = 0,
+    host_addr: u8 = 0,
+    host_raddr: u8 = 0,
+    core_pc: u8 = 0,
+    core_running: u1 = 0,
+    rx_we: u1 = 0,
+    rx_wdata: u32 = 0,
+    host_we: u1 = 0,
+    host_req: u1 = 0,
+    expect_valid: u1 = 1,
+    exp_host_ack: u1 = 0,
+    exp_host_rvalid: u1 = 0,
+    exp_host_rdata: u32 = 0,
+    exp_prog_reject: u1 = 0,
+    exp_pc_oob: u1 = 0,
+    exp_capture_seq: u16 = 0,
+    exp_capture_lost: u16 = 0,
+    exp_inst_word: u32 = 0,
+
+    pub fn pack(self: PartitionVector) u256 {
+        var word: u256 = self.host_wdata;
+        word |= @as(u256, self.host_addr) << 32;
+        word |= @as(u256, self.host_raddr) << 40;
+        word |= @as(u256, self.core_pc) << 48;
+        word |= @as(u256, self.core_running) << 56;
+        word |= @as(u256, self.rx_we) << 57;
+        word |= @as(u256, self.rx_wdata) << 58;
+        word |= @as(u256, self.host_we) << 90;
+        word |= @as(u256, self.host_req) << 91;
+        word |= @as(u256, self.expect_valid) << 92;
+        word |= @as(u256, self.exp_host_ack) << 93;
+        word |= @as(u256, self.exp_host_rvalid) << 94;
+        word |= @as(u256, self.exp_host_rdata) << 95;
+        word |= @as(u256, self.exp_prog_reject) << 127;
+        word |= @as(u256, self.exp_pc_oob) << 128;
+        word |= @as(u256, self.exp_capture_seq) << 129;
+        word |= @as(u256, self.exp_capture_lost) << 145;
+        word |= @as(u256, self.exp_inst_word) << 161;
+        return word;
+    }
+};
+
+/// Plays a `depth`-cycle partition stimulus image and reports any mismatch
+/// against the reference model baked into the image. The last image word is
+/// control data: `[31:0] = cycles`, the number of valid vectors.
+pub fn PartitionPlayer(comptime init_file: []const u8, comptime depth: usize) type {
+    const addr_w = std.math.log2_int_ceil(usize, depth);
+    return struct {
+        pub const name = "tb_partition_player";
+        pub const Inputs = struct {
+            clk: Signal(1),
+            rst_n: Signal(1),
+            host_ack: Signal(1),
+            host_rvalid: Signal(1),
+            host_rdata: Signal(32),
+            prog_reject: Signal(1),
+            pc_oob: Signal(1),
+            capture_seq: Signal(16),
+            capture_lost: Signal(16),
+            inst_word: Signal(32),
+        };
+        pub const Outputs = struct {
+            core_running: Signal(1),
+            core_pc: Signal(8),
+            rx_we: Signal(1),
+            rx_wdata: Signal(32),
+            host_we: Signal(1),
+            host_addr: Signal(8),
+            host_wdata: Signal(32),
+            host_req: Signal(1),
+            host_raddr: Signal(8),
+            done: Signal(1),
+            fail: Signal(1),
+            fail_cycle: Signal(addr_w),
+        };
+
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            const stim = try mb.mem(256, "stim", depth, .{ .init_file = init_file });
+            const addr = try mb.reg("addr", addr_w, 0);
+            const fail_r = try mb.reg("fail_r", 1, 0);
+            const fail_cycle_r = try mb.reg("fail_cycle_r", addr_w, 0);
+
+            const word = b.memRead(stim, addr.expr());
+            const control = b.memRead(stim, b.lit(addr_w, depth - 1));
+            const cycles = b.trunc(control, 32);
+
+            try mb.assign(outs.host_wdata, b.trunc(word, 32));
+            try mb.assign(outs.host_addr, b.slice(word, 39, 32));
+            try mb.assign(outs.host_raddr, b.slice(word, 47, 40));
+            try mb.assign(outs.core_pc, b.slice(word, 55, 48));
+            try mb.assign(outs.core_running, b.bit(word, 56));
+            try mb.assign(outs.rx_we, b.bit(word, 57));
+            try mb.assign(outs.rx_wdata, b.slice(word, 89, 58));
+            try mb.assign(outs.host_we, b.bit(word, 90));
+            try mb.assign(outs.host_req, b.bit(word, 91));
+
+            const expect = b.bit(word, 92);
+            const bad_ack = b.and_(expect, b.ne(ins.host_ack.expr(), b.bit(word, 93)));
+            const bad_rvalid = b.and_(expect, b.ne(ins.host_rvalid.expr(), b.bit(word, 94)));
+            const bad_rdata = b.and_(expect, b.ne(ins.host_rdata.expr(), b.slice(word, 126, 95)));
+            const bad_reject = b.and_(expect, b.ne(ins.prog_reject.expr(), b.bit(word, 127)));
+            const bad_oob = b.and_(expect, b.ne(ins.pc_oob.expr(), b.bit(word, 128)));
+            const bad_seq = b.and_(expect, b.ne(ins.capture_seq.expr(), b.slice(word, 144, 129)));
+            const bad_lost = b.and_(expect, b.ne(ins.capture_lost.expr(), b.slice(word, 160, 145)));
+            const bad_inst = b.and_(expect, b.ne(ins.inst_word.expr(), b.slice(word, 192, 161)));
+            const bad = b.or_(
+                bad_ack,
+                b.or_(
+                    bad_rvalid,
+                    b.or_(
+                        bad_rdata,
+                        b.or_(
+                            bad_reject,
+                            b.or_(bad_oob, b.or_(bad_seq, b.or_(bad_lost, bad_inst))),
+                        ),
+                    ),
+                ),
+            );
+
+            try mb.assign(outs.fail, b.or_(fail_r.expr(), bad));
+            try mb.assign(outs.fail_cycle, fail_cycle_r.expr());
+            try mb.assign(outs.done, b.eq(addr.expr(), b.sub(cycles, 1)));
+
+            const last = b.sub(cycles, 1);
+            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{
+                b.when(bad, &.{
+                    b.when(b.eq(fail_r.expr(), 0), &.{b.assign(fail_cycle_r, addr.expr())}, &.{}),
+                    b.assign(fail_r, 1),
+                }, &.{}),
+                b.when(b.lt(addr.expr(), last), &.{b.assign(addr, b.add(addr.expr(), 1))}, &.{}),
+            });
+        }
+    };
+}

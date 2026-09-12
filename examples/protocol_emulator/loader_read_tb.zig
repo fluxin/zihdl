@@ -243,12 +243,17 @@ const LoaderReadTb = struct {
     pub fn build(mb: *ModuleBuilder) !void {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
+        const b = mb.exprs();
 
         const scl_w = try mb.wire("scl_w", 1);
         const sda_low_w = try mb.wire("sda_low_w", 1);
         const sda_oe_w = try mb.wire("sda_oe_w", 1);
         const host_w = try mb.wire("host_w", 32);
         const raddr_w = try mb.wire("raddr_w", 8);
+        const host_we_w = try mb.wire("host_we_w", 1);
+        const host_req_w = try mb.wire("host_req_w", 1);
+        const host_ack_w = try mb.wire("host_ack_w", 1);
+        const host_rvalid_w = try mb.wire("host_rvalid_w", 1);
 
         _ = try mb.instantiate(loader.I2cSlaveLoaderBlock(0x42), "u_dut", .{
             .clk = ins.clk,
@@ -256,9 +261,13 @@ const LoaderReadTb = struct {
             .i2c_scl = scl_w,
             .i2c_sda_in = ins.sda_in,
             .host_rdata = host_w,
+            .host_ack = host_ack_w,
+            .host_rvalid = host_rvalid_w,
         }, .{
             .i2c_sda_out = outs.dut_sda_out,
             .i2c_sda_oe = outs.dut_sda_oe,
+            .host_we = host_we_w,
+            .host_req = host_req_w,
             .host_raddr = raddr_w,
         }, .{});
 
@@ -280,6 +289,24 @@ const LoaderReadTb = struct {
         try mb.assign(outs.scl, scl_w);
         try mb.assign(outs.sda_low, sda_low_w);
         try mb.assign(outs.sda_oe, sda_oe_w);
+
+        // Host-side responder: program writes ack immediately, capture reads
+        // return valid one cycle after the request (the partition's registered
+        // macro output), which reproduces the Stage A two-clock reload latency.
+        const rd_served = try mb.reg("rd_served", 1, 0);
+        const host_rvalid_r = try mb.reg("host_rvalid_r", 1, 0);
+        try mb.assign(host_ack_w, host_we_w);
+        try mb.assign(host_rvalid_w, host_rvalid_r.expr());
+        const rd_active = b.and_(host_req_w.expr(), b.not(rd_served.expr()));
+        try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{
+            b.assign(host_rvalid_r, rd_active),
+            b.when(rd_active, &.{
+                b.assign(rd_served, 1),
+            }, &.{}),
+            b.when(b.not(host_req_w.expr()), &.{
+                b.assign(rd_served, 0),
+            }, &.{}),
+        });
     }
 };
 

@@ -203,14 +203,81 @@ module asic_rx_tb;
 
         $display("Captured word: %02x %02x %02x %02x (expected 55 55 55 55)", rd0, rd1, rd2, rd3);
         if (rd0 == 8'h55 && rd1 == 8'h55 && rd2 == 8'h55 && rd3 == 8'h55) begin
-            $display("\n============================================================");
-            $display("SUCCESS: core sampled GPIO, stored the word in RX SRAM,");
-            $display("         and the host read it back over I2C.");
-            $display("============================================================\n");
+            $display("PASS: captured word read back");
         end else begin
             $display("\nFAILURE: captured word mismatch");
             $fatal(1);
         end
+
+        $display("--- Step 6: Read capture_seq status word at 0xF0 ---");
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF0);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("capture_seq = %02x %02x %02x %02x (expected 00 00 00 01)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h01)) begin
+            $display("\nFAILURE: capture_seq status mismatch");
+            $fatal(1);
+        end
+
+        $display("--- Step 7: Program write while running is rejected ---");
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'h30);
+        i2c_write_word(32'hDEADBEEF);
+        i2c_stop;
+        // Stop the core, then confirm the rejected word never landed.
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF0);
+        i2c_write_byte(8'h02);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'h30);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("rejected word readback = %02x %02x %02x %02x (expected 00 00 00 00)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h00)) begin
+            $display("\nFAILURE: running program write was not rejected");
+            $fatal(1);
+        end
+
+        $display("--- Step 8: prog_reject flag status word at 0xF2 ---");
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF2);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("status flags = %02x %02x %02x %02x (expected 00 00 00 02)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h02)) begin
+            $display("\nFAILURE: prog_reject flag mismatch");
+            $fatal(1);
+        end
+
+        $display("\n============================================================");
+        $display("SUCCESS: core sampled GPIO, stored the word in RX SRAM,");
+        $display("         read it back, and exposed partition status words.");
+        $display("============================================================\n");
 
         $finish;
     end

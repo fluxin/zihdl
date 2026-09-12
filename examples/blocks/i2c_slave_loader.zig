@@ -13,6 +13,10 @@ const ModuleBuilder = netlist.ModuleBuilder;
 /// registers; read transactions (`addr<<1 | 1`) stream `host_rdata` back
 /// MSB-first, four bytes per word, with the slave ACKing the address and the
 /// master ACKing or NACKing each data byte.
+///
+/// Host bus handshake: a completed program word is held on `host_we` until
+/// `host_ack` accepts or rejects it, and capture reads assert `host_req` and
+/// latch the whole word on `host_rvalid` before serializing it.
 pub const I2cState = enum(u3) { idle = 0, dev_addr = 1, reg_addr = 2, data = 3, read = 4 };
 
 pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
@@ -25,6 +29,8 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             i2c_scl: Signal(1),
             i2c_sda_in: Signal(1),
             host_rdata: Signal(32),
+            host_ack: Signal(1),
+            host_rvalid: Signal(1),
         };
         pub const Outputs = struct {
             i2c_sda_out: Signal(1),
@@ -32,6 +38,7 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             host_we: Signal(1),
             host_addr: Signal(8),
             host_wdata: Signal(32),
+            host_req: Signal(1),
             host_raddr: Signal(8),
             ctrl_start: Signal(1),
             ctrl_stop: Signal(1),
@@ -56,9 +63,12 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const tx_byte = try mb.reg("tx_byte", 8, 0);
             const tx_bit = try mb.reg("tx_bit", 4, 0);
             const read_word = try mb.reg("read_word", 32, 0);
-            const reload_cnt = try mb.reg("reload_cnt", 2, 0);
             const ack_wait = try mb.reg("ack_wait", 1, 0);
             const commit_pending = try mb.reg("commit_pending", 1, 0);
+            const rd_first = try mb.reg("rd_first", 1, 0);
+            const wr_hold = try mb.reg("wr_hold", 1, 0);
+            const wr_addr = try mb.reg("wr_addr", 8, 0);
+            const wr_data = try mb.reg("wr_data", 32, 0);
 
             // Edge detections and bus conditions
             const scl_rise = b.and_(scl_d0.expr(), b.not(scl_d1.expr()));
@@ -104,11 +114,11 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                     b.assign(outs.i2c_sda_oe, 1),
                     b.assign(tx_byte, b.concat(.{ tx_byte.slice(6, 0), b.lit(1, 0) })),
                     b.assign(tx_bit, b.add(tx_bit.expr(), 1)),
-                    // Fetch the next word while its last byte is shifting; the
+                    // Request the next word while its last byte is shifting; the
                     // pointer commits only if the master ACKs the last byte.
                     b.when(b.and_(is_byte_3, b.eq(tx_bit.expr(), 0)), &.{
                         b.assign(outs.host_raddr, reg_ptr_inc),
-                        b.assign(reload_cnt, 2),
+                        b.assign(outs.host_req, 1),
                     }, &.{}),
                 }, &.{
                     // ACK slot (fall after the 8th bit): release SDA and load
@@ -140,9 +150,14 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                 }),
             };
 
+            // Host program write bus: driven combinationally from the held word
+            // so `host_we` stays asserted until the partition accepts it.
+            try mb.assign(outs.host_we, wr_hold);
+            try mb.assign(outs.host_addr, wr_addr);
+            try mb.assign(outs.host_wdata, wr_data);
+
             const stmts = &.{
                 // 1. Default pulse outputs and synchronizers
-                b.assign(outs.host_we, 0),
                 b.assign(outs.ctrl_start, 0),
                 b.assign(outs.ctrl_stop, 0),
                 b.assign(scl_d0, ins.i2c_scl.expr()),
@@ -150,13 +165,23 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                 b.assign(sda_d0, ins.i2c_sda_in.expr()),
                 b.assign(sda_d1, sda_d0.expr()),
 
-                // Latch the next read word once the synchronous SRAM read for
-                // the prefetched address has landed (request + 2 clocks).
-                b.when(b.ne(reload_cnt.expr(), 0), &.{
-                    b.when(b.eq(reload_cnt.expr(), 1), &.{
-                        b.assign(read_word, ins.host_rdata),
+                // Host read handshake: latch the whole word once the partition
+                // returns read-valid, then serialize from the latch so bytes
+                // never mix capture generations.
+                b.when(ins.host_rvalid.expr(), &.{
+                    b.assign(read_word, ins.host_rdata),
+                    b.assign(outs.host_req, 0),
+                    b.when(rd_first.expr(), &.{
+                        b.assign(tx_byte, ins.host_rdata.slice(31, 24)),
+                        b.assign(rd_first, 0),
                     }, &.{}),
-                    b.assign(reload_cnt, b.sub(reload_cnt.expr(), 1)),
+                }, &.{}),
+
+                // Host program write handshake: hold the latched word until the
+                // partition accepts it, then commit the write pointer.
+                b.when(b.and_(wr_hold.expr(), ins.host_ack.expr()), &.{
+                    b.assign(wr_hold, 0),
+                    b.assign(reg_ptr, reg_ptr_inc),
                 }, &.{}),
 
                 // 2. I2C bus framing (START / STOP conditions)
@@ -170,6 +195,8 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                         b.assign(tx_bit, 0),
                         b.assign(ack_wait, 0),
                         b.assign(commit_pending, 0),
+                        b.assign(outs.host_req, 0),
+                        b.assign(rd_first, 0),
                     },
                     &.{
                         b.when(
@@ -199,6 +226,8 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                                                 fsm.goto(.idle),
                                                 b.assign(ack_wait, 0),
                                                 b.assign(commit_pending, 0),
+                                                b.assign(outs.host_req, 0),
+                                                b.assign(rd_first, 0),
                                             }, &.{
                                                 b.when(commit_pending.expr(), &.{
                                                     b.assign(reg_ptr, reg_ptr_inc),
@@ -228,10 +257,11 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                                                                     b.assign(outs.i2c_sda_oe, 1),
                                                                     b.assign(outs.i2c_sda_out, 0),
                                                                     fsm.goto(.read),
-                                                                    // Latch the whole word once; bytes never mix
-                                                                    // across capture generations.
-                                                                    b.assign(read_word, ins.host_rdata),
-                                                                    b.assign(tx_byte, ins.host_rdata.slice(31, 24)),
+                                                                    // Request the whole word; it is latched on
+                                                                    // host_rvalid, so bytes never mix generations.
+                                                                    b.assign(outs.host_req, 1),
+                                                                    b.assign(outs.host_raddr, reg_ptr.expr()),
+                                                                    b.assign(rd_first, 1),
                                                                     b.assign(tx_bit, 0),
                                                                     b.assign(byte_cnt, 0),
                                                                     b.assign(ack_wait, 0),
@@ -268,11 +298,11 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                                                                                 b.assign(rx_word, word_b2),
                                                                                 b.assign(byte_cnt, 3),
                                                                             }, &.{
-                                                                                // Byte 3: 32-bit word complete
-                                                                                b.assign(outs.host_we, 1),
-                                                                                b.assign(outs.host_addr, reg_ptr.expr()),
-                                                                                b.assign(outs.host_wdata, wdata_32),
-                                                                                b.assign(reg_ptr, reg_ptr_inc),
+                                                                                // Byte 3: 32-bit word complete;
+                                                                                // hold it until host_ack.
+                                                                                b.assign(wr_hold, 1),
+                                                                                b.assign(wr_addr, reg_ptr.expr()),
+                                                                                b.assign(wr_data, wdata_32),
                                                                                 b.assign(byte_cnt, 0),
                                                                             }),
                                                                         }),
@@ -322,6 +352,8 @@ test "i2c slave loader emission" {
     const scl = try top.input("i2c_scl", 1);
     const sda = try top.input("i2c_sda_in", 1);
     const rdata = try top.input("host_rdata", 32);
+    const host_ack = try top.input("host_ack", 1);
+    const host_rvalid = try top.input("host_rvalid", 1);
 
     _ = try top.instantiate(I2cSlaveLoaderBlock(0x42), "u_i2c", .{
         .clk = clk,
@@ -329,6 +361,8 @@ test "i2c slave loader emission" {
         .i2c_scl = scl,
         .i2c_sda_in = sda,
         .host_rdata = rdata,
+        .host_ack = host_ack,
+        .host_rvalid = host_rvalid,
     }, .{}, .{});
     _ = try top.finish();
 
@@ -341,4 +375,6 @@ test "i2c slave loader emission" {
     try std.testing.expect(std.mem.indexOf(u8, v, "i2c_sda_out <= tx_byte[7];") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "= (reg_ptr + 8'd1);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "host_raddr <= tmp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "host_req <= 1'b1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign host_we = wr_hold;") != null);
 }

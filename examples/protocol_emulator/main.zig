@@ -27,10 +27,18 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("=====================================================\n\n", .{});
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42));
+    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .single, programmable_asic.default_program_words));
     const full_v = try verilog.emitDesign(alloc, &design, .{});
     const design_json = try metadata.emitDesignJson(alloc, &design, .{});
     const design_sdc = try sdc.emitDesignSdc(alloc, &design, .{});
+
+    // A/B build: the historical two-macro composition is emitted alongside the
+    // default single-macro partition for oasic comparisons and regressions.
+    var split_design = netlist.Design.init(alloc);
+    _ = try split_design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .split, programmable_asic.default_program_words));
+    const split_v = try verilog.emitDesign(alloc, &split_design, .{});
+    const split_json = try metadata.emitDesignJson(alloc, &split_design, .{});
+    const split_sdc = try sdc.emitDesignSdc(alloc, &split_design, .{});
 
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, "out");
@@ -46,12 +54,25 @@ pub fn main(init: std.process.Init) !void {
         .sub_path = "out/asic_core.sdc",
         .data = design_sdc,
     });
+    try cwd.writeFile(io, .{
+        .sub_path = "out/asic_core_split.v",
+        .data = split_v,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = "out/design_split.json",
+        .data = split_json,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = "out/asic_core_split.sdc",
+        .data = split_sdc,
+    });
 
     std.debug.print("Synthesized complete ASIC RTL to 'out/asic_core.v' ({d} bytes)\n", .{full_v.len});
     std.debug.print("  - Metadata sidecar: out/design.json ({d} bytes)\n", .{design_json.len});
     std.debug.print("  - Timing constraints: out/asic_core.sdc ({d} bytes)\n", .{design_sdc.len});
+    std.debug.print("  - A/B split composition: out/asic_core_split.v ({d} bytes)\n", .{split_v.len});
     std.debug.print("  - Host Interface: I2C Slave (7-bit address 0x42)\n", .{});
-    std.debug.print("  - Generic SRAM: 1KB (256 words x 32-bit), wired for instructions\n", .{});
+    std.debug.print("  - SRAM Partition: 1 macro, 64 program + 192 capture words\n", .{});
     std.debug.print("  - Timing Grid: 120 MHz (8.33 ns cycle resolution)\n", .{});
     std.debug.print("  - GPIO Pins: 4 Bidirectional Pads (in, out, oe)\n", .{});
 
@@ -73,4 +94,5 @@ test {
     _ = @import("timing_execution_unit.zig");
     _ = @import("programmable_asic.zig");
     _ = @import("loader_read_tb.zig");
+    _ = @import("partition_tb.zig");
 }
