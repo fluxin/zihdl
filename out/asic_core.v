@@ -501,15 +501,18 @@ module timing_execution_unit (
     output reg  [31:0]  rx_wdata
 );
 
+    localparam [5:0] X_WIDTH = 6'd5;
+    localparam SAMPLE_COUNTER_NIBBLES = 1'b1;
+
     wire        tmp0;
     wire [15:0]  tmp1;
     wire [31:0]  tmp2;
 
     reg         fetch_pending;
     reg [15:0]  delay_cnt;
-    reg [31:0]  x_reg;
+    reg [4:0]  x_reg;
     reg [31:0]  isr;
-    reg [5:0]  isr_bits;
+    reg [2:0]  nibble_cnt;
     reg [7:0]  rx_ptr;
 
     assign tmp0 = (delay_cnt > 16'd0);
@@ -527,9 +530,9 @@ module timing_execution_unit (
             rx_wdata <= 32'd0;
             fetch_pending <= 1'b0;
             delay_cnt <= 16'd0;
-            x_reg <= 32'd0;
+            x_reg <= 5'd0;
             isr <= 32'd0;
-            isr_bits <= 6'd0;
+            nibble_cnt <= 3'd0;
             rx_ptr <= 8'd0;
         end else begin
             rx_we <= 1'b0;
@@ -565,7 +568,7 @@ module timing_execution_unit (
                                                 pin_oe <= inst[19:16];
                                             end
                                             2: begin
-                                                x_reg <= {27'd0, inst[20:16]};
+                                                x_reg <= inst[20:16];
                                             end
                                         endcase
                                     end
@@ -575,13 +578,13 @@ module timing_execution_unit (
                                                 pc <= inst[23:16];
                                             end
                                             1: begin
-                                                if ((x_reg == 32'd0)) begin
+                                                if ((x_reg == 5'd0)) begin
                                                     pc <= inst[23:16];
                                                 end
                                             end
                                             2: begin
-                                                if ((x_reg != 32'd0)) begin
-                                                    x_reg <= (x_reg - 32'd1);
+                                                if ((x_reg != 5'd0)) begin
+                                                    x_reg <= (x_reg - 5'd1);
                                                     pc <= inst[23:16];
                                                 end
                                             end
@@ -589,16 +592,16 @@ module timing_execution_unit (
                                     end
                                     2: begin
                                         if ((inst[23:21] == 3'd0)) begin
-                                            if ((isr_bits == 6'd28)) begin
+                                            if ((nibble_cnt == 3'd7)) begin
                                                 rx_we <= 1'b1;
                                                 rx_addr <= rx_ptr;
                                                 rx_wdata <= tmp2;
                                                 rx_ptr <= (rx_ptr + 8'd1);
                                                 isr <= tmp2;
-                                                isr_bits <= 6'd0;
+                                                nibble_cnt <= 3'd0;
                                             end else begin
                                                 isr <= tmp2;
-                                                isr_bits <= (isr_bits + 6'd4);
+                                                nibble_cnt <= (nibble_cnt + 3'd1);
                                             end
                                         end
                                     end

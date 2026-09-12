@@ -133,9 +133,26 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const part_tb_gen = b.addRunArtifact(part_tb_exe);
-    const tb_step = b.step("tb", "Generate the loader read and partition testbenches from Zig");
+
+    // Counter-width equivalence generator: drives the legacy 32-bit/6-bit core
+    // and the narrowed 5-bit/3-bit core with the same stimulus and compares
+    // every output cycle by cycle.
+    const width_tb_exe = b.addExecutable(.{
+        .name = "js_asic_width_tbgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/width_tb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const width_tb_gen = b.addRunArtifact(width_tb_exe);
+    const tb_step = b.step("tb", "Generate the loader read, partition and width testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
     tb_step.dependOn(&part_tb_gen.step);
+    tb_step.dependOn(&width_tb_gen.step);
 
     // Lint the generated Verilog with Verilator. Depends on the run step, which
     // writes out/asic_core.v.
@@ -197,6 +214,12 @@ pub fn build(b: *std.Build) void {
     const part_run = b.addSystemCommand(&.{ "vvp", "out/partition_tb_iv" });
     part_run.step.dependOn(&part_compile.step);
 
+    // Counter-width equivalence testbench: legacy vs narrowed core.
+    const width_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "width_tb_harness", "-o", "out/width_tb_iv", "out/width_tb.v" });
+    width_compile.step.dependOn(&width_tb_gen.step);
+    const width_run = b.addSystemCommand(&.{ "vvp", "out/width_tb_iv" });
+    width_run.step.dependOn(&width_compile.step);
+
     const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
     sim_step.dependOn(&i2c_run.step);
     sim_step.dependOn(&rx_run.step);
@@ -204,6 +227,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&rx_split_run.step);
     sim_step.dependOn(&read_run.step);
     sim_step.dependOn(&part_run.step);
+    sim_step.dependOn(&width_run.step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
     verify_step.dependOn(&lint_cmd.step);
@@ -216,6 +240,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&rx_split_run.step);
     verify_step.dependOn(&read_run.step);
     verify_step.dependOn(&part_run.step);
+    verify_step.dependOn(&width_run.step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

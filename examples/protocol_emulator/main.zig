@@ -95,4 +95,5 @@ test {
     _ = @import("programmable_asic.zig");
     _ = @import("loader_read_tb.zig");
     _ = @import("partition_tb.zig");
+    _ = @import("width_tb.zig");
 }
