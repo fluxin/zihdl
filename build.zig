@@ -149,10 +149,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const width_tb_gen = b.addRunArtifact(width_tb_exe);
-    const tb_step = b.step("tb", "Generate the loader read, partition and width testbenches from Zig");
+
+    // Ethernet 10BASE-T transmit testbench generator: cycle-accurate expected
+    // waveform for the Manchester encoder, NLP generator and stream handshake.
+    const eth_tb_exe = b.addExecutable(.{
+        .name = "js_asic_ethernet_10base_t_tbgen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/ethernet_10base_t_tb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const eth_tb_gen = b.addRunArtifact(eth_tb_exe);
+
+    const tb_step = b.step("tb", "Generate the loader read, partition, width and 10BASE-T testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
     tb_step.dependOn(&part_tb_gen.step);
     tb_step.dependOn(&width_tb_gen.step);
+    tb_step.dependOn(&eth_tb_gen.step);
 
     // Lint the generated Verilog with Verilator. Depends on the run step, which
     // writes out/asic_core.v.
@@ -220,6 +237,12 @@ pub fn build(b: *std.Build) void {
     const width_run = b.addSystemCommand(&.{ "vvp", "out/width_tb_iv" });
     width_run.step.dependOn(&width_compile.step);
 
+    // Ethernet 10BASE-T transmit testbench: expected waveform player.
+    const eth_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "ethernet_10base_t_tb_harness", "-o", "out/ethernet_10base_t_tb_iv", "out/ethernet_10base_t_tb.v" });
+    eth_compile.step.dependOn(&eth_tb_gen.step);
+    const eth_run = b.addSystemCommand(&.{ "vvp", "out/ethernet_10base_t_tb_iv" });
+    eth_run.step.dependOn(&eth_compile.step);
+
     const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
     sim_step.dependOn(&i2c_run.step);
     sim_step.dependOn(&rx_run.step);
@@ -228,6 +251,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&read_run.step);
     sim_step.dependOn(&part_run.step);
     sim_step.dependOn(&width_run.step);
+    sim_step.dependOn(&eth_run.step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
     verify_step.dependOn(&lint_cmd.step);
@@ -241,6 +265,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&read_run.step);
     verify_step.dependOn(&part_run.step);
     verify_step.dependOn(&width_run.step);
+    verify_step.dependOn(&eth_run.step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

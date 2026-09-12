@@ -96,4 +96,6 @@ test {
     _ = @import("loader_read_tb.zig");
     _ = @import("partition_tb.zig");
     _ = @import("width_tb.zig");
+    _ = @import("ethernet_10base_t.zig");
+    _ = @import("ethernet_10base_t_tb.zig");
 }
