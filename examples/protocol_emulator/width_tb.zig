@@ -140,6 +140,7 @@ pub fn ComparePlayer(comptime init_file: []const u8, comptime depth: usize) type
             old_pin_out: Signal(4),
             old_pin_oe: Signal(4),
             old_core_running: Signal(1),
+            old_op_fault: Signal(1),
             old_rx_we: Signal(1),
             old_rx_addr: Signal(8),
             old_rx_wdata: Signal(32),
@@ -147,6 +148,7 @@ pub fn ComparePlayer(comptime init_file: []const u8, comptime depth: usize) type
             new_pin_out: Signal(4),
             new_pin_oe: Signal(4),
             new_core_running: Signal(1),
+            new_op_fault: Signal(1),
             new_rx_we: Signal(1),
             new_rx_addr: Signal(8),
             new_rx_wdata: Signal(32),
@@ -193,10 +195,13 @@ pub fn ComparePlayer(comptime init_file: []const u8, comptime depth: usize) type
                         b.or_(
                             b.ne(ins.old_core_running.expr(), ins.new_core_running.expr()),
                             b.or_(
-                                b.ne(ins.old_rx_we.expr(), ins.new_rx_we.expr()),
+                                b.ne(ins.old_op_fault.expr(), ins.new_op_fault.expr()),
                                 b.or_(
-                                    b.ne(ins.old_rx_addr.expr(), ins.new_rx_addr.expr()),
-                                    b.ne(ins.old_rx_wdata.expr(), ins.new_rx_wdata.expr()),
+                                    b.ne(ins.old_rx_we.expr(), ins.new_rx_we.expr()),
+                                    b.or_(
+                                        b.ne(ins.old_rx_addr.expr(), ins.new_rx_addr.expr()),
+                                        b.ne(ins.old_rx_wdata.expr(), ins.new_rx_wdata.expr()),
+                                    ),
                                 ),
                             ),
                         ),
@@ -283,6 +288,7 @@ const WidthTb = struct {
         const old_pin_out = try mb.wire("old_pin_out", 4);
         const old_pin_oe = try mb.wire("old_pin_oe", 4);
         const old_core_running = try mb.wire("old_core_running", 1);
+        const old_op_fault = try mb.wire("old_op_fault", 1);
         const old_rx_we = try mb.wire("old_rx_we", 1);
         const old_rx_addr = try mb.wire("old_rx_addr", 8);
         const old_rx_wdata = try mb.wire("old_rx_wdata", 32);
@@ -290,6 +296,7 @@ const WidthTb = struct {
         const new_pin_out = try mb.wire("new_pin_out", 4);
         const new_pin_oe = try mb.wire("new_pin_oe", 4);
         const new_core_running = try mb.wire("new_core_running", 1);
+        const new_op_fault = try mb.wire("new_op_fault", 1);
         const new_rx_we = try mb.wire("new_rx_we", 1);
         const new_rx_addr = try mb.wire("new_rx_addr", 8);
         const new_rx_wdata = try mb.wire("new_rx_wdata", 32);
@@ -307,6 +314,7 @@ const WidthTb = struct {
             .pin_out = old_pin_out,
             .pin_oe = old_pin_oe,
             .core_running = old_core_running,
+            .op_fault = old_op_fault,
             .rx_we = old_rx_we,
             .rx_addr = old_rx_addr,
             .rx_wdata = old_rx_wdata,
@@ -325,6 +333,7 @@ const WidthTb = struct {
             .pin_out = new_pin_out,
             .pin_oe = new_pin_oe,
             .core_running = new_core_running,
+            .op_fault = new_op_fault,
             .rx_we = new_rx_we,
             .rx_addr = new_rx_addr,
             .rx_wdata = new_rx_wdata,
@@ -337,6 +346,7 @@ const WidthTb = struct {
             .old_pin_out = old_pin_out,
             .old_pin_oe = old_pin_oe,
             .old_core_running = old_core_running,
+            .old_op_fault = old_op_fault,
             .old_rx_we = old_rx_we,
             .old_rx_addr = old_rx_addr,
             .old_rx_wdata = old_rx_wdata,
@@ -344,6 +354,7 @@ const WidthTb = struct {
             .new_pin_out = new_pin_out,
             .new_pin_oe = new_pin_oe,
             .new_core_running = new_core_running,
+            .new_op_fault = new_op_fault,
             .new_rx_we = new_rx_we,
             .new_rx_addr = new_rx_addr,
             .new_rx_wdata = new_rx_wdata,

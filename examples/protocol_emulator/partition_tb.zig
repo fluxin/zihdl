@@ -25,6 +25,8 @@ const C: usize = 256 - P;
 const Drives = struct {
     core_running: u1 = 0,
     core_pc: u8 = 0,
+    op_fault: u1 = 0,
+    ctrl_start: u1 = 0,
     rx_we: u1 = 0,
     rx_wdata: u32 = 0,
     host_we: u1 = 0,
@@ -101,7 +103,8 @@ const Model = struct {
         const dout0_next: u32 = if (port0_active) mem[addr0] else self.dout0;
         const dout1_next: u32 = if (fetch_en) mem[fetch_addr] else self.dout1;
 
-        const flags: u32 = (@as(u32, @intFromBool(self.prog_reject)) << 1) |
+        const flags: u32 = (@as(u32, @intFromBool(d.op_fault == 1)) << 2) |
+            (@as(u32, @intFromBool(self.prog_reject)) << 1) |
             @as(u32, @intFromBool(self.pc_oob));
         const rdata: u32 = if (self.st_addr == 0xF0)
             self.capture_seq
@@ -154,6 +157,12 @@ const Model = struct {
                 if (self.capture_lost != 0xFFFF) self.capture_lost = self.capture_lost + 1;
             }
         }
+        if (d.ctrl_start == 1) {
+            self.cap_ptr = P;
+            self.capture_seq = 0;
+            self.capture_lost = 0;
+            self.full_seen = false;
+        }
         self.dout0 = dout0_next;
         self.dout1 = dout1_next;
         if (capture_go or write_use) {
@@ -182,6 +191,8 @@ const Driver = struct {
             .rx_wdata = d.rx_wdata,
             .host_we = d.host_we,
             .host_req = d.host_req,
+            .op_fault = d.op_fault,
+            .ctrl_start = d.ctrl_start,
             .expect_valid = 1,
             .exp_host_ack = outs.ack,
             .exp_host_rvalid = outs.rvalid,
@@ -272,7 +283,13 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
     try driver.runCore(0x05, 2);
     try driver.idle(1);
 
-    // 4. Capture ring overwrite: C + 2 writes wrap the comparator and raise
+    // 4. A core decode fault routes into 0xF2 without disturbing the other
+    //    status bits (prog_reject is already sticky from scenario 2).
+    try driver.step(.{ .host_req = 1, .host_raddr = 0xF2, .op_fault = 1 });
+    try driver.step(.{ .host_raddr = 0xF2, .op_fault = 1 });
+    try driver.step(.{});
+
+    // 5. Capture ring overwrite: C + 2 writes wrap the comparator and raise
     //    capture_lost exactly twice while capture_seq counts every write.
     var k: u32 = 0;
     while (k < C + 2) : (k += 1) {
@@ -285,7 +302,13 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
     var a: u16 = 0;
     while (a < C) : (a += 1) try driver.read(@intCast(a));
 
-    // 5. Host read overlapping capture writes: the request is held while a
+    // 6. A start pulse means a fresh capture: ring pointer, sequence and loss
+    //    status reset even though captured words remain in the macro.
+    try driver.step(.{ .ctrl_start = 1 });
+    try driver.read(0xF0); // sequence zero
+    try driver.read(0xF1); // loss zero
+
+    // 7. Host read overlapping capture writes: the request is held while a
     //    capture write owns port 0, granted on the first free cycle, and the
     //    registered macro word is returned one cycle after the grant.
     try driver.step(.{ .host_req = 1, .host_raddr = 64, .rx_we = 1, .rx_wdata = 0x2000_0000 });
@@ -294,7 +317,7 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
     try driver.step(.{ .rx_we = 1, .rx_wdata = 0x2000_0002 });
     try driver.read(65);
 
-    // 5b. Two host writes queue in the skid buffer while capture writes own
+    // 7b. Two host writes queue in the skid buffer while capture writes own
     //     port 0; both drain afterwards and are readable.
     try driver.step(.{ .host_we = 1, .host_addr = 0x30, .host_wdata = 0x3000_0030, .rx_we = 1, .rx_wdata = 0x3000_0000 });
     try driver.step(.{ .rx_we = 1, .rx_wdata = 0x3000_0001 });
@@ -304,14 +327,14 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
     try driver.read(0x30);
     try driver.read(0x31);
 
-    // 6. A PC at or beyond the program bound never aliases capture contents
+    // 8. A PC at or beyond the program bound never aliases capture contents
     //    and never restarts at program 0: the partition substitutes a self-jump
     //    to the offending PC (JMP ALWAYS 200) and latches `pc_oob`.
     try driver.runCore(200, 2);
     try driver.step(.{});
     try driver.read(0xF2); // flags: prog_reject and pc_oob
 
-    // 7. Wrap regression: loss must not pause when the 16-bit sequence wraps
+    // 9. Wrap regression: loss must not pause when the 16-bit sequence wraps
     //    and must saturate instead of returning to zero. This drives past both
     //    the 65,536-write sequence wrap and the point where the old 16-bit loss
     //    counter returned to zero.
@@ -400,6 +423,8 @@ const PartitionTb = struct {
         const host_rdata_w = try mb.wire("host_rdata_w", 32);
         const prog_reject_w = try mb.wire("prog_reject_w", 1);
         const pc_oob_w = try mb.wire("pc_oob_w", 1);
+        const op_fault_w = try mb.wire("op_fault_w", 1);
+        const ctrl_start_w = try mb.wire("ctrl_start_w", 1);
         const capture_seq_w = try mb.wire("capture_seq_w", 16);
         const capture_lost_w = try mb.wire("capture_lost_w", 16);
         const inst_word_w = try mb.wire("inst_word_w", 32);
@@ -429,6 +454,8 @@ const PartitionTb = struct {
             .rst_n = ins.rst_n,
             .core_running = core_running_w,
             .core_pc = core_pc_w,
+            .op_fault = op_fault_w,
+            .ctrl_start = ctrl_start_w,
             .rx_we = rx_we_w,
             .rx_addr = rx_addr_w,
             .rx_wdata = rx_wdata_w,
@@ -499,6 +526,8 @@ const PartitionTb = struct {
             .host_wdata = host_wdata_w,
             .host_req = host_req_w,
             .host_raddr = host_raddr_w,
+            .op_fault = op_fault_w,
+            .ctrl_start = ctrl_start_w,
             .done = outs.done,
             .fail = outs.fail,
             .fail_cycle = outs.fail_cycle,

@@ -288,6 +288,8 @@ module sram_partition_single_64 (
     input  wire        rst_n,
     input  wire        core_running,
     input  wire [7:0]  core_pc,
+    input  wire        op_fault,
+    input  wire        ctrl_start,
     input  wire        rx_we,
     input  wire [7:0]  rx_addr,
     input  wire [31:0]  rx_wdata,
@@ -370,7 +372,7 @@ module sram_partition_single_64 (
     assign rx_csb1 = 1'b1;
     assign rx_addr1 = 8'd0;
     assign inst_word = (tmp4 ? {4'd0, 4'd0, core_pc, 16'd0} : sram_dout1);
-    assign host_rdata = ((st_addr == 8'd240) ? {16'd0, capture_seq} : ((st_addr == 8'd241) ? {16'd0, capture_lost} : ((st_addr == 8'd242) ? {30'd0, prog_reject, pc_oob} : sram_dout0)));
+    assign host_rdata = ((st_addr == 8'd240) ? {16'd0, capture_seq} : ((st_addr == 8'd241) ? {16'd0, capture_lost} : ((st_addr == 8'd242) ? {29'd0, op_fault, prog_reject, pc_oob} : sram_dout0)));
     assign host_ack = tmp5;
 
     always @(posedge clk or negedge rst_n) begin
@@ -439,6 +441,12 @@ module sram_partition_single_64 (
             if ((core_running && tmp4)) begin
                 pc_oob <= 1'b1;
             end
+            if ((ctrl_start == 1'b1)) begin
+                cap_ptr <= 8'd64;
+                capture_seq <= 16'd0;
+                capture_lost <= 16'd0;
+                full_seen <= 1'b0;
+            end
         end
     end
 
@@ -496,6 +504,7 @@ module timing_execution_unit (
     output reg  [3:0]  pin_out,
     output reg  [3:0]  pin_oe,
     output reg         core_running,
+    output reg         op_fault,
     output reg         rx_we,
     output reg  [7:0]  rx_addr,
     output reg  [31:0]  rx_wdata
@@ -506,10 +515,12 @@ module timing_execution_unit (
 
     wire        tmp0;
     wire [15:0]  tmp1;
-    wire [31:0]  tmp2;
+    wire        tmp2;
+    wire [31:0]  tmp3;
 
     reg         fetch_pending;
     reg [15:0]  delay_cnt;
+    reg         halt_r;
     reg [4:0]  x_reg;
     reg [31:0]  isr;
     reg [2:0]  nibble_cnt;
@@ -517,7 +528,8 @@ module timing_execution_unit (
 
     assign tmp0 = (delay_cnt > 16'd0);
     assign tmp1 = (delay_cnt - 16'd1);
-    assign tmp2 = {isr[27:0], pin_in};
+    assign tmp2 = (inst[23:21] == 3'd0);
+    assign tmp3 = {isr[27:0], pin_in};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -525,11 +537,13 @@ module timing_execution_unit (
             pin_out <= 4'd0;
             pin_oe <= 4'd0;
             core_running <= 1'b0;
+            op_fault <= 1'b0;
             rx_we <= 1'b0;
             rx_addr <= 8'd0;
             rx_wdata <= 32'd0;
             fetch_pending <= 1'b0;
             delay_cnt <= 16'd0;
+            halt_r <= 1'b0;
             x_reg <= 5'd0;
             isr <= 32'd0;
             nibble_cnt <= 3'd0;
@@ -541,71 +555,85 @@ module timing_execution_unit (
                 fetch_pending <= 1'b1;
                 delay_cnt <= 16'd0;
                 core_running <= 1'b1;
+                op_fault <= 1'b0;
+                halt_r <= 1'b0;
+                isr <= 32'd0;
+                nibble_cnt <= 3'd0;
+                rx_ptr <= 8'd0;
             end else begin
                 if ((ctrl_stop == 1'b1)) begin
                     core_running <= 1'b0;
                 end else begin
                     if ((core_running == 1'b1)) begin
-                        if ((fetch_pending == 1'b1)) begin
+                        if (halt_r) begin
+                            core_running <= 1'b0;
+                            op_fault <= 1'b1;
                             fetch_pending <= 1'b0;
-                            if (tmp0) begin
-                                delay_cnt <= tmp1;
-                            end
+                            delay_cnt <= 16'd0;
+                            halt_r <= 1'b0;
                         end else begin
-                            if (tmp0) begin
-                                delay_cnt <= tmp1;
+                            if ((fetch_pending == 1'b1)) begin
+                                fetch_pending <= 1'b0;
+                                if (tmp0) begin
+                                    delay_cnt <= tmp1;
+                                end
                             end else begin
-                                fetch_pending <= 1'b1;
-                                pc <= (pc + 8'd1);
-                                delay_cnt <= inst[15:0];
-                                case (inst[31:28])
-                                    7: begin
-                                        case (inst[23:21])
-                                            0: begin
-                                                pin_out <= inst[19:16];
-                                            end
-                                            1: begin
-                                                pin_oe <= inst[19:16];
-                                            end
-                                            2: begin
-                                                x_reg <= inst[20:16];
-                                            end
-                                        endcase
-                                    end
-                                    0: begin
-                                        case (inst[26:24])
-                                            0: begin
-                                                pc <= inst[23:16];
-                                            end
-                                            1: begin
-                                                if ((x_reg == 5'd0)) begin
+                                if (tmp0) begin
+                                    delay_cnt <= tmp1;
+                                end else begin
+                                    fetch_pending <= 1'b1;
+                                    pc <= (pc + 8'd1);
+                                    delay_cnt <= inst[15:0];
+                                    halt_r <= (!(((inst[31:28] == 4'd7) && (inst[23:21] <= 3'd2)) || (((inst[31:28] == 4'd0) && (inst[26:24] <= 3'd2)) || ((inst[31:28] == 4'd2) && (tmp2 && (inst[20:16] == 5'd4))))));
+                                    case (inst[31:28])
+                                        7: begin
+                                            case (inst[23:21])
+                                                0: begin
+                                                    pin_out <= inst[19:16];
+                                                end
+                                                1: begin
+                                                    pin_oe <= inst[19:16];
+                                                end
+                                                2: begin
+                                                    x_reg <= inst[20:16];
+                                                end
+                                            endcase
+                                        end
+                                        0: begin
+                                            case (inst[26:24])
+                                                0: begin
                                                     pc <= inst[23:16];
                                                 end
-                                            end
-                                            2: begin
-                                                if ((x_reg != 5'd0)) begin
-                                                    x_reg <= (x_reg - 5'd1);
-                                                    pc <= inst[23:16];
+                                                1: begin
+                                                    if ((x_reg == 5'd0)) begin
+                                                        pc <= inst[23:16];
+                                                    end
                                                 end
-                                            end
-                                        endcase
-                                    end
-                                    2: begin
-                                        if ((inst[23:21] == 3'd0)) begin
-                                            if ((nibble_cnt == 3'd7)) begin
-                                                rx_we <= 1'b1;
-                                                rx_addr <= rx_ptr;
-                                                rx_wdata <= tmp2;
-                                                rx_ptr <= (rx_ptr + 8'd1);
-                                                isr <= tmp2;
-                                                nibble_cnt <= 3'd0;
-                                            end else begin
-                                                isr <= tmp2;
-                                                nibble_cnt <= (nibble_cnt + 3'd1);
+                                                2: begin
+                                                    if ((x_reg != 5'd0)) begin
+                                                        x_reg <= (x_reg - 5'd1);
+                                                        pc <= inst[23:16];
+                                                    end
+                                                end
+                                            endcase
+                                        end
+                                        2: begin
+                                            if (tmp2) begin
+                                                if ((nibble_cnt == 3'd7)) begin
+                                                    rx_we <= 1'b1;
+                                                    rx_addr <= rx_ptr;
+                                                    rx_wdata <= tmp3;
+                                                    rx_ptr <= (rx_ptr + 8'd1);
+                                                    isr <= tmp3;
+                                                    nibble_cnt <= 3'd0;
+                                                end else begin
+                                                    isr <= tmp3;
+                                                    nibble_cnt <= (nibble_cnt + 3'd1);
+                                                end
                                             end
                                         end
-                                    end
-                                endcase
+                                    endcase
+                                end
                             end
                         end
                     end
@@ -659,6 +687,7 @@ module programmable_asic_i2c_42 (
     wire [31:0]  rx_wdata;
     wire        prog_reject;
     wire        pc_oob;
+    wire        op_fault;
     wire [15:0]  capture_seq;
     wire [15:0]  capture_lost;
     wire [31:0]  sram_dout0;
@@ -706,6 +735,8 @@ module programmable_asic_i2c_42 (
         .rst_n(rst_n),
         .core_running(core_running),
         .core_pc(core_pc),
+        .op_fault(op_fault),
+        .ctrl_start(ctrl_start),
         .rx_we(rx_we),
         .rx_addr(rx_addr),
         .rx_wdata(rx_wdata),
@@ -767,6 +798,7 @@ module programmable_asic_i2c_42 (
         .pin_out(gpio_out),
         .pin_oe(gpio_oe),
         .core_running(core_running),
+        .op_fault(op_fault),
         .rx_we(rx_we),
         .rx_addr(rx_addr),
         .rx_wdata(rx_wdata)

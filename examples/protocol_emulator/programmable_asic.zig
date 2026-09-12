@@ -39,13 +39,14 @@ pub const default_program_words: usize = 64;
 /// behaviorally comparable.
 ///
 /// Status read words (host read address): `0xF0` -> `capture_seq`,
-/// `0xF1` -> `capture_lost`, `0xF2` -> `{30'd0, prog_reject, pc_oob}`.
+/// `0xF1` -> `capture_lost`, `0xF2` -> `{29'd0, op_fault, prog_reject, pc_oob}`.
 /// `capture_seq` is a 16-bit write counter that wraps; `capture_lost` is a
 /// sticky saturating count of physical overwrites since the ring first filled,
 /// so sequence wrap can neither pause loss counting nor reset it. An
 /// out-of-range fetch holds execution at the offending PC with a self-jump
 /// (never aliasing capture and never restarting at program word 0) and latches
-/// `pc_oob` until the core owner adds a real fault.
+/// `pc_oob` until the core owner adds a real fault. A start pulse clears the
+/// capture ring state so every run begins with a fresh capture.
 pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_words: usize) type {
     const capture_words = sram_total_words - program_words;
     comptime {
@@ -63,6 +64,8 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             rst_n: Signal(1),
             core_running: Signal(1),
             core_pc: Signal(8),
+            op_fault: Signal(1),
+            ctrl_start: Signal(1),
             rx_we: Signal(1),
             rx_addr: Signal(8),
             rx_wdata: Signal(32),
@@ -242,7 +245,7 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             const is_f2 = b.eq(st_addr.expr(), 0xF2);
             const status_seq = b.concat(.{ b.lit(16, 0), outs.capture_seq });
             const status_lost = b.concat(.{ b.lit(16, 0), outs.capture_lost });
-            const status_flags = b.concat(.{ b.lit(30, 0), outs.prog_reject, outs.pc_oob });
+            const status_flags = b.concat(.{ b.lit(29, 0), ins.op_fault, outs.prog_reject, outs.pc_oob });
             const rdata_sel = b.ternary(
                 is_f0,
                 status_seq,
@@ -307,6 +310,15 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
 
                 b.when(b.and_(ins.core_running.expr(), fetch_oob_now), &.{
                     b.assign(outs.pc_oob, 1),
+                }, &.{}),
+
+                // Start means a fresh capture: reset the ring pointer, sequence
+                // and loss status so the host always begins at sequence zero.
+                b.when(b.eq(ins.ctrl_start.expr(), 1), &.{
+                    b.assign(cap_ptr, b.lit(8, P)),
+                    b.assign(outs.capture_seq, 0),
+                    b.assign(outs.capture_lost, 0),
+                    b.assign(full_seen, 0),
                 }, &.{}),
             };
             try mb.seq(domain, stmts);
@@ -393,6 +405,7 @@ pub fn ProgrammableAsicBlock(
             const rx_wdata = try mb.wire("rx_wdata", 32);
             const prog_reject = try mb.wire("prog_reject", 1);
             const pc_oob = try mb.wire("pc_oob", 1);
+            const op_fault = try mb.wire("op_fault", 1);
             const capture_seq = try mb.wire("capture_seq", 16);
             const capture_lost = try mb.wire("capture_lost", 16);
 
@@ -475,6 +488,8 @@ pub fn ProgrammableAsicBlock(
                 .rst_n = domain.rst_n,
                 .core_running = outs.core_running,
                 .core_pc = core_pc,
+                .op_fault = op_fault,
+                .ctrl_start = ctrl_start,
                 .rx_we = rx_we,
                 .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,
@@ -564,6 +579,7 @@ pub fn ProgrammableAsicBlock(
                 .pin_out = outs.gpio_out,
                 .pin_oe = outs.gpio_oe,
                 .core_running = outs.core_running,
+                .op_fault = op_fault,
                 .rx_we = rx_we,
                 .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,

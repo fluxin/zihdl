@@ -274,9 +274,110 @@ module asic_rx_tb;
             $fatal(1);
         end
 
+        $display("--- Step 9: Unsupported opcode faults and halts the core ---");
+        // MOV (opcode 6) is declared but not implemented: decode-reject.
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'h10);
+        i2c_write_word(32'h6000_0000);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF2);
+        i2c_write_byte(8'h10);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF0);
+        i2c_write_byte(8'h01);
+        i2c_stop;
+        #500;
+        $display("after decode fault: core_running = %b (expected 0)", core_running);
+        if (core_running != 1'b0) begin
+            $display("\nFAILURE: unsupported opcode did not halt the core");
+            $fatal(1);
+        end
+        // 0xF2 = op_fault (4) | prog_reject (2).
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF2);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("fault flags = %02x %02x %02x %02x (expected 00 00 00 06)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h06)) begin
+            $display("\nFAILURE: op_fault flag mismatch");
+            $fatal(1);
+        end
+
+        $display("--- Step 10: A fresh start clears the fault and capture sequence ---");
+        // JMP ALWAYS 0x20 at address 0x20: an idle loop that captures nothing.
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'h20);
+        i2c_write_word(32'h0020_0000);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF2);
+        i2c_write_byte(8'h20);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF0);
+        i2c_write_byte(8'h01);
+        i2c_stop;
+        #200;
+        $display("after fresh start: core_running = %b (expected 1)", core_running);
+        if (core_running != 1'b1) begin
+            $display("\nFAILURE: fresh start did not resume the core");
+            $fatal(1);
+        end
+        // capture_seq must be zero after start even though a word was captured
+        // before the fault: start means a fresh capture.
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF0);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("fresh capture_seq = %02x %02x %02x %02x (expected 00 00 00 00)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h00)) begin
+            $display("\nFAILURE: start did not reset the capture sequence");
+            $fatal(1);
+        end
+        // op_fault cleared by start; prog_reject remains sticky.
+        i2c_start;
+        i2c_write_byte(8'h84);
+        i2c_write_byte(8'hF2);
+        i2c_stop;
+        i2c_start;
+        i2c_write_byte(8'h85);
+        i2c_read_byte(rd0, 1'b1);
+        i2c_read_byte(rd1, 1'b1);
+        i2c_read_byte(rd2, 1'b1);
+        i2c_read_byte(rd3, 1'b0);
+        i2c_stop;
+        $display("post-start flags = %02x %02x %02x %02x (expected 00 00 00 02)", rd0, rd1, rd2, rd3);
+        if (!(rd0 == 8'h00 && rd1 == 8'h00 && rd2 == 8'h00 && rd3 == 8'h02)) begin
+            $display("\nFAILURE: start did not clear op_fault");
+            $fatal(1);
+        end
+
         $display("\n============================================================");
         $display("SUCCESS: core sampled GPIO, stored the word in RX SRAM,");
-        $display("         read it back, and exposed partition status words.");
+        $display("         read it back, exposed status, rejected bad decodes,");
+        $display("         and reset capture state on start.");
         $display("============================================================\n");
 
         $finish;

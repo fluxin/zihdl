@@ -56,6 +56,7 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
             pin_out: Signal(4),
             pin_oe: Signal(4),
             core_running: Signal(1),
+            op_fault: Signal(1),
             rx_we: Signal(1),
             rx_addr: Signal(8),
             rx_wdata: Signal(32),
@@ -73,6 +74,7 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
 
             const fetch_pending = try mb.reg("fetch_pending", 1, 0);
             const delay_cnt = try mb.reg("delay_cnt", 16, 0);
+            const halt_r = try mb.reg("halt_r", 1, 0);
             const x_reg = try mb.reg("x_reg", x_bits, 0);
             const isr = try mb.reg("isr", 32, 0);
             const sample_cnt = try mb.reg(sample_name, sample_w, 0);
@@ -93,6 +95,28 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
             const jmp_target = ins.inst.slice(23, 16);
             const jmp_cond = ins.inst.slice(26, 24);
             const in_source = ins.inst.slice(23, 21);
+            const in_count = ins.inst.slice(20, 16);
+
+            // Decode-reject: only the implemented encodings execute. Any other
+            // opcode or field combination latches `op_fault` and halts until a
+            // start pulse or reset. IN samples exactly four pins (bit_count is
+            // reserved) per the ratified nibble-counter configuration.
+            const set_ok = b.and_(
+                b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.SET))),
+                b.le(set_target, b.lit(3, @intFromEnum(isa.SetTarget.X))),
+            );
+            const jmp_ok = b.and_(
+                b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.JMP))),
+                b.le(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.X_DEC))),
+            );
+            const in_ok = b.and_(
+                b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.IN))),
+                b.and_(
+                    b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))),
+                    b.eq(in_count, b.lit(5, 4)),
+                ),
+            );
+            const decode_ok = b.or_(set_ok, b.or_(jmp_ok, in_ok));
 
             const x_is_zero = b.eq(x_reg.expr(), 0);
             const x_not_zero = b.ne(x_reg.expr(), 0);
@@ -154,27 +178,46 @@ pub fn TimingExecutionUnit(comptime x_bits: usize, comptime count_nibbles: bool)
                     b.assign(fetch_pending, 1),
                     b.assign(delay_cnt, 0),
                     b.assign(outs.core_running, 1),
+                    // Start means a fresh capture: clear fault and sample state.
+                    b.assign(outs.op_fault, 0),
+                    b.assign(halt_r, 0),
+                    b.assign(isr, 0),
+                    b.assign(sample_cnt, 0),
+                    b.assign(rx_ptr, 0),
                 }, &.{
                     b.when(is_stop, &.{
                         b.assign(outs.core_running, 0),
                     }, &.{
                         b.when(is_running, &.{
-                            b.when(b.eq(fetch_pending.expr(), 1), &.{
-                                // SRAM captures this PC now; consume its registered result next edge.
+                            b.when(halt_r.expr(), &.{
+                                // Decode-reject latched on the previous execute:
+                                // halt and expose the sticky fault.
+                                b.assign(outs.core_running, 0),
+                                b.assign(outs.op_fault, 1),
                                 b.assign(fetch_pending, 0),
-                                b.when(delay_active, &.{b.assign(delay_cnt, delay_dec)}, &.{}),
+                                b.assign(delay_cnt, 0),
+                                b.assign(halt_r, 0),
                             }, &.{
-                                b.when(delay_active, &.{
-                                    b.assign(delay_cnt, delay_dec),
+                                b.when(b.eq(fetch_pending.expr(), 1), &.{
+                                    // SRAM captures this PC now; consume its registered result next edge.
+                                    b.assign(fetch_pending, 0),
+                                    b.when(delay_active, &.{b.assign(delay_cnt, delay_dec)}, &.{}),
                                 }, &.{
-                                    b.assign(fetch_pending, 1),
-                                    b.assign(outs.pc, b.add(outs.pc.expr(), 1)),
-                                    b.assign(delay_cnt, ins.inst.slice(15, 0)),
-                                    b.case_(op, &.{
-                                        b.caseBranch(@intFromEnum(isa.Opcode.SET), &set_stmts),
-                                        b.caseBranch(@intFromEnum(isa.Opcode.JMP), &jmp_stmts),
-                                        b.caseBranch(@intFromEnum(isa.Opcode.IN), &in_stmts),
-                                    }, &.{}),
+                                    b.when(delay_active, &.{
+                                        b.assign(delay_cnt, delay_dec),
+                                    }, &.{
+                                        b.assign(fetch_pending, 1),
+                                        b.assign(outs.pc, b.add(outs.pc.expr(), 1)),
+                                        b.assign(delay_cnt, ins.inst.slice(15, 0)),
+                                        // Register the decode decision so it does
+                                        // not sit on the execute mux path.
+                                        b.assign(halt_r, b.not(decode_ok)),
+                                        b.case_(op, &.{
+                                            b.caseBranch(@intFromEnum(isa.Opcode.SET), &set_stmts),
+                                            b.caseBranch(@intFromEnum(isa.Opcode.JMP), &jmp_stmts),
+                                            b.caseBranch(@intFromEnum(isa.Opcode.IN), &in_stmts),
+                                        }, &.{}),
+                                    }),
                                 }),
                             }),
                         }, &.{}),
