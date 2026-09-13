@@ -1050,3 +1050,178 @@ test "timing intent validation rejects bad required windows and clock topology" 
     try expectIntentError(BadJitter);
     try expectIntentError(NegativeSourcePeriod);
 }
+
+// ============================================================================
+// Hierarchy validation: parent/child rows must agree.
+// ============================================================================
+
+const HierarchyChild = struct {
+    pub const name = "hier_child";
+    pub const Inputs = struct {
+        clk: Signal(1),
+        rst_n: Signal(1),
+        ref_clk: Signal(1),
+        a: Signal(1),
+    };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        try mb.addClockDomain(.{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .relationship = .{
+                .relation = .asynchronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 10.0, .unit = .ns },
+                .jitter = .{ .value = 50.0, .unit = .ps },
+            },
+        });
+        try mb.assign(outs.y, ins.a);
+    }
+};
+
+test "hierarchy timing validation accepts matching parent/child relationships" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const MatchingParent = struct {
+        pub const name = "hier_parent_match";
+        pub const Inputs = struct {
+            clk: Signal(1),
+            rst_n: Signal(1),
+            ref_clk: Signal(1),
+            a: Signal(1),
+        };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .asynchronous,
+                    .related_to = ins.ref_clk.ref,
+                    .source_period = .{ .value = 10.0, .unit = .ns },
+                    .jitter = .{ .value = 50.0, .unit = .ps },
+                },
+            });
+            _ = try mb.instantiate(HierarchyChild, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .ref_clk = ins.ref_clk,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(MatchingParent);
+}
+
+test "hierarchy timing validation rejects conflicting parent/child relationships" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ConflictingParent = struct {
+        pub const name = "hier_parent_conflict";
+        pub const Inputs = struct {
+            clk: Signal(1),
+            rst_n: Signal(1),
+            ref_clk: Signal(1),
+            a: Signal(1),
+        };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .mesochronous,
+                    .related_to = ins.ref_clk.ref,
+                    .source_period = .{ .value = 8.0, .unit = .ns },
+                    .jitter = .{ .value = 40.0, .unit = .ps },
+                },
+            });
+            _ = try mb.instantiate(HierarchyChild, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .ref_clk = ins.ref_clk,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(ConflictingParent));
+}
+
+test "hierarchy timing validation rejects conflicting parent/child input rows" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const AsyncChild = struct {
+        pub const name = "hier_async_child";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n });
+            const d0 = try mb.reg("d0", 1, 0);
+            const d1 = try mb.reg("d1", 1, 0);
+            const b = mb.exprs();
+            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{
+                b.assign(d0, ins.a.expr()),
+                b.assign(d1, d0.expr()),
+            });
+            try mb.assign(outs.y, d1.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.a.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{ .{ .signal = d0.ref, .bit = 0 }, .{ .signal = d1.ref, .bit = 0 } },
+            });
+        }
+    };
+
+    const SyncParent = struct {
+        pub const name = "hier_sync_parent";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(AsyncChild, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.a.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(SyncParent));
+}

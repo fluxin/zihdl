@@ -63,8 +63,11 @@ byte-for-byte unchanged, so products and existing consumers never see a new
 schema unless a runner asks for one. The fixture passes v2; product runners
 stay v1. New fields are additive under `/2` because consumers skip unknown
 JSON fields and the version gate promises capabilities, not byte layout; a
-consumer that does not read a field keeps it unknown. `/3` is reserved for
-incompatible schema changes.
+consumer that does not read a field keeps it unknown. The live `oasic`
+consumer reads and binds v2 (required windows, release topology, clock
+relationships) and reports unsupported timing checks; the timing equations,
+recovery/removal and relationship analysis remain its responsibility. `/3` is
+reserved for incompatible schema changes.
 
 | Field | Meaning |
 |---|---|
@@ -90,6 +93,14 @@ the `instances` connection table:
   fields declared on one side fill in the other. Conflicting declarations for
   the same physical input are errors: consumers must report them rather than
   silently choosing one.
+- **Clock relationships:** parent and child rows describing the same connected
+  clock pair must agree on relation, source period and jitter.
+
+`js_asic` enforces these rules itself in `Design.elaborate` (through
+`Design.validateTimingHierarchy`), so a contradiction written into one design
+fails elaboration with `error.InvalidTimingIntent` instead of reaching the
+consumer. Resolution and analysis still belong to the consumer; the build-time
+check only rejects contradictory authoring.
 
 The fixture's canonical artifact is `out/contract/timing_contract.json` (v2);
 `out/contract/timing_contract_v1.json` is the byte-stable `/1` projection for
@@ -98,12 +109,13 @@ covers both arrival bounds, a 2-bit vector synchronizer (per-bit vector stage
 identities are unit-test covered; current consumers reject them), an
 intentionally unsynchronized input, a real async-assert/sync-release reset
 chain (`reset_sync_2`) whose output resets the flat child domains, with the
-two-edge release latency replayed across the contract stimulus, an
-asynchronous parent and child clock relationship to an external reference,
-declared-but-unknown (null) slew/load/required values, both load units, output
-required windows, child output defaults with per-instance parent row overrides
-(value, unit change, explicit null and required replacement) and no-parent-row
-fallback, plus compatible parent/child input merges (parent slew, child
+two-edge release latency replayed across the contract stimulus, matching
+asynchronous parent and child clock relationships to the shared external
+reference (the conflict check rejects disagreement), declared-but-unknown
+(null) slew/load/required values, both load units, output required windows,
+child output defaults with per-instance parent row overrides (value, unit
+change, explicit null and required replacement) and no-parent-row fallback,
+plus compatible parent/child input merges (parent slew, child
 classification/synchronizer/arrival).
 
 Per-bit slew/load stays whole-port: one row applies to every bit of its port

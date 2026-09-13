@@ -2122,9 +2122,143 @@ pub const Design = struct {
         try self.ensureModule(BlockType);
         const mod = self.findModule(BlockType.name).?;
         mod.is_top = true;
+        try self.validateTimingHierarchy();
         return mod;
     }
+
+    /// Validates authored timing intent across instances with the same
+    /// compatibility rules consumers apply when joining rows through the
+    /// `instances` table:
+    ///
+    ///   * parent and child input rows for one connected port merge field by
+    ///     field, so both sides declaring different classifications, clocks,
+    ///     arrival bounds or slew values is an error;
+    ///   * parent and child clock relationship rows that describe the same
+    ///     connected clock pair must agree on relation, source period and
+    ///     jitter;
+    ///   * output rows are overrides, so they never conflict.
+    ///
+    /// Resolution itself stays consumer-side; this pass only rejects
+    /// contradictions the author wrote into one design so they fail at
+    /// elaboration instead of at artifact consumption. Errors name the parent
+    /// module, instance, child module and signal.
+    pub fn validateTimingHierarchy(self: *const Design) !void {
+        for (self.modules.items) |parent| {
+            for (parent.instances) |inst| {
+                const child = self.findModule(inst.module_name) orelse continue;
+                try validateInstanceTiming(parent, child, inst);
+            }
+        }
+    }
 };
+
+fn hierarchySymEqual(a: SymRef, b: SymRef) bool {
+    return a.scope == b.scope and a.idx == b.idx;
+}
+
+fn hierarchyTimeEqual(a: TimeValue, b: TimeValue) bool {
+    return timeValueInPs(a) == timeValueInPs(b);
+}
+
+fn instanceParentSignal(inst: Instance, child_port: []const u8) ?SymRef {
+    for (inst.connections) |conn| {
+        if (std.mem.eql(u8, conn.port_name, child_port)) return conn.signal;
+    }
+    return null;
+}
+
+fn findInputTiming(module: *const Module, signal: SymRef) ?InputTiming {
+    for (module.timing) |row| {
+        if (row.signal.scope == signal.scope and row.signal.idx == signal.idx) return row;
+    }
+    return null;
+}
+
+fn hierarchyConflict(parent: *const Module, inst: Instance, child: *const Module, signal: []const u8, what: []const u8) error{InvalidTimingIntent} {
+    std.log.warn("js_asic: conflicting {s} for input '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+        what, signal, parent.name, child.name, inst.instance_name,
+    });
+    return error.InvalidTimingIntent;
+}
+
+fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Instance) !void {
+    for (child.timing) |child_row| {
+        const parent_signal = instanceParentSignal(inst, child_row.signal.name()) orelse continue;
+        const parent_row = findInputTiming(parent, parent_signal) orelse continue;
+        if (child_row.classification != .unknown and parent_row.classification != .unknown and
+            child_row.classification != parent_row.classification)
+        {
+            return hierarchyConflict(parent, inst, child, child_row.signal.name(), "classification");
+        }
+        if (child_row.clock != null and parent_row.clock != null) {
+            const mapped = instanceParentSignal(inst, child_row.clock.?.name()) orelse child_row.clock.?;
+            if (!hierarchySymEqual(mapped, parent_row.clock.?)) {
+                return hierarchyConflict(parent, inst, child, child_row.signal.name(), "destination clock");
+            }
+        }
+        if (child_row.arrival_min != null and parent_row.arrival_min != null and
+            !hierarchyTimeEqual(child_row.arrival_min.?, parent_row.arrival_min.?))
+        {
+            return hierarchyConflict(parent, inst, child, child_row.signal.name(), "arrival min");
+        }
+        if (child_row.arrival_max != null and parent_row.arrival_max != null and
+            !hierarchyTimeEqual(child_row.arrival_max.?, parent_row.arrival_max.?))
+        {
+            return hierarchyConflict(parent, inst, child, child_row.signal.name(), "arrival max");
+        }
+        if (child_row.slew != null and parent_row.slew != null) {
+            const cs = child_row.slew.?;
+            const ps = parent_row.slew.?;
+            if (!std.meta.eql(cs.threshold, ps.threshold)) {
+                return hierarchyConflict(parent, inst, child, child_row.signal.name(), "slew thresholds");
+            }
+            inline for (.{ .{ cs.rise, ps.rise, "slew rise" }, .{ cs.fall, ps.fall, "slew fall" } }) |pair| {
+                inline for (.{ 0, 1 }) |bound_index| {
+                    const cb = if (bound_index == 0) pair[0].min else pair[0].max;
+                    const pb = if (bound_index == 0) pair[1].min else pair[1].max;
+                    if (cb != null and pb != null and !hierarchyTimeEqual(cb.?, pb.?)) {
+                        return hierarchyConflict(parent, inst, child, child_row.signal.name(), pair[2]);
+                    }
+                }
+            }
+        }
+    }
+
+    for (parent.clocks) |parent_clock| {
+        const parent_rel = parent_clock.relationship orelse continue;
+        const parent_related = parent_rel.related_to orelse continue;
+        for (child.clocks) |child_clock| {
+            const child_rel = child_clock.relationship orelse continue;
+            const child_related = child_rel.related_to orelse continue;
+            const mapped_clock = instanceParentSignal(inst, child_clock.clk.name()) orelse continue;
+            const mapped_related = instanceParentSignal(inst, child_related.name()) orelse continue;
+            if (!hierarchySymEqual(mapped_clock, parent_clock.clk.ref)) continue;
+            if (!hierarchySymEqual(mapped_related, parent_related)) continue;
+            if (parent_rel.relation != child_rel.relation) {
+                std.log.warn("js_asic: conflicting clock relationship kind for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                    parent_clock.name, parent.name, child.name, inst.instance_name,
+                });
+                return error.InvalidTimingIntent;
+            }
+            if (parent_rel.source_period != null and child_rel.source_period != null and
+                !hierarchyTimeEqual(parent_rel.source_period.?, child_rel.source_period.?))
+            {
+                std.log.warn("js_asic: conflicting clock source period for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                    parent_clock.name, parent.name, child.name, inst.instance_name,
+                });
+                return error.InvalidTimingIntent;
+            }
+            if (parent_rel.jitter != null and child_rel.jitter != null and
+                !hierarchyTimeEqual(parent_rel.jitter.?, child_rel.jitter.?))
+            {
+                std.log.warn("js_asic: conflicting clock jitter for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                    parent_clock.name, parent.name, child.name, inst.instance_name,
+                });
+                return error.InvalidTimingIntent;
+            }
+        }
+    }
+}
 
 pub const ModuleBuilder = struct {
     allocator: std.mem.Allocator,

@@ -368,14 +368,19 @@ fn isPort(kind: ir.SymbolKind) bool {
 //     external load per port bit (`ff` or `pf`), excluding internal cell-pin
 //     and wire capacitance. A null load means unknown.
 //
-// Cross-module resolution is consumer-side. When joining a parent port to the
-// child rows through the `instances` table: a parent output row replaces the
-// bound child's whole output row (load and required together, explicit nulls
-// included); an absent parent row leaves the child's declaration in force.
-// Parent and child input rows merge field by field only when compatible
-// (classification, clock/domain, synchronizer shape); conflicting declarations
-// for the same physical input must be reported as errors, never silently
-// resolved.
+// Cross-module resolution is consumer-side; `Design.elaborate` additionally
+// validates the same compatibility rules across immediate parent/child
+// instances so contradictions fail the build, but it never rewrites rows.
+// When joining a parent port to the child rows through the `instances` table:
+// a parent output row replaces the bound child's whole output row (load and
+// required together, explicit nulls included); an absent parent row leaves the
+// child's declaration in force. Parent and child input rows merge field by
+// field only when compatible (classification, clock/domain, synchronizer
+// shape); conflicting declarations for the same physical input must be
+// reported as errors, never silently resolved. Clock relationship rows that
+// describe the same connected clock pair must likewise agree (relation,
+// related_to, source_period, jitter): consumers merge compatible rows and
+// report conflicts.
 //
 // Further additive v2 fields (all optional, consumers that do not read them
 // keep the value unknown):

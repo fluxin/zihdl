@@ -33,7 +33,7 @@ Everything else hangs off that. The public surface is exported through
 | `Expr(W)` / `AnyExpr` | width-carrying expressions; `AnyExpr` is the erased form |
 | `ParamSpec(W)` | a value-parameter field type for `Params` schemas |
 | `specializeShape(Family, overrides)` | resolves a family `Shape` schema (with defaults) to a concrete block type |
-| `Design` | module registry; `elaborate`, `ensureModule`, `findModule` |
+| `Design` | module registry; `elaborate`, `ensureModule`, `findModule`, `validateTimingHierarchy` |
 | `ModuleBuilder` | elaborates exactly one module definition |
 | `ExprBuilder` (`mb.exprs()`) | canonicalizing expression/statement factory |
 | `Stmt`, `CaseBranch`, `CaseVal` | statement tree |
@@ -121,7 +121,10 @@ lint never changes RTL.
 3. **`finish()` validates the module.** Duplicate signals/instances, multiple
    drivers, combinational loops, latch inference, undriven outputs, slice
    bounds, reset legality, parameter schema and timing references are rejected
-   before any backend runs.
+   before any backend runs. `elaborate()` additionally validates cross-instance
+   timing compatibility (`validateTimingHierarchy`): conflicting parent/child
+   input rows or clock relationships fail the build instead of reaching the
+   consumer.
 4. **Metadata is additive and versioned.** Provenance, timing intent and enum
    groups never change RTL bytes. Products emit `js_asic.timing_intent/1`;
    `/2` (slew/load/required, clock relationships, reset-release topology) is

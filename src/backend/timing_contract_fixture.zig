@@ -204,8 +204,10 @@ pub const Top = struct {
             .rst_n = ins.rst_n,
         }, .{}, .{});
 
-        // v2 clock relationship authored at the parent boundary: the system
-        // clock is mesochronous to the external reference clock.
+        // v2 clock relationship authored at the parent boundary. The child
+        // declares the same connected pair (its ref_clk port is wired to this
+        // ref_clk), so the two rows must agree; consumers merge compatible
+        // rows and report conflicts.
         try mb.addClockDomain(.{
             .name = "sys",
             .clk = ins.clk,
@@ -213,10 +215,10 @@ pub const Top = struct {
             .freq_hz = 120_000_000,
             .reset = .{ .release = .synchronous },
             .relationship = .{
-                .relation = .mesochronous,
+                .relation = .asynchronous,
                 .related_to = ins.ref_clk.ref,
-                .source_period = .{ .value = 8.0, .unit = .ns },
-                .jitter = .{ .value = 40.0, .unit = .ps },
+                .source_period = .{ .value = 10.0, .unit = .ns },
+                .jitter = .{ .value = 50.0, .unit = .ps },
             },
         });
 
