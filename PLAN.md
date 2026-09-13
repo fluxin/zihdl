@@ -227,6 +227,12 @@ oasic-side development required for this:
   rejects latch inference in comb processes, combinational loops, and undriven
   outputs, while reset coverage is structural (each process resets exactly
   what it assigns).
+- **CDC lint (done).** `src/cdc.zig` reports unsynchronized sequential captures
+  and unprotected asynchronous inputs, with per-bit domain ownership, declared
+  per-bit synchronizer stages, per-bit structural first-flop recognition and
+  asynchronous-input coverage resolved through instance subtrees (a parent's
+  boundary row draws on the descendant declarations, each counted once).
+  Crossing resolution through instance boundaries remains the consumer's.
 
 ### Phase 2 — backend targets and artifact contract (done)
 

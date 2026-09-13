@@ -108,12 +108,13 @@ when it names no bit and only its data bit otherwise; per-bit declared and
 structural coverage applies to width-aligned direct captures, while a slice,
 bit select or expression capture is exempt only when every bit is covered.
 Findings carry `bit` for the affected data bit, or null when the whole signal is
-reported. On flat modules the lint also reports an input classified
-`asynchronous` with any data bit covered by fewer than two declared
-synchronizer stages, one finding per uncovered bit (`kind ==
-.unsynchronized_input`; a whole-port row when no stage names a bit); parent
-boundary rows that resolve through instances are left to the consumer.
-Descriptive only: the lint never changes RTL.
+reported. The lint also reports an input classified `asynchronous` with any
+data bit covered by fewer than two declared synchronizer stages, one finding per
+uncovered bit (`kind == .unsynchronized_input`; a whole-port row when no stage
+names a bit). Coverage is gathered over the row's instance subtree, so a
+parent's boundary row draws on the descendant stages that capture the signal,
+each distinct declaration counted once; ancestor rows are not inherited
+downward. Descriptive only: the lint never changes RTL.
 
 ### backend
 
@@ -260,9 +261,9 @@ rather than the authoring half of this specific project.
 ### Suggested next steps, in order
 
 1. **CDC depth.** The bridge, mailbox, FIFO mailbox, async FIFO and structural
-   lint, now with per-bit ownership and per-bit declared/structural coverage,
-   landed; next are wider bundled-data handshake shapes and a formal crossing
-   proof rather than a heuristic audit.
+   lint, now with per-bit ownership, per-bit declared/structural coverage and
+   hierarchy-resolved asynchronous-input coverage, landed; next are wider
+   bundled-data handshake shapes. A formal crossing proof stays consumer-side.
 2. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape

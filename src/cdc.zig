@@ -37,10 +37,10 @@
 //! It also checks authored input intent: an input classified `asynchronous`
 //! with any data bit covered by fewer than two declared synchronizer stages is
 //! reported as an unprotected input, one finding per uncovered bit (or a
-//! whole-port finding when no stage names a bit). That check runs on flat
-//! modules only; a parent's boundary rows may be refined by the child that
-//! captures the signal, which is the consumer's hierarchical resolution to
-//! make.
+//! whole-port finding when no stage names a bit). Coverage is gathered over the
+//! row's instance subtree, so a parent's boundary row draws on the descendant
+//! stages that capture the signal; ancestor rows are not inherited downward and
+//! every distinct declaration counts once.
 //!
 //! Memories are treated as dual-port state, not as crossings, and external
 //! inputs are unknown rather than foreign. Findings are descriptive: the lint
@@ -855,12 +855,109 @@ pub fn lint(allocator: std.mem.Allocator, design: *const ir.Design) ![]Crossing 
     var findings = std.ArrayList(Crossing).empty;
     errdefer findings.deinit(allocator);
     for (design.modules.items) |module| {
-        try lintModule(allocator, module, &findings);
+        try lintModule(allocator, design, module, &findings);
     }
     return findings.toOwnedSlice(allocator);
 }
 
-fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: *std.ArrayList(Crossing)) !void {
+/// One declared synchronizer stage counted while walking an instance subtree;
+/// the key deduplicates declarations reached through several instances.
+const StageKey = struct {
+    module: []const u8,
+    signal: u32,
+    bit: ?u8,
+};
+
+/// Accumulated declared-stage coverage for one authored asynchronous input.
+const Coverage = struct {
+    once: Mask = 0,
+    twice: Mask = 0,
+    /// Any counted stage named a data bit, so findings narrow to bits.
+    named: bool = false,
+};
+
+/// Adds one timing row's declared stages to `coverage`, counting each distinct
+/// stage declaration once: the same module instantiated twice declares the same
+/// flops, not a second synchronizer chain.
+fn addRowStages(
+    allocator: std.mem.Allocator,
+    coverage: *Coverage,
+    module_name: []const u8,
+    row: ir.InputTiming,
+    seen: *std.ArrayList(StageKey),
+) !void {
+    for (row.stages) |stage| {
+        var duplicate = false;
+        for (seen.items) |existing| {
+            if (existing.signal == stage.signal.idx and existing.bit == stage.bit and
+                std.mem.eql(u8, existing.module, module_name))
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        try seen.append(allocator, .{ .module = module_name, .signal = stage.signal.idx, .bit = stage.bit });
+        if (stage.bit != null) coverage.named = true;
+        const covered = stageCoverage(stage, row.signal.width());
+        coverage.twice |= coverage.once & covered;
+        coverage.once |= covered;
+    }
+}
+
+fn moduleInPath(path: []const []const u8, name: []const u8) bool {
+    for (path) |entry| {
+        if (std.mem.eql(u8, entry, name)) return true;
+    }
+    return false;
+}
+
+/// Maps one signal of `module` to the root signal it resolves to: identity for
+/// the root itself, otherwise the accumulated port map. Internal signals and
+/// paths that leave the root resolve to null and stop matching.
+fn mapToRoot(is_root: bool, map: []const ?ir.SymRef, signal: ir.SymRef) ?ir.SymRef {
+    if (is_root) return signal;
+    if (signal.idx >= map.len) return null;
+    return map[signal.idx];
+}
+
+/// Walks `module`'s instance subtree and folds the declared stages of every
+/// timing row whose signal resolves to `target` into `coverage`. A parent's
+/// boundary row therefore draws on descendant declarations, because the
+/// synchronizer chain may cross hierarchy levels; ancestor rows are not
+/// inherited downward.
+fn collectSubtreeCoverage(
+    design: *const ir.Design,
+    root: *const ir.Module,
+    module: *const ir.Module,
+    sym_map: []const ?ir.SymRef,
+    target: ir.SymRef,
+    path: *std.ArrayList([]const u8),
+    coverage: *Coverage,
+    seen: *std.ArrayList(StageKey),
+) !void {
+    for (module.instances) |inst| {
+        const child = design.findModule(inst.module_name) orelse continue;
+        if (moduleInPath(path.items, child.name)) continue;
+        const child_map = try design.allocator.alloc(?ir.SymRef, child.scope.symbols.items.len);
+        defer design.allocator.free(child_map);
+        @memset(child_map, null);
+        for (inst.connections) |conn| {
+            const child_sym = child.scope.find(conn.port_name) orelse continue;
+            child_map[child_sym.idx] = mapToRoot(module == root, sym_map, conn.signal);
+        }
+        for (child.timing) |row| {
+            const mapped = child_map[row.signal.idx] orelse continue;
+            if (mapped.scope != target.scope or mapped.idx != target.idx) continue;
+            try addRowStages(design.allocator, coverage, child.name, row, seen);
+        }
+        try path.append(design.allocator, child.name);
+        defer _ = path.pop();
+        try collectSubtreeCoverage(design, root, child, child_map, target, path, coverage, seen);
+    }
+}
+
+fn lintModule(allocator: std.mem.Allocator, design: *const ir.Design, module: *const ir.Module, findings: *std.ArrayList(Crossing)) !void {
     const n = module.scope.symbols.items.len;
     var ctx = ModuleLint{
         .allocator = allocator,
@@ -1012,29 +1109,33 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
     // Authored asynchronous inputs need every data bit covered by at least two
     // declared synchronizer stages; a stage without a bit covers the whole
     // input and a per-bit stage only its own bit. Fewer covering stages means
-    // the bit is unprotected, whatever the internal structure looks like. A
-    // finding narrows to the uncovered bits when any stage names a bit, and
-    // stays a whole-port row otherwise. Only flat modules are checked: a
-    // parent's boundary rows may be refined by the child that actually captures
-    // the signal, so resolving them is the consumer's job.
-    if (module.instances.len == 0) {
+    // the bit is unprotected, whatever the internal structure looks like.
+    // Coverage is gathered over the row's whole instance subtree, so a parent's
+    // boundary row draws on the descendant stages that capture the signal while
+    // ancestor rows are not inherited downward; each distinct declaration is
+    // counted once. A finding narrows to the uncovered bits when any counted
+    // stage names a bit, and stays a whole-port row otherwise.
+    {
+        const identity = try allocator.alloc(?ir.SymRef, n);
+        defer allocator.free(identity);
+        for (identity, 0..) |*slot, i| slot.* = ir.SymRef{ .scope = module.scope, .idx = @intCast(i) };
+        var path = std.ArrayList([]const u8).empty;
+        defer path.deinit(allocator);
+        try path.append(allocator, module.name);
+        var seen = std.ArrayList(StageKey).empty;
+        defer seen.deinit(allocator);
         for (module.timing) |intent| {
             if (intent.classification != .asynchronous) continue;
+            var coverage = Coverage{};
+            seen.clearRetainingCapacity();
+            try addRowStages(allocator, &coverage, module.name, intent, &seen);
+            try collectSubtreeCoverage(design, module, module, identity, intent.signal, &path, &coverage, &seen);
             const width = intent.signal.width();
             const full = widthMask(width);
-            var covered_once: Mask = 0;
-            var covered_twice: Mask = 0;
-            var per_bit = false;
-            for (intent.stages) |stage| {
-                if (stage.bit != null) per_bit = true;
-                const covered = stageCoverage(stage, width);
-                covered_twice |= covered_once & covered;
-                covered_once |= covered;
-            }
-            const uncovered = full & ~covered_twice;
+            const uncovered = full & ~coverage.twice;
             if (uncovered == 0) continue;
             const to_clock = if (intent.clock) |clk| clk.name() else "";
-            if (!per_bit) {
+            if (!coverage.named) {
                 try appendRow(allocator, findings, .{
                     .kind = .unsynchronized_input,
                     .module = module.name,
@@ -1707,4 +1808,175 @@ test "CDC lint keeps whole-signal rows when ownership is control-only" {
     try std.testing.expectEqualStrings("b_cap", crossings[0].destination);
     try std.testing.expectEqualStrings("w", crossings[0].signal);
     try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
+}
+
+test "CDC lint checks asynchronous parent rows through instances" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Child = struct {
+        pub const name = "hier_unsynced_child";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const d0 = try mb.reg("d0", 1, 0);
+            try mb.seq(domain, &.{b.assign(d0, ins.async_in.expr())});
+            try mb.assign(outs.q, d0.expr());
+        }
+    };
+    const Parent = struct {
+        pub const name = "hier_unsynced_parent";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), raw_in: Signal(1) };
+        pub const Outputs = struct {};
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            _ = try mb.instantiate(Child, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .async_in = ins.raw_in,
+            }, .{}, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.raw_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Parent);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // The child capture declares no chain, so the parent boundary row is
+    // reported now that non-flat modules are checked.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_input, crossings[0].kind);
+    try std.testing.expectEqualStrings("hier_unsynced_parent", crossings[0].module);
+    try std.testing.expectEqualStrings("raw_in", crossings[0].signal);
+    try std.testing.expectEqualStrings("clk", crossings[0].to_clock);
+    try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
+}
+
+test "CDC lint lets descendant stages cover a parent boundary row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Child = struct {
+        pub const name = "hier_covered_child";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const d0 = try mb.reg("d0", 1, 0);
+            const d1 = try mb.reg("d1", 1, 0);
+            try mb.seq(domain, &.{
+                b.assign(d0, ins.async_in.expr()),
+                b.assign(d1, d0.expr()),
+            });
+            try mb.assign(outs.q, d1.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.async_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = d0.ref, .bit = 0 },
+                    .{ .signal = d1.ref, .bit = 0 },
+                },
+            });
+        }
+    };
+    const Parent = struct {
+        pub const name = "hier_covered_parent";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), raw_in: Signal(1) };
+        pub const Outputs = struct {};
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            _ = try mb.instantiate(Child, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .async_in = ins.raw_in,
+            }, .{}, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.raw_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Parent);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 0), crossings.len);
+}
+
+test "CDC lint unions declared stages across hierarchy levels" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Child = struct {
+        pub const name = "hier_union_child";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const d0 = try mb.reg("d0", 1, 0);
+            try mb.seq(domain, &.{b.assign(d0, ins.async_in.expr())});
+            try mb.assign(outs.q, d0.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.async_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{.{ .signal = d0.ref, .bit = 0 }},
+            });
+        }
+    };
+    const Parent = struct {
+        pub const name = "hier_union_parent";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), raw_in: Signal(1) };
+        pub const Outputs = struct {};
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const p_stage = try mb.reg("p_stage", 1, 0);
+            _ = try mb.instantiate(Child, "u_child", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .async_in = ins.raw_in,
+            }, .{}, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.raw_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{.{ .signal = p_stage.ref, .bit = 0 }},
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Parent);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // One parent stage plus one descendant stage cover the parent's boundary
+    // row; the child's own one-stage row stays under-covered.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_input, crossings[0].kind);
+    try std.testing.expectEqualStrings("hier_union_child", crossings[0].module);
+    try std.testing.expectEqualStrings("async_in", crossings[0].signal);
 }
