@@ -2117,7 +2117,10 @@ fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
 
 /// Validates a block family's `Shape` schema and merges instance-site
 /// overrides over the defaults: unknown fields, missing defaults, non-struct
-/// schemas and non-comptime values are compile errors.
+/// schemas and non-comptime values are compile errors. When the family declares
+/// `pub fn validateShape(comptime shape: Shape) void`, that hook runs once on
+/// the merged shape so cross-field constraints fail with a family-specific
+/// compile error before `specialize` builds the concrete type.
 fn resolveShape(comptime Family: type, comptime overrides: anytype) Family.Shape {
     comptime {
         if (!@hasDecl(Family, "Shape")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub const Shape`");
@@ -2139,6 +2142,7 @@ fn resolveShape(comptime Family: type, comptime overrides: anytype) Family.Shape
         for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
             @field(m, field.name) = @field(overrides, field.name);
         }
+        if (@hasDecl(Family, "validateShape")) Family.validateShape(m);
         break :blk m;
     };
 }
@@ -3965,6 +3969,13 @@ test "block families specialize child shape from parent parameters" {
 
     const MemFamily = struct {
         pub const Shape = struct { WIDTH: usize = 8, DEPTH: usize = 4 };
+        /// Cross-field constraint hook: exercises `resolveShape`'s
+        /// `validateShape` call on the valid path (the failing path is a
+        /// compile error by construction).
+        pub fn validateShape(comptime shape: Shape) void {
+            if (shape.WIDTH == 0) @compileError("shaped_mem needs a non-zero WIDTH");
+            if (shape.DEPTH < 2 or !std.math.isPowerOfTwo(shape.DEPTH)) @compileError("shaped_mem needs a power-of-two DEPTH >= 2");
+        }
         pub fn specialize(comptime shape: Shape) type {
             const AW = std.math.log2_int_ceil(usize, shape.DEPTH);
             return struct {

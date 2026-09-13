@@ -191,9 +191,11 @@ rather than the authoring half of this specific project.
   arguments. Block families declare a `Shape` schema of elaboration-time
   values and `specialize(shape) type`; `instantiateShape` merges instance-site
   overrides with the defaults and forwards a parent's comptime value into the
-  child, producing a distinct checked module per shape. Runtime `ParamSpec`
-  values remain 64-bit Verilog overrides and still cannot size ports or
-  memories.
+  child, producing a distinct checked module per shape. A family may declare
+  `pub fn validateShape(comptime shape) void`; `resolveShape` runs it once on
+  the merged shape before `specialize`, so cross-field constraints fail with a
+  family-specific compile error. Runtime `ParamSpec` values remain 64-bit
+  Verilog overrides and still cannot size ports or memories.
 - No IR-level generate/loop construct: elaboration loops are Zig `inline for`.
   Intentional, but it means no reproducible "same source, runtime parameter
   set" flow.
@@ -201,8 +203,8 @@ rather than the authoring half of this specific project.
   `Param(W)` or constant can be forwarded by name into a child override
   (emitted `#(.CHILD(PARENT))`), so a top-level override reaches descendants
   without being frozen to a literal; forwarded widths are checked against the
-  child parameter. There is still no automatic propagation for symbols that
-  are not explicitly passed. Structural `Shape` values are explicit at each
+  child parameter. Forwarding is explicit by design: same-name symbols are
+  never connected implicitly. Structural `Shape` values are explicit at each
   instantiation, and `instantiateShape` records the resolved shape (defaults
   merged with overrides) on the instance as `instances[].shape` in
   `design.json`.
@@ -267,10 +269,10 @@ rather than the authoring half of this specific project.
 ### Suggested next steps, in order
 
 1. **Parameter propagation**: structural `Shape` specialization from a parent's
-   comptime values, forwarding a parent `Param`/constant into a child override,
-   and per-instance resolved-shape export in `design.json` landed. Remaining:
-   richer shape constraint errors and automatic propagation for symbols that
-   are not explicitly passed.
+   comptime values, a family `validateShape` constraint hook, forwarding a
+   parent `Param`/constant into a child override, and per-instance resolved-shape
+   export in `design.json` landed. Forwarding stays explicit by design: no
+   same-name implicit propagation is planned.
 2. **Consume the per-bit timing rows**: declaration, validation and additive
    `/2` export for per-bit slew/load landed, and hierarchy contradictions are
    rejected transitively through silent levels and siblings. The live consumer
