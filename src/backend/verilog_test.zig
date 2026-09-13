@@ -135,6 +135,45 @@ test "signed expressions emit $signed and arithmetic shift" {
     try std.testing.expect(std.mem.indexOf(u8, v, ">>> 4'd1") != null);
 }
 
+test "division and remainder emit target operators with Verilog widths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const D = struct {
+        pub const Inputs = struct { a: Signal(8), b: Signal(8), c: Signal(8), d: Signal(8) };
+        pub const Outputs = struct { uq: Signal(8), ur: Signal(8), sq: Signal(8), sr: Signal(8) };
+        pub const name = "div_mod_ops";
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            const quotient = b.div(ins.a, ins.b);
+            try std.testing.expectEqual(@as(usize, 8), @TypeOf(quotient).width);
+            try mb.assign(outs.uq, quotient);
+            try mb.assign(outs.ur, b.mod(ins.a, ins.b));
+            try mb.assign(outs.sq, b.div(b.asSigned(ins.c), b.asSigned(ins.d)));
+            try mb.assign(outs.sr, b.mod(b.asSigned(ins.c), b.asSigned(ins.d)));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.input("a", 8);
+    const b8 = try top.input("b", 8);
+    const c = try top.input("c", 8);
+    const d = try top.input("d", 8);
+    _ = try top.instantiate(D, "u_d", .{ .a = a, .b = b8, .c = c, .d = d }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign uq = (a / b);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign ur = (a % b);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign sq = $signed(($signed(c) / $signed(d)));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign sr = $signed(($signed(c) % $signed(d)));") != null);
+}
+
 test "localparam symbols are usable in expressions and case labels" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

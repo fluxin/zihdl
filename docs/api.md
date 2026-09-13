@@ -63,7 +63,7 @@ Everything else hangs off that. The public surface is exported through
 | Literals/refs | `lit`, `ref`, `intern` |
 | Sign/width | `asSigned`, `asUnsigned`, `zext`, `sext`, `trunc`, `resize` |
 | Logic | `not`, `bitNot`, `neg`, `and_`, `or_`, `band`, `bor`, `bxor` |
-| Arithmetic | `add`, `sub`, `mul` |
+| Arithmetic | `add`, `sub`, `mul`, `div`, `mod` |
 | Compare | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `slt`, `sle`, `sgt`, `sge` |
 | Shift | `shl`, `shr` (signed operands emit `>>>`) |
 | Select/concat | `ternary`, `mux`, `bit`, `bitDyn`, `slice`, `concat`, `fill` |
@@ -125,9 +125,12 @@ rather than the authoring half of this specific project.
 ### Gaps by category
 
 **Expression language**
-- No division/modulo (`/`, `%`) in `BinOp`. Constant rotate is
-  `lib.rotl`/`rotr` (slice concatenation); dynamic rotate is built from
-  shifts/ors.
+- `div`/`mod` emit `/` and `%` with Verilog width and sign rules, but
+  `oasic`'s parser has no slash/percent token yet, so designs using them are
+  Icarus-verified only until the checker catches up. Constant divide-by-zero
+  stays unfolded and is left to the simulator as Verilog `x`.
+- Rotate has no operator: constant rotate is `lib.rotl`/`rotr` (slice
+  concatenation); dynamic rotate is built from shifts/ors.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
   bit at runtime. Variable field extraction needs `shift`+`mask` today.
 - Signedness is expression-level (`asSigned`) only; ports/registers cannot be
@@ -197,11 +200,11 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Arithmetic in lockstep with `oasic`.** `/` and `%` are on oasic's missing
-   front-end list and nothing here needs them yet (dividers are counters), so
-   land the checker parser/lowering first and add the IR operators in the same
-   change. Constant rotate already landed as `lib.rotl`/`rotr`; signed port and
-   register declarations are the other parser-relevant arithmetic item.
+1. **`oasic` arithmetic parity.** `/` and `%` now exist here (with folding and
+   an Icarus witness), so the checker side is the remaining step: slash and
+   percent tokens plus lowering and simulator semantics, then replay a divider
+   example through `-sim-verilog`. Signed port/register declarations are the
+   other parser-relevant arithmetic item.
 2. **Handshake and bundled-data CDC.** `sync2`, `syncInput`, `pulseSync`,
    `resetSync` and `AsyncFifoBlock` now cover the common crossings; add
    request/acknowledge bridges, mailboxes and a CDC structural lint.

@@ -117,6 +117,9 @@ zig build sim
 # Dual-clock async FIFO witness: emit, lint and replay (iverilog)
 zig build async-fifo
 
+# Division/remainder witness: operators and folded constants (iverilog)
+zig build divmod
+
 # Lint and simulate every emitted artifact
 zig build verify
 ```
@@ -130,7 +133,7 @@ holes matter for general-purpose use; the detailed review is in
 
 | Area | Gap |
 |---|---|
-| Expressions | No integer division/modulo (constant rotates are `lib.rotl`/`rotr`); `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
+| Expressions | `div`/`mod` emit `/`/`%`, but oasic has no slash/percent token yet, so they are Icarus-verified only; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
 | Parameterization | Widths/depths are comptime type arguments; value parameters are 64-bit and cannot size ports or memories, so a parent cannot specialize a child's shape |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
 | Clocking / CDC / IP | Async FIFO and pulse/reset synchronizers landed; remaining: request/ack bridge, mailboxes, CDC structural lint, and Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers); `ResetPolicy.release` itself still does not lower a synchronizer |

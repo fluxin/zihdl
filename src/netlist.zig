@@ -131,6 +131,8 @@ pub const BinOp = enum {
     add,
     sub,
     mul,
+    div,
+    mod,
     shl,
     shr,
     bit_and,
@@ -150,6 +152,8 @@ pub const BinOp = enum {
             .add => "+",
             .sub => "-",
             .mul => "*",
+            .div => "/",
+            .mod => "%",
             .shl => "<<",
             .shr => ">>",
             .bit_and => "&",
@@ -596,14 +600,37 @@ fn foldNode(x: *const AnyExpr) ?u64 {
         .bin_op => |bo| blk: {
             const a = bo.lhs.known orelse return null;
             const b = bo.rhs.known orelse return null;
-            const signed = bo.lhs.is_signed and bo.rhs.is_signed;
-            const av = extend(a, bo.lhs.width, x.width, signed);
-            const bv = extend(b, bo.rhs.width, x.width, signed);
-            const shift_max = if (x.width == 0) 0 else x.width - 1;
+            // Shifts are signed when their left operand is; every other
+            // operation is signed when both operands are (Verilog rules).
+            const signed = switch (bo.op) {
+                .shl, .shr => bo.lhs.is_signed,
+                else => bo.lhs.is_signed and bo.rhs.is_signed,
+            };
+            // Evaluate operands at the operation width: the result width for
+            // arithmetic, the widest operand for comparisons (whose result is
+            // one bit) and the left operand width for shifts.
+            const op_width = @max(bo.lhs.width, bo.rhs.width);
+            const av = extend(a, bo.lhs.width, op_width, signed);
+            const bv = extend(b, bo.rhs.width, op_width, signed);
+            const sa: i64 = @bitCast(signExtend(av, op_width));
+            const sb: i64 = @bitCast(signExtend(bv, op_width));
+            const shift_max = if (op_width == 0) 0 else op_width - 1;
             switch (bo.op) {
                 .add => break :blk (av +% bv) & res_mask,
                 .sub => break :blk (av -% bv) & res_mask,
                 .mul => break :blk (av *% bv) & res_mask,
+                .div => {
+                    if (bv == 0) return null;
+                    if (!signed) break :blk (av / bv) & res_mask;
+                    if (sa == std.math.minInt(i64) and sb == -1) break :blk @as(u64, @bitCast(sa)) & res_mask;
+                    break :blk @as(u64, @bitCast(@divTrunc(sa, sb))) & res_mask;
+                },
+                .mod => {
+                    if (bv == 0) return null;
+                    if (!signed) break :blk (av % bv) & res_mask;
+                    if (sa == std.math.minInt(i64) and sb == -1) break :blk 0;
+                    break :blk @as(u64, @bitCast(@rem(sa, sb))) & res_mask;
+                },
                 .bit_and => break :blk av & bv & res_mask,
                 .bit_or => break :blk (av | bv) & res_mask,
                 .bit_xor => break :blk (av ^ bv) & res_mask,
@@ -614,18 +641,15 @@ fn foldNode(x: *const AnyExpr) ?u64 {
                     if (bv > shift_max) {
                         break :blk if (signed and (av >> @intCast(shift_max)) & 1 == 1) res_mask else 0;
                     }
-                    if (signed) {
-                        const sv: i64 = @bitCast(av);
-                        break :blk @as(u64, @bitCast(sv >> @intCast(bv))) & res_mask;
-                    }
+                    if (signed) break :blk @as(u64, @bitCast(sa >> @intCast(bv))) & res_mask;
                     break :blk (av >> @intCast(bv)) & res_mask;
                 },
                 .eq => break :blk @intFromBool(av == bv),
                 .ne => break :blk @intFromBool(av != bv),
-                .lt => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) < @as(i64, @bitCast(bv)) else av < bv),
-                .le => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) <= @as(i64, @bitCast(bv)) else av <= bv),
-                .gt => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) > @as(i64, @bitCast(bv)) else av > bv),
-                .ge => break :blk @intFromBool(if (signed) @as(i64, @bitCast(av)) >= @as(i64, @bitCast(bv)) else av >= bv),
+                .lt => break :blk @intFromBool(if (signed) sa < sb else av < bv),
+                .le => break :blk @intFromBool(if (signed) sa <= sb else av <= bv),
+                .gt => break :blk @intFromBool(if (signed) sa > sb else av > bv),
+                .ge => break :blk @intFromBool(if (signed) sa >= sb else av >= bv),
             }
         },
     };
@@ -801,6 +825,16 @@ pub const ExprBuilder = struct {
     }
     pub fn mul(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.mul, a, b);
+    }
+    /// Truncating division. Signed when both operands are signed (Verilog
+    /// `$signed` semantics); division by zero is left to the simulator.
+    pub fn div(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
+        return self.bin(.div, a, b);
+    }
+    /// Remainder (Verilog `%`): the result takes the sign of the dividend when
+    /// both operands are signed.
+    pub fn mod(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
+        return self.bin(.mod, a, b);
     }
     pub fn band(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.bit_and, a, b);
@@ -3163,6 +3197,21 @@ test "constant folding and structural interning" {
     try std.testing.expectEqual(@as(?u64, 0xF8), sexted.known);
     const cmp = b.intern(b.eq(b.lit(4, 5), b.lit(4, 5)));
     try std.testing.expectEqual(@as(?u64, 1), cmp.known);
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.eq(b.lit(8, 5), b.lit(8, 3))).known);
+    try std.testing.expectEqual(@as(?u64, 1), b.intern(b.lt(b.lit(8, 3), b.lit(8, 5))).known);
+    try std.testing.expectEqual(@as(?u64, 1), b.intern(b.gt(b.lit(8, 5), b.lit(8, 3))).known);
+    try std.testing.expectEqual(@as(?u64, 1), b.intern(b.slt(b.asSigned(b.lit(8, 0xFE)), b.asSigned(b.lit(8, 1)))).known);
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.sgt(b.asSigned(b.lit(8, 0xFF)), b.asSigned(b.lit(8, 0)))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.shr(b.asSigned(b.lit(8, 0xFE)), 1)).known);
+
+    // Division and remainder fold with Verilog width and sign rules.
+    try std.testing.expectEqual(@as(?u64, 6), b.intern(b.div(b.lit(8, 20), b.lit(8, 3))).known);
+    try std.testing.expectEqual(@as(?u64, 2), b.intern(b.mod(b.lit(8, 20), b.lit(8, 3))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFD), b.intern(b.div(b.asSigned(b.lit(8, 0xF9)), b.asSigned(b.lit(8, 2)))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.mod(b.asSigned(b.lit(8, 0xF9)), b.asSigned(b.lit(8, 2)))).known);
+    const div_zero = b.intern(b.div(b.lit(8, 7), b.lit(8, 0)));
+    try std.testing.expect(div_zero.known == null);
+    try std.testing.expect(div_zero.node == .bin_op);
 
     // Signal-dependent nodes stay symbolic.
     const symbolic = b.intern(b.add(a, 1));
