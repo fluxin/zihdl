@@ -97,7 +97,84 @@ test "width inference and width-checked assignment" {
 
     const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(std.mem.indexOf(u8, v, "assign cat = {a, b};") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + b);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + {{4{1'b0}}, b});") != null);
+}
+
+test "add, subtract, multiply and bitwise normalize unequal widths explicitly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const A = struct {
+        pub const Inputs = struct {
+            a: Signal(8),
+            b: Signal(4),
+            c: Signal(3),
+            d: Signal(5),
+            e: Signal(2),
+            f: Signal(6),
+            g: Signal(7),
+            h: Signal(2),
+        };
+        pub const Outputs = struct {
+            sum: Signal(8),
+            diff: Signal(8),
+            prod: Signal(8),
+            banded: Signal(8),
+            bored: Signal(8),
+            bxored: Signal(8),
+            ssum: Signal(8),
+        };
+        pub const name = "arith_ops";
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            try std.testing.expectEqual(@as(usize, 8), @TypeOf(b.add(ins.a, ins.b)).width);
+            try mb.assign(outs.sum, b.add(ins.a, ins.b));
+            try mb.assign(outs.diff, b.sub(ins.c, ins.a));
+            try mb.assign(outs.prod, b.mul(ins.a, ins.d));
+            try mb.assign(outs.banded, b.band(ins.a, ins.e));
+            try mb.assign(outs.bored, b.bor(ins.a, ins.f));
+            try mb.assign(outs.bxored, b.bxor(ins.a, ins.g));
+            // Both operands signed: the narrower one sign-extends.
+            try mb.assign(outs.ssum, b.add(b.asSigned(ins.a), b.asSigned(ins.h)));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const ports = try top.declareInputs(struct {
+        a: Signal(8),
+        b: Signal(4),
+        c: Signal(3),
+        d: Signal(5),
+        e: Signal(2),
+        f: Signal(6),
+        g: Signal(7),
+        h: Signal(2),
+    });
+    const y = try top.declareOutputs(struct {
+        sum: Signal(8),
+        diff: Signal(8),
+        prod: Signal(8),
+        banded: Signal(8),
+        bored: Signal(8),
+        bxored: Signal(8),
+        ssum: Signal(8),
+    });
+    _ = try top.instantiate(A, "u_a", ports, y, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + {{4{1'b0}}, b});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign diff = ({{5{1'b0}}, c} - a);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign prod = (a * {{3{1'b0}}, d});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign banded = (a & {{6{1'b0}}, e});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign bored = (a | {{2{1'b0}}, f});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign bxored = (a ^ {{1{1'b0}}, g});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign ssum = $signed(($signed(a) + $signed({{6{h[1]}}, h})));") != null);
 }
 
 test "signed expressions emit $signed and arithmetic shift" {

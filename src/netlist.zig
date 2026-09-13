@@ -808,12 +808,20 @@ pub const ExprBuilder = struct {
 
     fn bin(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
-        const ae = self.coerce(a, W);
-        const be = self.coerce(b, W);
+        // Normalize both operands to the operation width with an explicit
+        // extension so the emitted operator is self-determined. Everything
+        // routed through here (arithmetic, division/remainder and bitwise) uses
+        // Verilog's rule: signed only when both operands are signed, in which
+        // case narrower operands sign-extend; otherwise they zero-extend.
+        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
+        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
+        const signed_op = a_signed and b_signed;
+        const ae = self.normOperand(a, W, signed_op);
+        const be = self.normOperand(b, W, signed_op);
         return .{ .e = .{
-            .width = @max(ae.width, be.width),
-            .is_signed = ae.is_signed and be.is_signed,
-            .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } },
+            .width = W,
+            .is_signed = signed_op,
+            .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae.e), .rhs = self.dup(be.e) } },
         } };
     }
 
@@ -838,19 +846,15 @@ pub const ExprBuilder = struct {
     }
 
     fn divmod(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
-        const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
-        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
-        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
-        const signed_op = a_signed and b_signed;
-        return self.bin(op, self.divOperand(a, W, signed_op), self.divOperand(b, W, signed_op));
+        return self.bin(op, a, b);
     }
 
-    /// Normalizes one division/remainder operand to the operation width with an
-    /// explicit extension: both operands are zero-extended unless both are
-    /// signed, matching Verilog's rule. Making the extension explicit keeps the
-    /// emitted RTL self-determined and lint-clean instead of relying on the
-    /// operator context to widen a narrower operand.
-    fn divOperand(self: ExprBuilder, x: anytype, comptime W: usize, signed_op: bool) Expr(W) {
+    /// Normalizes one binary operand to the operation width with an explicit
+    /// extension: both operands are zero-extended unless both are signed,
+    /// matching Verilog's rule. Making the extension explicit keeps the emitted
+    /// RTL self-determined and lint-clean instead of relying on the operator
+    /// context to widen a narrower operand.
+    fn normOperand(self: ExprBuilder, x: anytype, comptime W: usize, signed_op: bool) Expr(W) {
         if (@TypeOf(x) == comptime_int) {
             var value = self.lit(W, x).e;
             value.is_signed = signed_op;
@@ -3625,4 +3629,29 @@ test "bundle declarations record member paths and widths" {
     try std.testing.expectEqualStrings("w", w.name);
     try std.testing.expectEqualStrings("frame_t", w.type_name);
     try std.testing.expectEqual(SymbolKind.wire, w.members[0].ref.kind());
+}
+
+test "unequal-width operands fold exactly like explicit extension" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const b = ExprBuilder.init(alloc);
+
+    // Unsigned narrower operand zero-extends, matching the explicit zext.
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.add(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.add(b.lit(8, 0xF0), b.zext(b.lit(4, 0x0F), 8))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.sub(b.lit(8, 1), b.lit(4, 2))).known);
+
+    // Both signed: the narrower operand sign-extends; 1 + (-1) == 0.
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.add(b.asSigned(b.lit(8, 1)), b.asSigned(b.lit(4, 0xF)))).known);
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.add(b.lit(8, 1), b.sext(b.asSigned(b.lit(4, 0xF)), 8))).known);
+
+    // Mixed signedness is unsigned (Verilog rule): -1 is 15, not -1.
+    try std.testing.expectEqual(@as(?u64, 16), b.intern(b.add(b.lit(8, 1), b.asSigned(b.lit(4, 0xF)))).known);
+
+    // Multiplication and bitwise operators share the normalization.
+    try std.testing.expectEqual(@as(?u64, 0x10), b.intern(b.mul(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
+    try std.testing.expectEqual(@as(?u64, 0x00), b.intern(b.band(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.bor(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
+    try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.bxor(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
 }

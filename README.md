@@ -145,7 +145,7 @@ holes matter for general-purpose use; the detailed review is in
 
 | Area | Gap |
 |---|---|
-| Expressions | `div`/`mod` emit `/`/`%` with explicit operand extension and are verified end-to-end through oasic; `add`/`sub`/`mul`/bitwise unequal-width operands still lean on Verilog operator context; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
+| Expressions | `add`/`sub`/`mul`/`div`/`mod`/bitwise extend unequal-width operands explicitly and are verified end-to-end through oasic; comparisons still lean on Verilog operator context; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
 | Parameterization | Widths/depths are comptime type arguments; value parameters are 64-bit and cannot size ports or memories, so a parent cannot specialize a child's shape |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
 | Clocking / CDC / IP | Async FIFO and pulse/reset synchronizers landed; remaining: request/ack bridge, mailboxes, CDC structural lint, and Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers); `ResetPolicy.release` itself still does not lower a synchronizer |
