@@ -60,6 +60,156 @@ fn findInput(timing: std.json.Value, name: []const u8) ?std.json.Value {
     return null;
 }
 
+fn findOutput(timing: std.json.Value, name: []const u8) ?std.json.Value {
+    for (timing.object.get("modules").?.array.items[0].object.get("outputs").?.array.items) |output| {
+        if (std.mem.eql(u8, output.object.get("signal").?.string, name)) return output;
+    }
+    return null;
+}
+
+const SinkV2 = struct {
+    pub const name = "timing_sink_v2";
+    pub const Inputs = struct {
+        clk: Signal(1),
+        rst_n: Signal(1),
+        data: Signal(8),
+        flag: Signal(1),
+    };
+    pub const Outputs = struct {
+        q: Signal(8),
+        pulse: Signal(1),
+        bare: Signal(1),
+    };
+
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+        try mb.addClockDomain(domain);
+        const b = mb.exprs();
+
+        const q = try mb.reg("q_reg", 8, 0);
+        try mb.assign(outs.q, q);
+        try mb.assign(outs.pulse, ins.flag);
+        try mb.assign(outs.bare, ins.flag);
+        try mb.seq(domain, &.{b.assign(q, ins.data)});
+
+        try mb.addInputTiming(.{
+            .signal = ins.data.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+            .arrival_min = .{ .value = -0.25, .unit = .ns },
+            .arrival_max = .{ .value = 0.75, .unit = .ns },
+            .slew = .{
+                .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                .rise = .{
+                    .min = .{ .value = 0.1, .unit = .ns },
+                    .max = .{ .value = 0.4, .unit = .ns },
+                },
+                .fall = .{ .min = .{ .value = 90, .unit = .ps } },
+            },
+        });
+        try mb.addInputTiming(.{ .signal = ins.flag.ref, .classification = .asynchronous });
+
+        try mb.addOutputTiming(.{ .signal = outs.q.ref, .load = .{ .value = 12.5, .unit = .ff } });
+        try mb.addOutputTiming(.{ .signal = outs.pulse.ref, .load = null });
+    }
+};
+
+test "timing intent v2 exports slew windows, explicit thresholds and output loads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkV2);
+    const json = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const again = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    try std.testing.expectEqualStrings(again, json);
+
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const timing = root.object.get("timing_intent").?;
+    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+
+    const data = findInput(timing, "data").?;
+    const slew = data.object.get("slew").?;
+    const threshold = slew.object.get("threshold").?;
+    try std.testing.expectEqual(@as(f64, 0.1), threshold.object.get("low_fraction").?.float);
+    try std.testing.expectEqual(@as(f64, 0.9), threshold.object.get("high_fraction").?.float);
+    const rise = slew.object.get("rise").?;
+    try std.testing.expectEqual(@as(f64, 0.1), rise.object.get("min").?.object.get("value").?.float);
+    try std.testing.expectEqualStrings("ns", rise.object.get("min").?.object.get("unit").?.string);
+    try std.testing.expectEqual(@as(f64, 0.4), rise.object.get("max").?.object.get("value").?.float);
+    const fall = slew.object.get("fall").?;
+    try std.testing.expectEqual(@as(i64, 90), fall.object.get("min").?.object.get("value").?.integer);
+    try std.testing.expectEqualStrings("ps", fall.object.get("min").?.object.get("unit").?.string);
+    try std.testing.expect(fall.object.get("max").? == .null);
+
+    // Absent slew stays a JSON null, never a zeroed window.
+    try std.testing.expect(findInput(timing, "flag").?.object.get("slew").? == .null);
+
+    const outputs = timing.object.get("modules").?.array.items[0].object.get("outputs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), outputs.len);
+    const q_load = findOutput(timing, "q").?.object.get("load").?;
+    try std.testing.expectEqual(@as(f64, 12.5), q_load.object.get("value").?.float);
+    try std.testing.expectEqualStrings("ff", q_load.object.get("unit").?.string);
+    try std.testing.expect(findOutput(timing, "pulse").?.object.get("load").? == .null);
+    try std.testing.expect(findOutput(timing, "bare") == null);
+}
+
+test "timing intent v1 stays byte-stable and omits v2-only fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkV2);
+    const dflt = try metadata.emitDesignJson(alloc, &design, .{});
+    const explicit_v1 = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 1 });
+    try std.testing.expectEqualStrings(explicit_v1, dflt);
+    try std.testing.expect(std.mem.indexOf(u8, dflt, "\"slew\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dflt, "\"outputs\"") == null);
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, dflt, .{});
+    try std.testing.expectEqualStrings("js_asic.timing_intent/1", root.object.get("timing_intent").?.object.get("schema").?.string);
+}
+
+test "timing intent rejects unsupported schema versions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkV2);
+    try std.testing.expectError(error.UnsupportedTimingIntentVersion, metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 3 }));
+}
+
+test "timing intent v2 exports modules that only declare output loads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const LoadOnly = struct {
+        pub const name = "timing_load_only";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{ .signal = outs.y.ref, .load = .{ .value = 2.5, .unit = .pf } });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(LoadOnly);
+    const v1 = try metadata.emitDesignJson(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v1, "\"timing_intent\"") == null);
+    const v2 = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, v2, .{});
+    const load = findOutput(root.object.get("timing_intent").?, "y").?.object.get("load").?;
+    try std.testing.expectEqualStrings("pf", load.object.get("unit").?.string);
+}
+
 test "timing intent exports classification, synchronizer and reset policy" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -237,12 +387,146 @@ test "timing intent validation rejects bad references and windows" {
         }
     };
 
+    const InvertedSlew = struct {
+        pub const name = "bad_inverted_slew";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{
+                .signal = ins.b.ref,
+                .classification = .synchronous,
+                .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .rise = .{
+                        .min = .{ .value = 2, .unit = .ns },
+                        .max = .{ .value = 1, .unit = .ns },
+                    },
+                },
+            });
+        }
+    };
+
+    const NegativeSlew = struct {
+        pub const name = "bad_negative_slew";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{
+                .signal = ins.b.ref,
+                .classification = .synchronous,
+                .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .fall = .{ .max = .{ .value = -1, .unit = .ns } },
+                },
+            });
+        }
+    };
+
+    const BadSlewThreshold = struct {
+        pub const name = "bad_slew_threshold";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{
+                .signal = ins.b.ref,
+                .classification = .synchronous,
+                .slew = .{
+                    .threshold = .{ .low_fraction = 0.9, .high_fraction = 0.1 },
+                    .rise = .{ .min = .{ .value = 1, .unit = .ns } },
+                },
+            });
+        }
+    };
+
+    const SlewWithoutBounds = struct {
+        pub const name = "bad_slew_no_bounds";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{
+                .signal = ins.b.ref,
+                .classification = .synchronous,
+                .slew = .{ .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 } },
+            });
+        }
+    };
+
+    const OutputBadRef = struct {
+        pub const name = "bad_output_ref";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            const w = try mb.wire("w", 1);
+            try mb.addOutputTiming(.{ .signal = w.ref, .load = .{ .value = 1, .unit = .ff } });
+        }
+    };
+
+    const DuplicateOutput = struct {
+        pub const name = "bad_duplicate_output";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{ .signal = outs.y.ref, .load = .{ .value = 1, .unit = .ff } });
+            try mb.addOutputTiming(.{ .signal = outs.y.ref, .load = .{ .value = 2, .unit = .ff } });
+        }
+    };
+
+    const NegativeLoad = struct {
+        pub const name = "bad_negative_load";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{ .signal = outs.y.ref, .load = .{ .value = -1, .unit = .ff } });
+        }
+    };
+
+    const NonFiniteLoad = struct {
+        pub const name = "bad_non_finite_load";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{ .signal = outs.y.ref, .load = .{ .value = std.math.nan(f64), .unit = .ff } });
+        }
+    };
+
     try expectIntentError(AsyncArrival);
     try expectIntentError(InvertedWindow);
     try expectIntentError(BadStage);
     try expectIntentError(NotInput);
     try expectIntentError(NonFiniteArrival);
     try expectIntentError(DuplicateIntent);
+    try expectIntentError(InvertedSlew);
+    try expectIntentError(NegativeSlew);
+    try expectIntentError(BadSlewThreshold);
+    try expectIntentError(SlewWithoutBounds);
+    try expectIntentError(OutputBadRef);
+    try expectIntentError(DuplicateOutput);
+    try expectIntentError(NegativeLoad);
+    try expectIntentError(NonFiniteLoad);
 }
 
 test "declared synchronizer stages survive dead-code elimination" {
@@ -286,4 +570,58 @@ test "declared synchronizer stages survive dead-code elimination" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "reg         dangle_d0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "dangle_d1 <= dangle_d0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "dangle_prev <= dangle_d1;") != null);
+}
+
+test "declared vector synchronizer bits survive dead-code elimination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const DanglingBus = struct {
+        pub const name = "dangling_bus";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_bus: Signal(2) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            const b = mb.exprs();
+            const d0 = try mb.reg("bus_d0", 2, 0);
+            const d1 = try mb.reg("bus_d1", 2, 0);
+            try mb.seq(domain, &.{
+                b.assign(d0, ins.async_bus),
+                b.assign(d1, d0.expr()),
+            });
+            // The synchronized bus deliberately drives nothing; the declared
+            // intent must pin both bit identities of both stages.
+            try mb.assign(outs.y, 0);
+            try mb.addInputTiming(.{
+                .signal = ins.async_bus.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = d0.ref, .bit = 0 },
+                    .{ .signal = d0.ref, .bit = 1 },
+                    .{ .signal = d1.ref, .bit = 0 },
+                    .{ .signal = d1.ref, .bit = 1 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(DanglingBus);
+    const json = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const stages = findInput(root.object.get("timing_intent").?, "async_bus").?.object.get("synchronizer").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), stages.len);
+    try std.testing.expectEqualStrings("bus_d0", stages[0].object.get("signal").?.string);
+    try std.testing.expectEqual(@as(i64, 0), stages[0].object.get("bit").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), stages[1].object.get("bit").?.integer);
+    try std.testing.expectEqualStrings("bus_d1", stages[2].object.get("signal").?.string);
+
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg [1:0]  bus_d0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg [1:0]  bus_d1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "bus_d1 <= bus_d0;") != null);
 }

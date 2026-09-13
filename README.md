@@ -51,22 +51,31 @@ arrival bounds, a two-stage synchronizer, an intentionally unsynchronized
 input, reset policy and two renamed instances of one child definition for
 hierarchical binding tests.
 
-### Deferred timing intent (v2 proposal, not emitted)
+### Timing intent v2 (opt-in)
 
-Responsibilities v1 does not express. This additive schema is a proposal that
-needs coordination with consumers before it is emitted; v1 consumers must keep
-treating these as unknown:
+`Options.timing_intent_version = 2` emits `js_asic.timing_intent/2`: the v1
+section plus input slew and output load declarations. The default stays v1 and
+v1 output is byte-for-byte unchanged, so products and existing consumers never
+see a new schema unless a runner asks for one. The fixture passes v2; product
+runners stay v1.
 
-| Responsibility | Proposed additive field |
+| Field | Meaning |
 |---|---|
-| Input slew (rise/fall transition window) | `inputs[].slew: { min, max }` using time values |
-| Output load | `outputs[]: { signal, width, clock, domain, load: { value, unit: "ff"\|"pf" } }` |
-| Output required times | `outputs[].required: { min, max }` referenced to the destination clock edge |
-| Reset-release synchronization | `clocks[].reset.release_synchronizer: [ { module, signal, bit } ]` |
-| External clock relationships | `clocks[].relationship: "external"\|"internal"`, `related_to`, `relation: "same"\|"integer_ratio"\|"asynchronous"`, `source_period`, `jitter` |
+| `inputs[].slew.threshold.low_fraction` / `high_fraction` | Explicit fractions of the transition's low/high levels (for example `0.1` and `0.9` for a 10 %–90 % measurement). Always authored: the library never defaults a measurement basis. |
+| `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
+| `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
 
-All fields are optional; absent stays unknown, and the schema version is bumped
-only when consumer constraint translation can use them.
+The fixture's canonical artifact is `out/contract/timing_contract.json` (v2);
+`out/contract/timing_contract_v1.json` is the byte-stable `/1` projection for
+consumers that do not parse v2 yet. Both bind the same RTL and stimulus. It
+covers both arrival bounds, distinct per-instance slew and load declarations
+for two renamed child instances, a 2-bit vector synchronizer (per-bit vector
+stage identities are unit-test covered; current consumers reject them), an
+intentionally unsynchronized input, reset policy, declared-but-unknown (null)
+slew/load values, and both load units.
+
+Still deferred to a later version: output required times, reset-release
+synchronization and external clock relationships.
 
 ## Quick Start
 

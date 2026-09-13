@@ -18,9 +18,15 @@ pub const Options = struct {
     /// section documents operations, authored groups and emitted byte ranges;
     /// when null the sidecar is byte-for-byte unchanged.
     provenance: ?*const provenance.Collector = null,
+    /// Timing-intent schema version to emit. 1 (the default) is byte-stable
+    /// and product-facing; 2 adds input slew and output load declarations and
+    /// is opt-in until consumers pass it natively.
+    timing_intent_version: u32 = 1,
 };
 
 pub fn emitDesignJson(allocator: std.mem.Allocator, design: *const ir.Design, options: Options) ![]u8 {
+    const timing_version = options.timing_intent_version;
+    if (timing_version != 1 and timing_version != 2) return error.UnsupportedTimingIntentVersion;
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     var j = std.json.Stringify{
@@ -41,7 +47,7 @@ pub fn emitDesignJson(allocator: std.mem.Allocator, design: *const ir.Design, op
     try j.beginArray();
     for (design.modules.items) |module| try writeModule(&j, allocator, module);
     try j.endArray();
-    if (hasTimingIntent(design)) try writeTimingIntent(&j, design);
+    if (hasTimingIntent(design, timing_version)) try writeTimingIntent(&j, design, timing_version);
     if (options.provenance) |collector| try provenance.writeJson(&j, collector);
     try j.endObject();
     try aw.writer.writeAll("\n");
@@ -328,12 +334,13 @@ fn isPort(kind: ir.SymbolKind) bool {
 }
 
 // ============================================================================
-// Timing intent (js_asic.timing_intent/1)
+// Timing intent (js_asic.timing_intent/1 and /2)
 // ============================================================================
 //
-// Optional, versioned export of authored input timing intent. Module rows are
+// Optional, versioned export of authored timing intent. Module rows are
 // emitted when a module declares clock domains (which carry reset policy) or
-// per-input intent; everything not declared stays unknown.
+// per-input intent; v2 also emits modules that only declare output loads.
+// Everything not declared stays unknown.
 //
 // Arrival windows describe a synchronous input relative to the active (rising)
 // edge of its declared destination clock:
@@ -350,28 +357,40 @@ fn isPort(kind: ir.SymbolKind) bool {
 // connection table to the child module's declared rows. The section never
 // changes RTL.
 //
-// Not in v1 (proposed for v2, coordinate before emitting): input slew, output
-// load, output required times, reset-release synchronization and external
-// clock relationships. See README.md for the draft additive schema.
+// v2 is opt-in through `Options.timing_intent_version = 2`; v1 output stays
+// byte-for-byte unchanged. Additive v2 fields:
+//   * `inputs[].slew`: `threshold` gives explicit low/high measurement
+//     fractions of the transition levels (the library never defaults them);
+//     `rise`/`fall` each carry `min`/`max` time values. A null bound means
+//     unknown, not zero.
+//   * `outputs[]`: `{ signal, width, load }` where `load` is the additional
+//     external load per port bit (`ff` or `pf`), excluding internal cell-pin
+//     and wire capacitance. A null load means unknown.
+//
+// Still deferred: output required times, reset-release synchronization and
+// external clock relationships.
 
 pub const timing_schema = "js_asic.timing_intent/1";
+pub const timing_schema_v2 = "js_asic.timing_intent/2";
 
-fn hasTimingIntent(design: *const ir.Design) bool {
+fn hasTimingIntent(design: *const ir.Design, version: u32) bool {
     for (design.modules.items) |module| {
         if (module.timing.len > 0 or module.clocks.len > 0) return true;
+        if (version >= 2 and module.output_timing.len > 0) return true;
     }
     return false;
 }
 
-fn writeTimingIntent(j: *std.json.Stringify, design: *const ir.Design) !void {
+fn writeTimingIntent(j: *std.json.Stringify, design: *const ir.Design, version: u32) !void {
     try j.objectField("timing_intent");
     try j.beginObject();
     try j.objectField("schema");
-    try j.write(timing_schema);
+    try j.write(if (version >= 2) timing_schema_v2 else timing_schema);
     try j.objectField("modules");
     try j.beginArray();
     for (design.modules.items) |module| {
-        if (module.timing.len == 0 and module.clocks.len == 0) continue;
+        if (module.timing.len == 0 and module.clocks.len == 0 and
+            !(version >= 2 and module.output_timing.len > 0)) continue;
         try j.beginObject();
         try j.objectField("name");
         try j.write(module.name);
@@ -401,15 +420,22 @@ fn writeTimingIntent(j: *std.json.Stringify, design: *const ir.Design) !void {
 
         try j.objectField("inputs");
         try j.beginArray();
-        for (module.timing) |intent| try writeInputTiming(j, module, intent);
+        for (module.timing) |intent| try writeInputTiming(j, module, intent, version);
         try j.endArray();
+
+        if (version >= 2) {
+            try j.objectField("outputs");
+            try j.beginArray();
+            for (module.output_timing) |intent| try writeOutputTiming(j, intent);
+            try j.endArray();
+        }
         try j.endObject();
     }
     try j.endArray();
     try j.endObject();
 }
 
-fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir.InputTiming) !void {
+fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir.InputTiming, version: u32) !void {
     try j.beginObject();
     try j.objectField("signal");
     try j.write(intent.signal.name());
@@ -436,6 +462,10 @@ fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir
         try j.endObject();
     }
     try j.endArray();
+    if (version >= 2) {
+        try j.objectField("slew");
+        if (intent.slew) |slew| try writeSlewTiming(j, slew) else try j.write(null);
+    }
     try j.objectField("arrival");
     if (intent.arrival_min == null and intent.arrival_max == null) {
         try j.write(null);
@@ -446,6 +476,51 @@ fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir
         try j.objectField("max");
         try writeTimeValue(j, intent.arrival_max);
         try j.endObject();
+    }
+    try j.endObject();
+}
+
+fn writeSlewTiming(j: *std.json.Stringify, slew: ir.SlewTiming) !void {
+    try j.beginObject();
+    try j.objectField("threshold");
+    try j.beginObject();
+    try j.objectField("low_fraction");
+    try j.write(slew.threshold.low_fraction);
+    try j.objectField("high_fraction");
+    try j.write(slew.threshold.high_fraction);
+    try j.endObject();
+    try j.objectField("rise");
+    try writeSlewWindow(j, slew.rise);
+    try j.objectField("fall");
+    try writeSlewWindow(j, slew.fall);
+    try j.endObject();
+}
+
+fn writeSlewWindow(j: *std.json.Stringify, window: ir.SlewWindow) !void {
+    try j.beginObject();
+    try j.objectField("min");
+    try writeTimeValue(j, window.min);
+    try j.objectField("max");
+    try writeTimeValue(j, window.max);
+    try j.endObject();
+}
+
+fn writeOutputTiming(j: *std.json.Stringify, intent: ir.OutputTiming) !void {
+    try j.beginObject();
+    try j.objectField("signal");
+    try j.write(intent.signal.name());
+    try j.objectField("width");
+    try j.write(intent.signal.width());
+    try j.objectField("load");
+    if (intent.load) |load| {
+        try j.beginObject();
+        try j.objectField("value");
+        try j.write(load.value);
+        try j.objectField("unit");
+        try j.write(@tagName(load.unit));
+        try j.endObject();
+    } else {
+        try j.write(null);
     }
     try j.endObject();
 }

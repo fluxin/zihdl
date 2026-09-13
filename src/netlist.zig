@@ -1238,6 +1238,46 @@ pub const SyncStage = struct {
     bit: ?u8 = null,
 };
 
+/// One rise or fall slew window. A null bound stays unknown; it never
+/// defaults to zero.
+pub const SlewWindow = struct {
+    min: ?TimeValue = null,
+    max: ?TimeValue = null,
+};
+
+/// Explicit slew measurement thresholds as fractions of the transition's
+/// low/high levels (0.1 = 10 %, 0.9 = 90 %). Always authored: the library
+/// never picks a default measurement basis.
+pub const SlewThreshold = struct {
+    low_fraction: f64,
+    high_fraction: f64,
+};
+
+/// Rise/fall slew declaration for one input port.
+pub const SlewTiming = struct {
+    rise: SlewWindow = .{},
+    fall: SlewWindow = .{},
+    threshold: SlewThreshold,
+};
+
+/// Explicit load unit; each load value uses exactly one unit.
+pub const LoadUnit = enum { ff, pf };
+
+/// Additional external load contributed by one output port bit, excluding
+/// internal cell-pin and wire capacitance.
+pub const LoadValue = struct {
+    value: f64,
+    unit: LoadUnit = .ff,
+};
+
+/// Authored timing intent for one output port. Only declare a load when a
+/// real design requirement exists; absence keeps the load unknown.
+pub const OutputTiming = struct {
+    signal: SymRef,
+    /// Additional external load per port bit; null keeps it unknown.
+    load: ?LoadValue = null,
+};
+
 /// Authored timing intent for one input port. Arrival windows are only legal
 /// for synchronous inputs, and only declare them when a real design
 /// requirement exists; absence keeps the constraint unknown.
@@ -1250,6 +1290,9 @@ pub const InputTiming = struct {
     stages: []const SyncStage = &.{},
     arrival_min: ?TimeValue = null,
     arrival_max: ?TimeValue = null,
+    /// Rise/fall slew declaration; null keeps the whole transition behavior
+    /// unknown.
+    slew: ?SlewTiming = null,
 };
 
 /// Converts an authored time to picoseconds, used only for ordering checks.
@@ -1355,6 +1398,8 @@ pub const Module = struct {
     folds: []const FoldEvent = &.{},
     /// Authored per-input timing intent (timing-intent metadata sidecar).
     timing: []const InputTiming = &.{},
+    /// Authored per-output timing intent (loads; v2 metadata sidecar).
+    output_timing: []const OutputTiming = &.{},
 };
 
 // ============================================================================
@@ -1945,6 +1990,7 @@ pub const ModuleBuilder = struct {
     groups: std.ArrayList(GroupTag),
     fold_log: std.ArrayList(FoldEvent),
     timing: std.ArrayList(InputTiming),
+    output_timing: std.ArrayList(OutputTiming),
 
     pub fn init(allocator: std.mem.Allocator, design: *Design, name: []const u8) !ModuleBuilder {
         return .{
@@ -1962,6 +2008,7 @@ pub const ModuleBuilder = struct {
             .groups = .empty,
             .fold_log = .empty,
             .timing = .empty,
+            .output_timing = .empty,
         };
     }
 
@@ -1976,6 +2023,7 @@ pub const ModuleBuilder = struct {
         self.groups.deinit(self.allocator);
         self.fold_log.deinit(self.allocator);
         self.timing.deinit(self.allocator);
+        self.output_timing.deinit(self.allocator);
     }
 
     pub fn exprs(self: *ModuleBuilder) ExprBuilder {
@@ -1997,6 +2045,14 @@ pub const ModuleBuilder = struct {
         var row = timing;
         row.stages = try self.allocator.dupe(SyncStage, timing.stages);
         try self.timing.append(self.allocator, row);
+    }
+
+    /// Declares authored timing intent for one output port of this module
+    /// (v2 metadata sidecar). Metadata only: it never changes emitted RTL.
+    /// References are validated by `finish()`; anything not declared stays
+    /// unknown.
+    pub fn addOutputTiming(self: *ModuleBuilder, timing: OutputTiming) !void {
+        try self.output_timing.append(self.allocator, timing);
     }
 
     /// Canonicalizes and constant-folds an expression root into this module's
@@ -2723,9 +2779,11 @@ pub const ModuleBuilder = struct {
     }
 
     /// Validates authored timing intent: references must resolve inside this
-    /// module, ports must be inputs, synchronizer stages must be registers of
-    /// the input's width, and arrival windows must be synchronous and ordered.
-    /// Missing fields are left unknown rather than inferred.
+    /// module, input rows must reference input ports, output rows must
+    /// reference output ports, synchronizer stages must be registers of the
+    /// input's width, arrival windows must be synchronous and ordered, slew
+    /// windows ordered with explicit fractions, and loads finite and
+    /// non-negative. Missing fields are left unknown rather than inferred.
     fn validateTimingIntent(self: *ModuleBuilder) !void {
         for (self.timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .input) {
@@ -2787,6 +2845,62 @@ pub const ModuleBuilder = struct {
                     return error.InvalidTimingIntent;
                 }
             }
+            if (intent.slew) |slew| try self.validateSlew(intent.signal, slew);
+        }
+        for (self.output_timing.items, 0..) |intent, i| {
+            if (intent.signal.scope != self.scope or intent.signal.kind() != .output) {
+                std.log.warn("js_asic: output timing intent for '{s}' in module '{s}' must reference an output port of this module", .{ intent.signal.name(), self.name });
+                return error.InvalidTimingIntent;
+            }
+            for (self.output_timing.items[0..i]) |other| {
+                if (other.signal.scope == intent.signal.scope and other.signal.idx == intent.signal.idx) {
+                    std.log.warn("js_asic: duplicate output timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+            if (intent.load) |load| {
+                if (!std.math.isFinite(load.value) or load.value < 0) {
+                    std.log.warn("js_asic: output timing load for '{s}' in module '{s}' must be finite and non-negative", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+        }
+    }
+
+    /// Validates one authored slew declaration: explicit finite thresholds
+    /// with 0 <= low < high <= 1, finite non-negative bounds and ordered
+    /// windows. A null bound stays unknown and is never treated as zero.
+    fn validateSlew(self: *ModuleBuilder, signal: SymRef, slew: SlewTiming) !void {
+        if (!std.math.isFinite(slew.threshold.low_fraction) or
+            !std.math.isFinite(slew.threshold.high_fraction) or
+            slew.threshold.low_fraction < 0 or
+            slew.threshold.high_fraction > 1 or
+            slew.threshold.low_fraction >= slew.threshold.high_fraction)
+        {
+            std.log.warn("js_asic: timing intent slew thresholds for '{s}' in module '{s}' must satisfy 0 <= low < high <= 1", .{ signal.name(), self.name });
+            return error.InvalidTimingIntent;
+        }
+        var any_bound = false;
+        inline for (.{ slew.rise, slew.fall }) |window| {
+            inline for (.{ window.min, window.max }) |bound| {
+                if (bound) |value| {
+                    any_bound = true;
+                    if (!std.math.isFinite(value.value) or value.value < 0) {
+                        std.log.warn("js_asic: timing intent slew bound for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+            }
+            if (window.min != null and window.max != null and
+                timeValueInPs(window.min.?) > timeValueInPs(window.max.?))
+            {
+                std.log.warn("js_asic: timing intent slew window for '{s}' in module '{s}' has min > max", .{ signal.name(), self.name });
+                return error.InvalidTimingIntent;
+            }
+        }
+        if (!any_bound) {
+            std.log.warn("js_asic: timing intent slew for '{s}' in module '{s}' declares thresholds but no rise/fall bound", .{ signal.name(), self.name });
+            return error.InvalidTimingIntent;
         }
     }
 
@@ -2897,6 +3011,7 @@ pub const ModuleBuilder = struct {
             .groups = try self.groups.toOwnedSlice(self.allocator),
             .folds = try self.fold_log.toOwnedSlice(self.allocator),
             .timing = try self.timing.toOwnedSlice(self.allocator),
+            .output_timing = try self.output_timing.toOwnedSlice(self.allocator),
         };
         try self.design.register(mod);
         return mod;

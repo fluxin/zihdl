@@ -1,13 +1,16 @@
-//! Contract fixture for `js_asic.timing_intent/1`: one child module with a
-//! synchronous input carrying both arrival bounds, an asynchronous input with a
-//! two-stage synchronizer, an intentionally unsynchronized asynchronous input,
-//! and a reset policy. The top instantiates the child twice through renamed
-//! connections so consumers can exercise hierarchical binding.
+//! Contract fixture for `js_asic.timing_intent/1 + /2`: one child module with
+//! a synchronous input carrying both arrival bounds, an asynchronous input
+//! with a two-stage synchronizer, an asynchronous 2-bit bus with vector
+//! synchronizer stage identities (per-bit stage intent is unit-test covered;
+//! current consumers reject it), an intentionally unsynchronized asynchronous
+//! input, and a reset policy. The top instantiates the child twice through
+//! renamed connections so consumers can exercise hierarchical binding, and
+//! declares distinct v2 slew/load rows per instance.
 //!
 //! `emitStimulus` builds an independent `oasic.stimulus/1` program whose
 //! expectations come from the cycle model written here, never from emitted RTL.
-//! Arrival windows are fixture values that exercise the schema; they are not
-//! board requirements and must not be treated as such.
+//! Arrival, slew and load values are fixture values that exercise the schema;
+//! they are not board requirements and must not be treated as such.
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
@@ -31,11 +34,13 @@ pub const Child = struct {
         rst_n: Signal(1),
         sync_in: Signal(8),
         async_in: Signal(1),
+        async_bus: Signal(2),
         raw_in: Signal(1),
     };
     pub const Outputs = struct {
         sync_out: Signal(8),
         async_pulse: Signal(1),
+        async_bus_out: Signal(2),
         raw_out: Signal(1),
     };
 
@@ -46,13 +51,25 @@ pub const Child = struct {
         try mb.addClockDomain(domain);
         const b = mb.exprs();
 
-        // Synchronous input with a declared arrival window.
+        // Synchronous input with a declared arrival window. Slew stays
+        // undeclared (null) at this level; the top authors distinct v2 slew
+        // rows on the ports that carry each instance.
         const sync_q = try mb.reg("sync_q", 8, 0);
         try mb.assign(outs.sync_out, sync_q);
 
         // Asynchronous input with a two-stage synchronizer and edge detect.
         const async = try lib.syncInput(mb, "async", ins.async_in, domain, 0);
         try mb.assign(outs.async_pulse, b.and_(async.value.expr(), b.not(async.prev.expr())));
+
+        // Asynchronous 2-bit bus with a hand-rolled two-stage vector
+        // synchronizer; both stages are declared as whole-signal identities.
+        const bus_d0 = try mb.reg("async_bus_d0", 2, 0);
+        const bus_d1 = try mb.reg("async_bus_d1", 2, 0);
+        try mb.seq(domain, &.{
+            b.assign(bus_d0, ins.async_bus),
+            b.assign(bus_d1, bus_d0.expr()),
+        });
+        try mb.assign(outs.async_bus_out, bus_d1);
 
         // Intentionally unsynchronized asynchronous input: pure passthrough.
         try mb.assign(outs.raw_out, ins.raw_in);
@@ -76,10 +93,26 @@ pub const Child = struct {
             },
         });
         try mb.addInputTiming(.{
+            .signal = ins.async_bus.ref,
+            .classification = .asynchronous,
+            .clock = ins.clk.ref,
+            .stages = &.{
+                .{ .signal = bus_d0.ref },
+                .{ .signal = bus_d1.ref },
+            },
+        });
+        try mb.addInputTiming(.{
             .signal = ins.raw_in.ref,
             .classification = .asynchronous,
             .clock = ins.clk.ref,
         });
+
+        // v2 output loads: per-bit additional external load. `async_pulse`
+        // declares the row but leaves the load unknown (null); `raw_out` has
+        // no row at all; `async_bus_out` covers the vector-bit case.
+        try mb.addOutputTiming(.{ .signal = outs.sync_out.ref, .load = .{ .value = 4.0, .unit = .ff } });
+        try mb.addOutputTiming(.{ .signal = outs.async_pulse.ref, .load = null });
+        try mb.addOutputTiming(.{ .signal = outs.async_bus_out.ref, .load = .{ .value = 1.5, .unit = .pf } });
     }
 };
 
@@ -92,6 +125,8 @@ pub const Top = struct {
         slow_sync_in: Signal(8),
         fast_async_in: Signal(1),
         slow_async_in: Signal(1),
+        fast_async_bus: Signal(2),
+        slow_async_bus: Signal(2),
         fast_raw_in: Signal(1),
         slow_raw_in: Signal(1),
     };
@@ -100,6 +135,8 @@ pub const Top = struct {
         slow_sync_out: Signal(8),
         fast_async_pulse: Signal(1),
         slow_async_pulse: Signal(1),
+        fast_async_bus_out: Signal(2),
+        slow_async_bus_out: Signal(2),
         fast_raw_out: Signal(1),
         slow_raw_out: Signal(1),
     };
@@ -117,10 +154,12 @@ pub const Top = struct {
             .rst_n = ins.rst_n,
             .sync_in = ins.fast_sync_in,
             .async_in = ins.fast_async_in,
+            .async_bus = ins.fast_async_bus,
             .raw_in = ins.fast_raw_in,
         }, .{
             .sync_out = outs.fast_sync_out,
             .async_pulse = outs.fast_async_pulse,
+            .async_bus_out = outs.fast_async_bus_out,
             .raw_out = outs.fast_raw_out,
         }, .{});
         _ = try mb.instantiate(Child, "u_slow", .{
@@ -128,12 +167,67 @@ pub const Top = struct {
             .rst_n = ins.rst_n,
             .sync_in = ins.slow_sync_in,
             .async_in = ins.slow_async_in,
+            .async_bus = ins.slow_async_bus,
             .raw_in = ins.slow_raw_in,
         }, .{
             .sync_out = outs.slow_sync_out,
             .async_pulse = outs.slow_async_pulse,
+            .async_bus_out = outs.slow_async_bus_out,
             .raw_out = outs.slow_raw_out,
         }, .{});
+
+        // Distinct per-instance v2 slew declarations: each renamed instance
+        // carries its own window and explicit measurement thresholds.
+        try mb.addInputTiming(.{
+            .signal = ins.fast_sync_in.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+            .slew = .{
+                .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                .rise = .{
+                    .min = .{ .value = 0.10, .unit = .ns },
+                    .max = .{ .value = 0.30, .unit = .ns },
+                },
+                .fall = .{
+                    .min = .{ .value = 0.09, .unit = .ns },
+                    .max = .{ .value = 0.28, .unit = .ns },
+                },
+            },
+        });
+        try mb.addInputTiming(.{
+            .signal = ins.slow_sync_in.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+            .slew = .{
+                .threshold = .{ .low_fraction = 0.2, .high_fraction = 0.8 },
+                .rise = .{
+                    .min = .{ .value = 0.45, .unit = .ns },
+                    .max = .{ .value = 0.95, .unit = .ns },
+                },
+                .fall = .{
+                    .min = .{ .value = 0.40, .unit = .ns },
+                    .max = .{ .value = 0.90, .unit = .ns },
+                },
+            },
+        });
+        // Missing-value case: declared thresholds with one null bound per
+        // direction; null means unknown, never zero.
+        try mb.addInputTiming(.{
+            .signal = ins.fast_async_in.ref,
+            .classification = .asynchronous,
+            .clock = ins.clk.ref,
+            .slew = .{
+                .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                .rise = .{ .max = .{ .value = 0.60, .unit = .ns } },
+                .fall = .{ .min = .{ .value = 0.05, .unit = .ns } },
+            },
+        });
+
+        // Distinct per-instance v2 loads; `fast_raw_out` declares the row but
+        // leaves the load unknown (null), `slow_raw_out` has no row.
+        try mb.addOutputTiming(.{ .signal = outs.fast_sync_out.ref, .load = .{ .value = 5.0, .unit = .ff } });
+        try mb.addOutputTiming(.{ .signal = outs.slow_sync_out.ref, .load = .{ .value = 2.5, .unit = .pf } });
+        try mb.addOutputTiming(.{ .signal = outs.fast_raw_out.ref, .load = null });
     }
 };
 
@@ -168,16 +262,21 @@ pub const input_names = [_][]const u8{
     "slow_sync_in[7]",
     "fast_async_in",
     "slow_async_in",
+    "fast_async_bus[0]",
+    "fast_async_bus[1]",
+    "slow_async_bus[0]",
+    "slow_async_bus[1]",
     "fast_raw_in",
     "slow_raw_in",
 };
 
 pub const output_names = [_][]const u8{
-    "fast_sync_out[0]", "fast_sync_out[1]", "fast_sync_out[2]", "fast_sync_out[3]",
-    "fast_sync_out[4]", "fast_sync_out[5]", "fast_sync_out[6]", "fast_sync_out[7]",
-    "slow_sync_out[0]", "slow_sync_out[1]", "slow_sync_out[2]", "slow_sync_out[3]",
-    "slow_sync_out[4]", "slow_sync_out[5]", "slow_sync_out[6]", "slow_sync_out[7]",
-    "fast_async_pulse", "slow_async_pulse", "fast_raw_out",     "slow_raw_out",
+    "fast_sync_out[0]",      "fast_sync_out[1]",      "fast_sync_out[2]",      "fast_sync_out[3]",
+    "fast_sync_out[4]",      "fast_sync_out[5]",      "fast_sync_out[6]",      "fast_sync_out[7]",
+    "slow_sync_out[0]",      "slow_sync_out[1]",      "slow_sync_out[2]",      "slow_sync_out[3]",
+    "slow_sync_out[4]",      "slow_sync_out[5]",      "slow_sync_out[6]",      "slow_sync_out[7]",
+    "fast_async_pulse",      "slow_async_pulse",      "fast_async_bus_out[0]", "fast_async_bus_out[1]",
+    "slow_async_bus_out[0]", "slow_async_bus_out[1]", "fast_raw_out",          "slow_raw_out",
 };
 
 const Row = struct {
@@ -186,23 +285,26 @@ const Row = struct {
     slow_sync: u8 = 0,
     fast_async: u1 = 0,
     slow_async: u1 = 0,
+    fast_bus: u2 = 0,
+    slow_bus: u2 = 0,
     fast_raw: u1 = 0,
     slow_raw: u1 = 0,
 };
 
-/// Reset, synchronous capture on both instances, and independent rise/fall
-/// sequences on each instance's asynchronous input.
+/// Reset, synchronous capture on both instances, independent rise/fall
+/// sequences on each instance's asynchronous input, and distinct 2-bit bus
+/// patterns on each instance's per-bit synchronizer.
 const schedule = [_]Row{
     .{},
     .{},
     .{},
     .{},
     .{ .rst_n = 1, .fast_sync = 0xA5, .slow_sync = 0x3C, .fast_raw = 1 },
-    .{ .rst_n = 1, .fast_sync = 0x5A, .slow_sync = 0xC3, .fast_async = 1, .slow_raw = 1 },
-    .{ .rst_n = 1, .fast_sync = 0x0F, .slow_sync = 0xF0, .fast_async = 1, .slow_async = 1, .fast_raw = 1, .slow_raw = 1 },
-    .{ .rst_n = 1, .fast_sync = 0xF0, .slow_sync = 0x0F, .fast_async = 1, .slow_async = 1 },
-    .{ .rst_n = 1, .slow_sync = 0xFF, .fast_raw = 1 },
-    .{ .rst_n = 1, .fast_sync = 0xFF, .fast_async = 1, .slow_async = 1, .slow_raw = 1 },
+    .{ .rst_n = 1, .fast_sync = 0x5A, .slow_sync = 0xC3, .fast_async = 1, .slow_raw = 1, .fast_bus = 0b01, .slow_bus = 0b10 },
+    .{ .rst_n = 1, .fast_sync = 0x0F, .slow_sync = 0xF0, .fast_async = 1, .slow_async = 1, .fast_raw = 1, .slow_raw = 1, .fast_bus = 0b01, .slow_bus = 0b10 },
+    .{ .rst_n = 1, .fast_sync = 0xF0, .slow_sync = 0x0F, .fast_async = 1, .slow_async = 1, .fast_bus = 0b11, .slow_bus = 0b00 },
+    .{ .rst_n = 1, .slow_sync = 0xFF, .fast_raw = 1, .fast_bus = 0b00, .slow_bus = 0b11 },
+    .{ .rst_n = 1, .fast_sync = 0xFF, .fast_async = 1, .slow_async = 1, .slow_raw = 1, .fast_bus = 0b10, .slow_bus = 0b01 },
     .{ .rst_n = 1, .fast_sync = 0x81, .slow_sync = 0x18, .slow_async = 1, .fast_raw = 1, .slow_raw = 1 },
     .{ .rst_n = 1, .fast_sync = 0x18, .slow_sync = 0x81 },
     .{ .rst_n = 1, .fast_async = 1, .slow_async = 1, .fast_raw = 1, .slow_raw = 1 },
@@ -215,6 +317,8 @@ const Sync = struct {
     d0: u1 = 0,
     d1: u1 = 0,
     prev: u1 = 0,
+    bus_d0: u2 = 0,
+    bus_d1: u2 = 0,
 };
 
 pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
@@ -254,8 +358,22 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
         } else {
             const old_fast = fast;
             const old_slow = slow;
-            fast = .{ .q = row.fast_sync, .d0 = row.fast_async, .d1 = old_fast.d0, .prev = old_fast.d1 };
-            slow = .{ .q = row.slow_sync, .d0 = row.slow_async, .d1 = old_slow.d0, .prev = old_slow.d1 };
+            fast = .{
+                .q = row.fast_sync,
+                .d0 = row.fast_async,
+                .d1 = old_fast.d0,
+                .prev = old_fast.d1,
+                .bus_d0 = row.fast_bus,
+                .bus_d1 = old_fast.bus_d0,
+            };
+            slow = .{
+                .q = row.slow_sync,
+                .d0 = row.slow_async,
+                .d1 = old_slow.d0,
+                .prev = old_slow.d1,
+                .bus_d0 = row.slow_bus,
+                .bus_d1 = old_slow.bus_d0,
+            };
         }
 
         var drive = [_]u8{'0'} ** input_names.len;
@@ -264,16 +382,24 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
         for (0..8) |bit| drive[9 + bit] = if ((row.slow_sync >> @intCast(bit)) & 1 == 1) '1' else '0';
         drive[17] = if (row.fast_async == 1) '1' else '0';
         drive[18] = if (row.slow_async == 1) '1' else '0';
-        drive[19] = if (row.fast_raw == 1) '1' else '0';
-        drive[20] = if (row.slow_raw == 1) '1' else '0';
+        drive[19] = if ((row.fast_bus >> 0) & 1 == 1) '1' else '0';
+        drive[20] = if ((row.fast_bus >> 1) & 1 == 1) '1' else '0';
+        drive[21] = if ((row.slow_bus >> 0) & 1 == 1) '1' else '0';
+        drive[22] = if ((row.slow_bus >> 1) & 1 == 1) '1' else '0';
+        drive[23] = if (row.fast_raw == 1) '1' else '0';
+        drive[24] = if (row.slow_raw == 1) '1' else '0';
 
         var expect = [_]u8{'0'} ** output_names.len;
         for (0..8) |bit| expect[bit] = if ((fast.q >> @intCast(bit)) & 1 == 1) '1' else '0';
         for (0..8) |bit| expect[8 + bit] = if ((slow.q >> @intCast(bit)) & 1 == 1) '1' else '0';
         expect[16] = if ((fast.d1 & ~fast.prev) == 1) '1' else '0';
         expect[17] = if ((slow.d1 & ~slow.prev) == 1) '1' else '0';
-        expect[18] = drive[19];
-        expect[19] = drive[20];
+        expect[18] = if ((fast.bus_d1 >> 0) & 1 == 1) '1' else '0';
+        expect[19] = if ((fast.bus_d1 >> 1) & 1 == 1) '1' else '0';
+        expect[20] = if ((slow.bus_d1 >> 0) & 1 == 1) '1' else '0';
+        expect[21] = if ((slow.bus_d1 >> 1) & 1 == 1) '1' else '0';
+        expect[22] = drive[23];
+        expect[23] = drive[24];
 
         try out.appendSlice(allocator, "{\"drive\":\"");
         try out.appendSlice(allocator, &drive);
@@ -304,7 +430,21 @@ test "contract fixture elaborates with two renamed instances" {
     try std.testing.expectEqualStrings(child_name, top.instances[1].module_name);
 
     const child = design.findModule(child_name).?;
-    try std.testing.expectEqual(@as(usize, 3), child.timing.len);
+    try std.testing.expectEqual(@as(usize, 4), child.timing.len);
+    try std.testing.expectEqual(@as(usize, 3), child.output_timing.len);
+    try std.testing.expectEqual(@as(usize, 3), top.timing.len);
+    try std.testing.expectEqual(@as(usize, 3), top.output_timing.len);
+
+    // The 2-bit bus declares whole-vector identities for both stages; the
+    // scalar input above exercises the per-bit identity form.
+    for (child.timing) |intent| {
+        if (std.mem.eql(u8, intent.signal.name(), "async_bus")) {
+            try std.testing.expectEqual(@as(usize, 2), intent.stages.len);
+            try std.testing.expectEqual(@as(?u8, null), intent.stages[0].bit);
+            try std.testing.expectEqual(@as(?u8, null), intent.stages[1].bit);
+            try std.testing.expectEqual(@as(usize, 2), intent.signal.width());
+        }
+    }
 }
 
 test "contract stimulus binds every input and output with a model-derived row" {
