@@ -37,6 +37,11 @@ src/                         <-- Generic hardware construction library (js_asic)
 ├── blocks/
 │   ├── sram.zig             # Parameterized Dual-Port SRAM (1W1R) + TT-SRAM foreign macro
 │   ├── fifo.zig             # Parameterized Synchronous FIFO
+│   ├── async_fifo.zig       # Dual-clock gray-pointer FIFO (Cummings structure)
+│   ├── cdc.zig              # Request/ack bridge, bundled data, mailboxes, reset sync
+│   ├── uart.zig             # Single-clock UART (5..8 data bits, mid-bit sampling)
+│   ├── spi.zig              # SPI target programmer (write/start/stop command decode)
+│   ├── i2c.zig              # I2C target loader (parameterized device address)
 │   ├── shift_reg.zig        # Parameterized Shift Register (SIPO / PISO)
 │   ├── edge_det.zig         # 2-FF Synchronizer & Edge Detector
 │   └── counter.zig          # Parameterized Up/Down Timer & Cycle Counter
@@ -49,10 +54,10 @@ src/                         <-- Generic hardware construction library (js_asic)
     └── *_test.zig           # Emission conformance, golden, metadata and SDC tests
 
 examples/                    <-- Reference projects built on js_asic
-├── blocks/                  # Example design blocks shared across projects
-│   ├── blocks.zig           # `protocol_blocks` hub module
-│   ├── i2c_slave_loader.zig # I2C host programming controller (parameterized address)
-│   └── spi_slave_programmer.zig # SPI host programming controller
+├── blocks/                  # Block witnesses (RTL generators + Icarus benches)
+│   ├── blocks.zig           # `protocol_blocks` hub module (vector_tb)
+│   ├── *_gen.zig            # Witness RTL generators (divmod, CDC, FIFO, UART, SPI, I2C)
+│   └── *_tb.v               # Handwritten Icarus benches replayed by `zig build sim`
 ├── protocol_emulator/       # Programmable protocol emulator ASIC (I2C/SPI + ISA)
 │   ├── main.zig             # Runner: elaborate root block, emit RTL + design.json + SDC
 │   ├── isa.zig              # The 32-bit microcode instruction set
@@ -262,9 +267,13 @@ oasic-side development required for this:
 ### Phase 3 — IP library (in progress)
 
 15. **Protocol blocks**: AXI4-Lite, UART, SPI master/target, I2C target, async
-    FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers. First
-    library block beyond the CDC set: `blocks.UartBlock` (5..8 data bits,
-    mid-bit sampling) with the `zig build uart` loopback witness.
+    FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers. Landed
+    beyond the CDC set: `blocks.UartBlock` (5..8 data bits, mid-bit sampling)
+    with the `zig build uart` loopback witness, and the promoted
+    `blocks.SpiSlaveProgrammerBlock` / `blocks.I2cSlaveLoaderBlock` (command
+    decode, host write/ack and read/valid handshakes) with the `zig build spi`
+    and `zig build i2c` witnesses. Remaining: AXI4-Lite, arbiter/round-robin,
+    crossbar, timers, ROM/RAM wrappers.
 16. **Testbench scaffolding**: emit TB skeletons and trace-driven checks
     (execution stays external). First instance done: `examples/blocks/vector_tb.zig`
     (a generated vector player with sampled-input checks) plus

@@ -6,9 +6,8 @@ const Signal = netlist.Signal;
 const ClockDomain = netlist.ClockDomain;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const blocks = @import("protocol_blocks");
-const i2c_loader = blocks.i2c_slave_loader;
-const spi_loader = blocks.spi_slave_programmer;
+const i2c_loader = js_asic.blocks.i2c;
+const spi_loader = js_asic.blocks.spi;
 const timing_core = @import("timing_execution_unit.zig");
 const isa = @import("isa.zig");
 

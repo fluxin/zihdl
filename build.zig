@@ -218,6 +218,58 @@ pub fn build(b: *std.Build) void {
     uart_step.dependOn(&uart_lint.step);
     uart_step.dependOn(&uart_run.step);
 
+    // SPI target witness: host command decoding replayed with Icarus.
+    const spi_exe = b.addExecutable(.{
+        .name = "js_asic_spi_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/spi_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const spi_gen = b.addRunArtifact(spi_exe);
+    const spi_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/spi_witness.v" });
+    spi_lint.step.dependOn(&spi_gen.step);
+    const spi_compile = b.addSystemCommand(&.{
+        "iverilog",          "-g2001",                   "-o", "out/spi_iv",
+        "out/spi_witness.v", "examples/blocks/spi_tb.v",
+    });
+    spi_compile.step.dependOn(&spi_gen.step);
+    const spi_run = b.addSystemCommand(&.{ "vvp", "out/spi_iv" });
+    spi_run.step.dependOn(&spi_compile.step);
+    const spi_step = b.step("spi", "Emit, lint and replay the SPI target programmer witness");
+    spi_step.dependOn(&spi_lint.step);
+    spi_step.dependOn(&spi_run.step);
+
+    // I2C target witness: write/read transactions against a modeled host bus.
+    const i2c_exe = b.addExecutable(.{
+        .name = "js_asic_i2c_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/i2c_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const i2c_wit_gen = b.addRunArtifact(i2c_exe);
+    const i2c_wit_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/i2c_witness.v" });
+    i2c_wit_lint.step.dependOn(&i2c_wit_gen.step);
+    const i2c_wit_compile = b.addSystemCommand(&.{
+        "iverilog",          "-g2001",                   "-o", "out/i2c_witness_iv",
+        "out/i2c_witness.v", "examples/blocks/i2c_tb.v",
+    });
+    i2c_wit_compile.step.dependOn(&i2c_wit_gen.step);
+    const i2c_wit_run = b.addSystemCommand(&.{ "vvp", "out/i2c_witness_iv" });
+    i2c_wit_run.step.dependOn(&i2c_wit_compile.step);
+    const i2c_step = b.step("i2c", "Emit, lint and replay the I2C target loader witness");
+    i2c_step.dependOn(&i2c_wit_lint.step);
+    i2c_step.dependOn(&i2c_wit_run.step);
+
     // CDC witness: request/acknowledge bridge and mailbox replayed across
     // asynchronous source/destination clocks.
     const cdc_exe = b.addExecutable(.{
@@ -429,6 +481,8 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&eth_run.step);
     sim_step.dependOn(&async_fifo_run.step);
     sim_step.dependOn(&uart_run.step);
+    sim_step.dependOn(&spi_run.step);
+    sim_step.dependOn(&i2c_wit_run.step);
     sim_step.dependOn(&cdc_run.step);
     sim_step.dependOn(&divmod_run.step);
     sim_step.dependOn(&divmod_zero_run.step);
@@ -452,6 +506,10 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&async_fifo_run.step);
     verify_step.dependOn(&uart_lint.step);
     verify_step.dependOn(&uart_run.step);
+    verify_step.dependOn(&spi_lint.step);
+    verify_step.dependOn(&spi_run.step);
+    verify_step.dependOn(&i2c_wit_lint.step);
+    verify_step.dependOn(&i2c_wit_run.step);
     verify_step.dependOn(&cdc_lint.step);
     verify_step.dependOn(&cdc_run.step);
     verify_step.dependOn(&divmod_lint.step);

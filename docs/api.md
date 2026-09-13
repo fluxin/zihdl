@@ -91,7 +91,8 @@ declaration, so their outputs stay signed); `Stream(W)` and
 
 `SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
 `ReqAckBridgeBlock`, `BundledDataBlock`, `MailboxBlock`, `FifoMailboxBlock`,
-`ResetSyncBlock`, `UartBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
+`ResetSyncBlock`, `UartBlock`, `SpiSlaveProgrammerBlock`,
+`I2cSlaveLoaderBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
 `CounterBlock`.
 
 ### cdc
@@ -255,10 +256,11 @@ rather than the authoring half of this specific project.
 - `design.json` has no physical/pin/power (UPF) or test/scan data.
 
 **IP library**
-- `UartBlock` (single-clock TX/RX, 5..8 data bits, mid-bit sampling) landed;
-  AXI4-Lite, SPI master/target, I2C target, arbiter/crossbar, timer and
-  ROM/RAM wrappers remain (Phase 3). I2C/SPI controllers exist only as example
-  blocks.
+- `UartBlock` (single-clock TX/RX, 5..8 data bits, mid-bit sampling),
+  `SpiSlaveProgrammerBlock` (write/start/stop command decode, host write pulse)
+  and `I2cSlaveLoaderBlock` (parameterized device address, control-register
+  pokes, host write-ack and read-valid handshakes) landed; AXI4-Lite,
+  arbiter/crossbar, timer and ROM/RAM wrappers remain (Phase 3).
 
 **Backends and packaging**
 - Verilog-2001 and SystemVerilog only: no VHDL, no structural netlist/cell
@@ -273,11 +275,12 @@ rather than the authoring half of this specific project.
 
 1. **Process**: add a `LICENSE`, decide whether docs ship in the package
    `paths`, and tag versions when consumers pin hashes.
-2. **IP library**: the authoring API has no open items; `blocks.UartBlock`
-   landed with the `zig build uart` loopback witness, and the `PLAN.md` Phase 3
-   block library (AXI4-Lite, SPI master/target, I2C target, arbiter/crossbar,
-   timers, ROM/RAM wrappers) is next. Consumer-side work (per-bit constraint
-   resolution, formal crossing proofs) belongs to `oasic`.
+2. **IP library**: the authoring API has no open items; `blocks.UartBlock`,
+   `blocks.SpiSlaveProgrammerBlock` and `blocks.I2cSlaveLoaderBlock` landed with
+   the `zig build uart`/`spi`/`i2c` witnesses, and the `PLAN.md` Phase 3 block
+   library (AXI4-Lite, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers)
+   is next. Consumer-side work (per-bit constraint resolution, formal crossing
+   proofs) belongs to `oasic`.
 
 ## Stability policy
 

@@ -6,7 +6,7 @@ const blocks = @import("protocol_blocks");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const loader = blocks.i2c_slave_loader;
+const loader = js_asic.blocks.i2c;
 const Vector = blocks.vector_tb.Vector;
 const VectorPlayer = blocks.vector_tb.VectorPlayer;
 

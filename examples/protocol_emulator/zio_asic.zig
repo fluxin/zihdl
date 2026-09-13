@@ -15,8 +15,7 @@ const Signal = netlist.Signal;
 const ClockDomain = netlist.ClockDomain;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const blocks = @import("protocol_blocks");
-const i2c_loader = blocks.i2c_slave_loader;
+const i2c_loader = js_asic.blocks.i2c;
 const zio = @import("zio_timing_unit.zig");
 
 /// Reserved host write address that pushes `host_wdata` into the TX FIFO.

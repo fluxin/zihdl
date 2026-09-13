@@ -1,14 +1,13 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
-const lib = js_asic.lib;
+const netlist = @import("../netlist.zig");
+const verilog = @import("../backend/verilog.zig");
+const lib = @import("../lib.zig");
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-/// Composed Host Programming Controller: I2C Slave Loader
-/// Standard 2-wire interface (SCL, SDA) listening at 7-bit device_addr.
+/// I2C target loader: a standard 2-wire interface (SCL, SDA) listening at
+/// 7-bit `device_addr`.
 /// Write transactions (`addr<<1`) load instruction/RX memory or poke control
 /// registers; read transactions (`addr<<1 | 1`) stream `host_rdata` back
 /// MSB-first, four bytes per word, with the slave ACKing the address and the

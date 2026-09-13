@@ -1,13 +1,22 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const netlist = @import("../netlist.zig");
+const verilog = @import("../backend/verilog.zig");
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-/// Composed Host Programming Controller: SPI Slave Interface
-/// Fast 4-wire burst interface (SCLK, MOSI, MISO, CS_N).
+/// SPI target programmer: a 4-wire burst interface (SCLK, MOSI, MISO, CS_N)
+/// that samples MOSI on SCLK rising edges while CS_N is low and decodes an
+/// 8-bit command byte, then a command-specific payload:
+///
+/// - `1` (write word): 8-bit address + 32-bit data; pulses `host_we` with
+///   `host_addr`/`host_wdata` on the 49th rising edge.
+/// - `2` (start): 8-bit start PC; pulses `ctrl_start` and updates `start_pc`.
+/// - `3` (stop): pulses `ctrl_stop`.
+///
+/// `CS_N` high resets the bit counter and shift register. `prog_miso` is tied
+/// low until read-back lands (roadmap). All outputs are registered pulses on
+/// the `clk` domain; SCLK, MOSI and CS_N are sampled directly.
 pub const SpiSlaveProgrammerBlock = struct {
     pub const name = "spi_slave_programmer";
 
@@ -46,13 +55,15 @@ pub const SpiSlaveProgrammerBlock = struct {
         const is_16 = b.eq(bit_cnt.expr(), 16);
         const is_48 = b.eq(bit_cnt.expr(), 48);
 
-        const is_cmd_1 = b.eq(cmd_reg.expr(), 1); // WRITE_IRAM
-        const is_cmd_2 = b.eq(cmd_reg.expr(), 2); // START
-        const is_cmd_3 = b.eq(cmd_reg.expr(), 3); // STOP
-
         const rx_next = b.concat(.{ rx_shift.slice(30, 0), ins.prog_mosi });
         const cnt_plus_1 = b.add(bit_cnt.expr(), 1);
         const rx_low8 = rx_shift.slice(7, 0);
+
+        const is_cmd_1 = b.eq(cmd_reg.expr(), 1); // WRITE_IRAM
+        const is_cmd_2 = b.eq(cmd_reg.expr(), 2); // START
+        // STOP decodes on the same edge that latches `cmd_reg`, so compare the
+        // freshly shifted byte rather than the still-old register.
+        const is_cmd_3 = b.eq(rx_low8, 3); // STOP
 
         const stmts = &.{
             b.assign(outs.host_we, 0),
@@ -135,4 +146,8 @@ test "two spi programmers share one module definition" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "module spi_slave_programmer"));
     try std.testing.expect(std.mem.indexOf(u8, v, "spi_slave_programmer u_spi0") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "spi_slave_programmer u_spi1") != null);
+    // STOP decodes the byte latched on the same edge, not the stale command
+    // register; the witness (examples/blocks/spi_tb.v) replays the pulse.
+    try std.testing.expect(std.mem.indexOf(u8, v, "if ((rx_shift[7:0] == 8'd3))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "ctrl_stop <= 1'b1;") != null);
 }
