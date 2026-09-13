@@ -10,6 +10,7 @@ const blocks = @import("../blocks.zig");
 const verilog = @import("verilog.zig");
 
 const Signal = ir.Signal;
+const SignedSignal = ir.SignedSignal;
 const Stmt = ir.Stmt;
 const Design = ir.Design;
 const ModuleBuilder = ir.ModuleBuilder;
@@ -1689,4 +1690,80 @@ test "timescale emission and default_nettype restore" {
 
     const custom_v = try verilog.emitDesign(alloc, &design, .{ .timescale = .{ .unit = "10ns", .precision = "100ps" } });
     try std.testing.expect(std.mem.indexOf(u8, custom_v, "`timescale 10ns / 100ps\n") != null);
+}
+
+test "declared signed ports, wires and registers emit signed declarations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const S = struct {
+        pub const name = "decl_signed";
+        pub const Inputs = struct { a: SignedSignal(8), en: SignedSignal(1) };
+        pub const Outputs = struct { q: SignedSignal(8), r: SignedSignal(8), flag: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const acc = try mb.signedReg("acc", 8, 0);
+            const w = try mb.signedWire("w", 8);
+            try mb.assign(w, b.add(ins.a, acc));
+            try mb.assign(outs.q, w);
+            try mb.assign(outs.r, b.shr(ins.a, b.lit(3, 1)));
+            try mb.assign(outs.flag, b.eq(ins.en, 1));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.signedInput("a", 8);
+    const en = try top.signedInput("en", 1);
+    _ = try top.instantiate(S, "u_s", .{ .a = a, .en = en }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "input  wire signed [7:0]  a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "input  wire signed en") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "output wire signed [7:0]  q") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "output wire signed [7:0]  r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "output wire        flag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "wire signed [7:0]  w;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "reg signed [7:0]  acc;") != null);
+    // Declared operands carry signedness into the operator without an
+    // author-applied cast; the canonicalized expression stays explicit.
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign w = $signed(($signed(a) + $signed(acc)));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign q = $signed(w);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign r = $signed(($signed(a) >>> 3'd1));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign flag = ($signed(en) == 1'b1);") != null);
+}
+
+test "hoisted signed subexpressions keep a signed temp declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const S = struct {
+        pub const name = "signed_tmp";
+        pub const Inputs = struct { a: SignedSignal(8), b: SignedSignal(8) };
+        pub const Outputs = struct { y: SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const shared = b.add(ins.a, ins.b);
+            try mb.assign(outs.y, b.band(shared, shared));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.signedInput("a", 8);
+    const b_in = try top.signedInput("b", 8);
+    _ = try top.instantiate(S, "u_s", .{ .a = a, .b = b_in }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "wire signed [7:0]  tmp0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign tmp0 = $signed(($signed(a) + $signed(b)));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign y = $signed(($signed(tmp0) & $signed(tmp0)));") != null);
 }

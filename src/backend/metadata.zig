@@ -91,6 +91,12 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(@tagName(sym.kind));
         try j.objectField("width");
         try j.write(sym.width);
+        // Additive: omitted for unsigned declarations so the v1 sidecar stays
+        // byte-stable for every design that does not declare signedness.
+        if (sym.is_signed) {
+            try j.objectField("is_signed");
+            try j.write(true);
+        }
         try j.objectField("is_reg");
         try j.write(sym.is_reg);
         try j.endObject();
@@ -125,6 +131,10 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(@tagName(sym.kind));
         try j.objectField("width");
         try j.write(sym.width);
+        if (sym.is_signed) {
+            try j.objectField("is_signed");
+            try j.write(true);
+        }
         try j.objectField("dead");
         try j.write(sym.dead);
         try j.endObject();

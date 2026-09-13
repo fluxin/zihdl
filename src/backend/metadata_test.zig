@@ -8,6 +8,7 @@ const lib = @import("../lib.zig");
 const metadata = @import("metadata.zig");
 
 const Signal = ir.Signal;
+const SignedSignal = ir.SignedSignal;
 const Stmt = ir.Stmt;
 const Design = ir.Design;
 const ModuleBuilder = ir.ModuleBuilder;
@@ -119,4 +120,80 @@ test "design.json exports hierarchy, widths, enums, clocks, memories and asserti
     try std.testing.expectEqualStrings("assert", assertion.object.get("kind").?.string);
     try std.testing.expectEqualStrings("left idle", assertion.object.get("message").?.string);
     try std.testing.expectEqualStrings("(state != state_IDLE)", assertion.object.get("expr").?.string);
+}
+
+test "design.json marks signed ports and signals additively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Blk = struct {
+        pub const name = "json_signed";
+        pub const Inputs = struct { clk: Signal(1), s: SignedSignal(8), u: Signal(8) };
+        pub const Outputs = struct { y: SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const acc = try mb.signedReg("acc", 8, 0);
+            const plain = try mb.wire("plain", 8);
+            try mb.assign(plain, ins.u);
+            try mb.assign(outs.y, acc);
+            try mb.seqNoReset(ins.clk, &.{b.assign(acc, ins.s)});
+        }
+    };
+
+    var signed_design = Design.init(alloc);
+    _ = try signed_design.elaborate(Blk);
+    const json = try metadata.emitDesignJson(alloc, &signed_design, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const module = findModule(root, "json_signed").?;
+
+    var saw_signed_port = false;
+    var saw_unsigned_port = false;
+    for (module.object.get("ports").?.array.items) |port| {
+        if (std.mem.eql(u8, port.object.get("name").?.string, "s")) {
+            saw_signed_port = true;
+            try std.testing.expect(port.object.get("is_signed").?.bool);
+        }
+        if (std.mem.eql(u8, port.object.get("name").?.string, "u")) {
+            saw_unsigned_port = true;
+            try std.testing.expect(port.object.get("is_signed") == null);
+        }
+    }
+    try std.testing.expect(saw_signed_port and saw_unsigned_port);
+
+    var saw_signed_signal = false;
+    var saw_unsigned_signal = false;
+    for (module.object.get("signals").?.array.items) |signal| {
+        if (std.mem.eql(u8, signal.object.get("name").?.string, "acc")) {
+            saw_signed_signal = true;
+            try std.testing.expect(signal.object.get("is_signed").?.bool);
+        }
+        if (std.mem.eql(u8, signal.object.get("name").?.string, "plain")) {
+            saw_unsigned_signal = true;
+            try std.testing.expect(signal.object.get("is_signed") == null);
+        }
+    }
+    try std.testing.expect(saw_signed_signal and saw_unsigned_signal);
+
+    // The additive field only appears when signedness is declared, so a design
+    // with no signed declarations emits the same bytes as before the field.
+    const Plain = struct {
+        pub const name = "json_plain";
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const w = try mb.wire("w", 8);
+            try mb.assign(w, ins.a);
+            try mb.assign(outs.y, w);
+        }
+    };
+    var plain_design = Design.init(alloc);
+    _ = try plain_design.elaborate(Plain);
+    const plain_json = try metadata.emitDesignJson(alloc, &plain_design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, plain_json, "is_signed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"is_signed\": true") != null);
 }

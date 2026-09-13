@@ -29,7 +29,7 @@ Everything else hangs off that. The public surface is exported through
 
 | Item | Purpose |
 |---|---|
-| `Signal(W)`, `Param(W)`, `Mem(W)` | nameless, width-typed handles; names live in the `Scope` |
+| `Signal(W)`, `SignedSignal(W)`, `Param(W)`, `Mem(W)` | nameless, width-typed handles; names live in the `Scope`. `SignedSignal` declares signed ports/wires/registers and references inherit the declaration, so `asSigned` is only reinterpretation |
 | `Expr(W)` / `AnyExpr` | width-carrying expressions; `AnyExpr` is the erased form |
 | `ParamSpec(W)` | a value-parameter field type for `Params` schemas |
 | `specializeShape(Family, overrides)` | resolves a family `Shape` schema (with defaults) to a concrete block type |
@@ -49,7 +49,7 @@ Everything else hangs off that. The public surface is exported through
 
 | Group | Methods |
 |---|---|
-| Declarations | `input`, `inout`, `outputPort`, `output`, `wire`, `reg`, `constant`, `moduleParam`, `mem` |
+| Declarations | `input`, `signedInput`, `inout`, `outputPort`, `signedOutputPort`, `output`, `wire`, `signedWire`, `reg`, `signedReg`, `constant`, `moduleParam`, `mem` |
 | Bundles | `declareInputs`, `declareOutputs`, `declarePorts`, `wireBundle`, `connect` |
 | Assignment | `assign`, `assignExpr` |
 | Processes | `seq`, `seqNoReset`, `seqReset`, `seqEnable`, `seqResetEnable`, `comb` |
@@ -64,7 +64,7 @@ Everything else hangs off that. The public surface is exported through
 | Group | Methods |
 |---|---|
 | Literals/refs | `lit`, `ref`, `intern` |
-| Sign/width | `asSigned`, `asUnsigned`, `zext`, `sext`, `trunc`, `resize` |
+| Sign/width | `asSigned`, `asUnsigned` (reinterpret an expression's signedness), `zext`, `sext`, `trunc`, `resize` |
 | Logic | `not`, `bitNot`, `neg`, `and_`, `or_`, `band`, `bor`, `bxor` |
 | Arithmetic | `add`, `sub`, `mul`, `div`, `mod` |
 | Compare | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `slt`, `sle`, `sgt`, `sge` |
@@ -129,6 +129,8 @@ lint never changes RTL.
    groups never change RTL bytes. Products emit `js_asic.timing_intent/1`;
    `/2` (slew/load/required, clock relationships, reset-release topology) is
    opt-in and adds fields without changing `/1` or existing `/2` field bytes.
+   Declaration-level signedness adds `is_signed` to port/signal rows only when
+   declared, so unsigned designs keep byte-identical `design.json`.
 5. **DCE preserves declared identity.** Anything named by sidecar metadata
    stays live (e.g. declared synchronizer stages).
 
@@ -157,8 +159,11 @@ rather than the authoring half of this specific project.
   concatenation); dynamic rotate is built from shifts/ors.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
   bit at runtime. Variable field extraction needs `shift`+`mask` today.
-- Signedness is expression-level (`asSigned`) only; ports/registers cannot be
-  declared signed, so every consumer must re-apply the cast.
+- Signedness is declaration-level through `SignedSignal(W)` for ports, wires
+  and registers (the symbol records it and references inherit it), and
+  expression-level through `asSigned`/`asUnsigned` for reinterpretation.
+  Memories cannot declare signedness, and `lib` register helpers still create
+  unsigned declarations, so their consumers re-apply the cast.
 - No `x`/`z`/tristate value; `inout` ports can be declared but not driven as
   high-impedance. Bidirectional pads are modeled as separate in/out/oe pins.
 - No user-authored `initial`, `$display`, `$finish`, or file I/O. The IR has no
@@ -237,9 +242,9 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Signed declarations.** Expression-level `asSigned` is now the only place
-   signedness is stated; let ports, registers and memories declare it so every
-   consumer does not have to re-apply the cast.
+1. **Signed breadth.** Ports, wires and registers declare signedness through
+   `SignedSignal(W)`; extend it to memories and the `lib` register/synchronizer
+   helpers so their consumers do not have to re-apply `asSigned` either.
 2. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
    next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
    per-bit synchronizer intent in the lint, and a formal crossing proof rather

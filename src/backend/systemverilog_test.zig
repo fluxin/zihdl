@@ -9,6 +9,7 @@ const sv = @import("systemverilog.zig");
 const verilog = @import("verilog.zig");
 
 const Signal = ir.Signal;
+const SignedSignal = ir.SignedSignal;
 const Stmt = ir.Stmt;
 const Design = ir.Design;
 const ModuleBuilder = ir.ModuleBuilder;
@@ -195,4 +196,47 @@ test "systemverilog and verilog handle foreign body languages" {
     defer std.testing.log_level = old_level;
     std.testing.log_level = .err;
     try std.testing.expectError(error.ForeignLanguageMismatch, verilog.emitDesign(alloc, &design, .{}));
+}
+
+test "declared signed ports, logic and packed-struct members stay signed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Bus = struct {
+        addr: Signal(8),
+        offset: SignedSignal(8),
+    };
+    const S = struct {
+        pub const name = "sv_signed";
+        pub const Inputs = struct { clk: Signal(1), a: SignedSignal(8), frame: Bus };
+        pub const Outputs = struct { q: SignedSignal(8), r: SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const acc = try mb.signedReg("acc", 8, 0);
+            const shared = b.add(ins.a, ins.frame.offset);
+            try mb.seqNoReset(ins.clk, &.{b.assign(acc, shared)});
+            try mb.assign(outs.q, shared);
+            try mb.assign(outs.r, b.add(ins.a, acc));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const clk = try top.input("clk", 1);
+    const a = try top.signedInput("a", 8);
+    const offset = try top.signedInput("offset", 8);
+    _ = try top.instantiate(S, "u_s", .{ .clk = clk, .a = a, .frame = .{ .addr = a, .offset = offset } }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try sv.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "input  logic signed [7:0]  a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "output logic signed [7:0]  q") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "logic signed [7:0]  acc;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "input  struct packed { logic [7:0] addr; logic signed [7:0] offset; } frame") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "logic signed [7:0]  tmp0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign tmp0 = $signed(($signed(a) + $signed(frame.offset)));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "acc <= $signed(tmp0);") != null);
 }

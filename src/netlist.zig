@@ -46,6 +46,9 @@ pub const Symbol = struct {
     init_val: u64 = 0,
     depth: usize = 0,
     is_reg: bool = false,
+    /// Declared signedness (Signal/SignedSignal handles); expressions that
+    /// reference the symbol inherit it, so `asSigned` is only reinterpretation.
+    is_signed: bool = false,
     read_kind: ReadKind = .comb,
     write_mode: WriteMode = .read_first,
     init_file: ?[]const u8 = null,
@@ -75,7 +78,7 @@ pub const SymRef = struct {
     }
 
     pub fn expr(self: SymRef) AnyExpr {
-        return .{ .width = self.width(), .is_signed = false, .node = .{ .ref = self } };
+        return .{ .width = self.width(), .is_signed = self.symbol().is_signed, .node = .{ .ref = self } };
     }
 };
 
@@ -238,12 +241,19 @@ fn valWidth(comptime T: type) usize {
     };
 }
 
+/// Declared signedness of a handle type; expressions carry their own runtime
+/// flag, so only ref-bearing structs without one are unsigned by default.
+fn typeIsSigned(comptime T: type) bool {
+    if (@hasDecl(T, "is_signed")) return T.is_signed;
+    return false;
+}
+
 fn asAny(x: anytype) AnyExpr {
     const T = @TypeOf(x);
     if (T == AnyExpr) return x;
     if (@hasField(T, "e")) return x.e;
     if (@hasField(T, "ref")) {
-        return .{ .width = valWidth(T), .is_signed = false, .node = .{ .ref = x.ref } };
+        return .{ .width = valWidth(T), .is_signed = typeIsSigned(T), .node = .{ .ref = x.ref } };
     }
     @compileError("not a hardware value: " ++ @typeName(T));
 }
@@ -290,18 +300,25 @@ fn tupleWidth(comptime T: type) usize {
 // Width-typed signal / parameter / memory handles
 // ============================================================================
 
-pub fn Signal(comptime W: usize) type {
+fn SignalHandle(comptime W: usize, comptime signed_flag: bool) type {
     return struct {
         pub const width: usize = W;
         pub const is_signal = true;
+        /// Type-level declaration signedness; the symbol records the same bit
+        /// at elaboration so expressions can carry it without a cast.
+        pub const is_signed = signed_flag;
         ref: SymRef,
+
+        pub fn make(ref: SymRef) @This() {
+            return .{ .ref = ref };
+        }
 
         pub fn name(self: @This()) []const u8 {
             return self.ref.name();
         }
 
         pub fn expr(self: @This()) Expr(W) {
-            return .{ .e = .{ .width = W, .is_signed = false, .node = .{ .ref = self.ref } } };
+            return .{ .e = .{ .width = W, .is_signed = is_signed, .node = .{ .ref = self.ref } } };
         }
 
         pub fn bit(self: @This(), comptime idx: usize) Expr(1) {
@@ -309,11 +326,25 @@ pub fn Signal(comptime W: usize) type {
             return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = .{ .sym = self.ref }, .index = idx } } } };
         }
 
+        /// Part-selects are unsigned in every target, even from a signed
+        /// vector; use `asSigned` on the result to reinterpret.
         pub fn slice(self: @This(), comptime hi: usize, comptime lo: usize) Expr(hi - lo + 1) {
             comptime std.debug.assert(hi >= lo and hi < W);
             return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = .{ .sym = self.ref }, .hi = hi, .lo = lo } } } };
         }
     };
+}
+
+pub fn Signal(comptime W: usize) type {
+    return SignalHandle(W, false);
+}
+
+/// A width-typed signal handle that declares signed ports, wires and
+/// registers. References inherit the declaration's signedness, so expressions
+/// and comparisons use Verilog's both-signed rule without `asSigned`; the cast
+/// stays for reinterpreting values that are not declared signed.
+pub fn SignedSignal(comptime W: usize) type {
+    return SignalHandle(W, true);
 }
 
 pub const Sig = Signal;
@@ -772,7 +803,7 @@ pub const ExprBuilder = struct {
 
     pub fn ref(self: ExprBuilder, sig: anytype) Expr(valWidth(@TypeOf(sig))) {
         _ = self;
-        return .{ .e = .{ .width = valWidth(@TypeOf(sig)), .is_signed = false, .node = .{ .ref = asRef(sig) } } };
+        return .{ .e = .{ .width = valWidth(@TypeOf(sig)), .is_signed = typeIsSigned(@TypeOf(sig)), .node = .{ .ref = asRef(sig) } } };
     }
 
     pub fn asSigned(self: ExprBuilder, x: anytype) Expr(valWidth(@TypeOf(x))) {
@@ -2346,16 +2377,37 @@ pub const ModuleBuilder = struct {
         return self.exprs().intern(x);
     }
 
+    /// Declares one signal leaf of handle type `T`, recording the type's
+    /// declared signedness on the symbol. All public constructors route here
+    /// so bundle flattening, instance wires and direct declarations agree.
+    fn declareLeaf(self: *ModuleBuilder, comptime T: type, kind: SymbolKind, name: []const u8, init_val: u64) !T {
+        const ref = try self.scope.add(kind, name, valWidth(T), init_val, 0);
+        self.scope.symbols.items[ref.idx].is_signed = typeIsSigned(T);
+        return T.make(ref);
+    }
+
     pub fn input(self: *ModuleBuilder, name: []const u8, comptime W: usize) !Signal(W) {
-        return .{ .ref = try self.scope.add(.input, name, W, 0, 0) };
+        return self.declareLeaf(Signal(W), .input, name, 0);
+    }
+
+    pub fn signedInput(self: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedSignal(W) {
+        return self.declareLeaf(SignedSignal(W), .input, name, 0);
     }
 
     pub fn outputPort(self: *ModuleBuilder, name: []const u8, comptime W: usize) !Signal(W) {
-        return .{ .ref = try self.scope.add(.output, name, W, 0, 0) };
+        return self.declareLeaf(Signal(W), .output, name, 0);
+    }
+
+    pub fn signedOutputPort(self: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedSignal(W) {
+        return self.declareLeaf(SignedSignal(W), .output, name, 0);
     }
 
     pub fn output(self: *ModuleBuilder, name: []const u8, sig: anytype) !@TypeOf(sig) {
-        const port = try self.outputPort(name, valWidth(@TypeOf(sig)));
+        const T = @TypeOf(sig);
+        comptime {
+            if (!isSignalHandle(T)) @compileError("mb.output source must be a Signal(W) handle");
+        }
+        const port = try self.declareLeaf(T, .output, name, 0);
         if (!std.mem.eql(u8, sig.name(), name)) {
             try self.assign(port, sig);
         }
@@ -2363,15 +2415,23 @@ pub const ModuleBuilder = struct {
     }
 
     pub fn inout(self: *ModuleBuilder, name: []const u8, comptime W: usize) !Signal(W) {
-        return .{ .ref = try self.scope.add(.inout, name, W, 0, 0) };
+        return self.declareLeaf(Signal(W), .inout, name, 0);
     }
 
     pub fn wire(self: *ModuleBuilder, name: []const u8, comptime W: usize) !Signal(W) {
-        return .{ .ref = try self.scope.add(.wire, name, W, 0, 0) };
+        return self.declareLeaf(Signal(W), .wire, name, 0);
+    }
+
+    pub fn signedWire(self: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedSignal(W) {
+        return self.declareLeaf(SignedSignal(W), .wire, name, 0);
     }
 
     pub fn reg(self: *ModuleBuilder, name: []const u8, comptime W: usize, init_val: u64) !Signal(W) {
-        return .{ .ref = try self.scope.add(.reg, name, W, init_val, 0) };
+        return self.declareLeaf(Signal(W), .reg, name, init_val);
+    }
+
+    pub fn signedReg(self: *ModuleBuilder, name: []const u8, comptime W: usize, init_val: u64) !SignedSignal(W) {
+        return self.declareLeaf(SignedSignal(W), .reg, name, init_val);
     }
 
     /// Non-overridable named constant.
@@ -2451,8 +2511,8 @@ pub const ModuleBuilder = struct {
             const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
             if (comptime isSignalHandle(field.type)) {
                 @field(result, field.name) = switch (dir) {
-                    .input => try self.input(full, field.type.width),
-                    .output => try self.outputPort(full, field.type.width),
+                    .input => try self.declareLeaf(field.type, .input, full, 0),
+                    .output => try self.declareLeaf(field.type, .output, full, 0),
                     .inout => @compileError("bundle leaves cannot be inout"),
                 };
             } else if (@typeInfo(field.type) == .@"struct") {
@@ -2486,7 +2546,7 @@ pub const ModuleBuilder = struct {
         inline for (@typeInfo(S).@"struct".fields) |field| {
             const full = try self.scopedName(prefix, field.name);
             if (comptime isSignalHandle(field.type)) {
-                @field(result, field.name) = try self.wire(full, field.type.width);
+                @field(result, field.name) = try self.declareLeaf(field.type, .wire, full, 0);
             } else if (@typeInfo(field.type) == .@"struct") {
                 @field(result, field.name) = try self.wireStruct(field.type, full);
             } else {
@@ -2862,7 +2922,7 @@ pub const ModuleBuilder = struct {
                     @field(result, field.name) = sub;
                 }
             } else if (comptime isSignalHandle(field.type)) {
-                const w = try self.instanceWire(instance_name, full, field.type.width);
+                const w = try self.instanceWire(field.type, instance_name, full);
                 conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
                 idx.* += 1;
                 @field(result, field.name) = w;
@@ -2889,7 +2949,7 @@ pub const ModuleBuilder = struct {
             const full = try self.scopedName(prefix, field.name);
             const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
             if (comptime isSignalHandle(field.type)) {
-                const w = try self.instanceWire(instance_name, full, field.type.width);
+                const w = try self.instanceWire(field.type, instance_name, full);
                 conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
                 idx.* += 1;
                 @field(result, field.name) = w;
@@ -2903,9 +2963,9 @@ pub const ModuleBuilder = struct {
         }
     }
 
-    fn instanceWire(self: *ModuleBuilder, instance_name: []const u8, port_path: []const u8, comptime W: usize) !Signal(W) {
+    fn instanceWire(self: *ModuleBuilder, comptime T: type, instance_name: []const u8, port_path: []const u8) !T {
         const wire_name = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ instance_name, port_path });
-        return self.wire(wire_name, W);
+        return self.declareLeaf(T, .wire, wire_name, 0);
     }
 
     fn collectParams(self: *ModuleBuilder, comptime BlockType: type, params: anytype) ![]const ParamOverride {
@@ -4030,4 +4090,95 @@ test "unequal-width operands fold exactly like explicit extension" {
     try std.testing.expectEqual(@as(?u64, 1), b.intern(b.lt(b.lit(4, 0xF), b.lit(8, 0x10))).known);
     try std.testing.expectEqual(@as(?u64, 0), b.intern(b.eq(b.asSigned(b.lit(4, 0xF)), b.lit(8, 0xFF))).known);
     try std.testing.expectEqual(@as(?u64, 1), b.intern(b.slt(b.asSigned(b.lit(4, 0xF)), b.asSigned(b.lit(8, 0)))).known);
+}
+
+test "declared signedness propagates through handles, bundles and instances" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Bus = struct {
+        signed_data: SignedSignal(8),
+        unsigned_data: Signal(8),
+    };
+    const Child = struct {
+        pub const name = "signed_child";
+        pub const Inputs = struct { data: SignedSignal(8), mask: Signal(8), bus: Bus };
+        pub const Outputs = struct { out: SignedSignal(8), wide: Signal(16) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            try mb.assign(outs.out, b.add(ins.data, ins.bus.signed_data));
+            try mb.assign(outs.wide, b.resize(ins.data, 16));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "signed_top");
+    const signed_in = try top.signedInput("s", 8);
+    const unsigned_in = try top.input("u", 8);
+    const signed_wire = try top.signedWire("sw", 8);
+    const bus = try top.wireBundle(Bus, "b");
+    const signed_out = try top.signedOutputPort("o", 8);
+
+    // Handle and symbol agree on declared signedness.
+    try std.testing.expect(signed_in.ref.symbol().is_signed);
+    try std.testing.expect(!unsigned_in.ref.symbol().is_signed);
+    try std.testing.expect(signed_wire.ref.symbol().is_signed);
+    try std.testing.expect(signed_out.ref.symbol().is_signed);
+
+    // Handles, ref expressions and builder refs carry it into expressions.
+    const b = top.exprs();
+    try std.testing.expect(b.add(signed_in, signed_wire).e.is_signed);
+    try std.testing.expect(b.ref(signed_in).e.is_signed);
+    try std.testing.expect(signed_in.expr().e.is_signed);
+    // Mixed signedness stays unsigned (Verilog's both-signed rule) and the
+    // casts remain available for reinterpretation of undeclared values.
+    try std.testing.expect(!b.add(signed_in, unsigned_in).e.is_signed);
+    try std.testing.expect(!b.asUnsigned(signed_in).e.is_signed);
+    try std.testing.expect(b.asSigned(unsigned_in).e.is_signed);
+
+    // Bundle leaves keep their declared signedness through flattening.
+    try std.testing.expect(bus.signed_data.ref.symbol().is_signed);
+    try std.testing.expect(!bus.unsigned_data.ref.symbol().is_signed);
+
+    _ = try top.instantiate(Child, "u_child", .{
+        .data = signed_in,
+        .mask = unsigned_in,
+        .bus = .{ .signed_data = signed_wire, .unsigned_data = unsigned_in },
+    }, .{}, .{});
+    try top.assign(signed_out, signed_wire);
+    _ = try top.finish();
+
+    const child = design.findModule(Child.name).?;
+    try std.testing.expect(child.scope.find("data").?.symbol().is_signed);
+    try std.testing.expect(!child.scope.find("mask").?.symbol().is_signed);
+    try std.testing.expect(child.scope.find("bus_signed_data").?.symbol().is_signed);
+    try std.testing.expect(!child.scope.find("bus_unsigned_data").?.symbol().is_signed);
+    try std.testing.expect(child.scope.find("out").?.symbol().is_signed);
+    try std.testing.expect(!child.scope.find("wide").?.symbol().is_signed);
+
+    // Generated instance wires keep the child output's declaration type.
+    const parent = design.findModule("signed_top").?;
+    try std.testing.expect(parent.scope.find("u_child_out").?.symbol().is_signed);
+    try std.testing.expect(!parent.scope.find("u_child_wide").?.symbol().is_signed);
+}
+
+test "resize and truncate honor declared signedness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    var mb = try ModuleBuilder.init(alloc, &design, "signed_resize");
+    defer mb.deinit();
+    const signed_src = try mb.signedInput("s", 8);
+    const b = mb.exprs();
+
+    const widened = b.resize(signed_src, 16);
+    try std.testing.expect(widened.e.is_signed);
+    try std.testing.expectEqual(AnyExpr.Node.sext, std.meta.activeTag(widened.e.node));
+    try std.testing.expect(b.resize(signed_src, 4).e.is_signed);
+    try std.testing.expectEqual(AnyExpr.Node.trunc, std.meta.activeTag(b.resize(signed_src, 4).e.node));
 }

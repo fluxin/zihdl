@@ -40,6 +40,9 @@ pub const Renderer = struct {
     const Temp = struct {
         name: []const u8,
         width: usize,
+        /// A hoisted signed expression must stay signed in later contexts, so
+        /// the temp declaration carries the expression's signedness.
+        is_signed: bool = false,
     };
 
     allocator: std.mem.Allocator,
@@ -232,7 +235,7 @@ pub const Renderer = struct {
         const gop = try self.hoist.getOrPut(self.allocator, e);
         if (!gop.found_existing) {
             gop.value_ptr.* = @intCast(self.temps.items.len);
-            try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = e.width });
+            try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = e.width, .is_signed = e.is_signed });
             try self.hoisted.append(self.allocator, e);
         }
     }
@@ -306,7 +309,7 @@ pub const Renderer = struct {
             const gop = try self.hoist.getOrPut(self.allocator, expr);
             if (!gop.found_existing) {
                 gop.value_ptr.* = @intCast(self.temps.items.len);
-                try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = expr.width });
+                try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = expr.width, .is_signed = expr.is_signed });
                 try self.hoisted.append(self.allocator, expr);
             }
             return;

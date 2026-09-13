@@ -2,7 +2,9 @@
 //!
 //! * `div_mod_probe` exercises signal-driven signed, mixed-sign, unequal-width
 //!   and narrow/widened cases plus constant-folded expressions, with a clock so
-//!   the `oasic.stimulus/1` program can drive the registered results.
+//!   the `oasic.stimulus/1` program can drive the registered results. Signed
+//!   `x`/`y` ports are declaration-level signed, so their division, remainder
+//!   and comparison prove the no-cast path matches `asSigned` folding.
 //! * `div_mod_zero` isolates a zero divisor: Icarus must observe `x`, and the
 //!   manifest records that a consumer must report an explicit unsupported-value
 //!   failure rather than treat the bits as zero.
@@ -16,6 +18,7 @@ const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
 const verilog = js_asic.backend.verilog;
 const Signal = netlist.Signal;
+const SignedSignal = netlist.SignedSignal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
 pub const stimulus_schema = "oasic.stimulus/1";
@@ -36,6 +39,8 @@ pub const Probe = struct {
         b: Signal(8),
         c: Signal(12),
         d: Signal(5),
+        x: SignedSignal(8),
+        y: SignedSignal(8),
     };
     pub const Outputs = struct {
         uq: Signal(8),
@@ -66,6 +71,11 @@ pub const Probe = struct {
         fminr8: Signal(8),
         fmin16: Signal(16),
         fminw16: Signal(16),
+        sxq: Signal(8),
+        sxr: Signal(8),
+        mxq: Signal(8),
+        mxr: Signal(8),
+        xlt: Signal(1),
     };
 
     pub fn build(mb: *ModuleBuilder) !void {
@@ -98,6 +108,11 @@ pub const Probe = struct {
         const sr16w = try mb.reg("sr16w_r", 16, 0);
         const tq = try mb.reg("tq_r", 4, 0);
         const tsq = try mb.reg("tsq_r", 4, 0);
+        const sxq = try mb.reg("sxq_r", 8, 0);
+        const sxr = try mb.reg("sxr_r", 8, 0);
+        const mxq = try mb.reg("mxq_r", 8, 0);
+        const mxr = try mb.reg("mxr_r", 8, 0);
+        const xlt = try mb.reg("xlt_r", 1, 0);
 
         try mb.seqNoReset(ins.clk, &.{
             // Unsigned and signed 8-bit operators.
@@ -126,6 +141,14 @@ pub const Probe = struct {
             // Narrower destinations truncate the self-determined result.
             b.assign(tq, b.trunc(b.div(ins.a, ins.b), 4)),
             b.assign(tsq, b.trunc(b.div(sa, sb), 4)),
+            // Declaration-level signedness: no `asSigned` anywhere, yet both
+            // operands signed makes `/`, `%` and `<` signed; mixing with the
+            // unsigned `b` keeps the operation unsigned.
+            b.assign(sxq, b.div(ins.x, ins.y)),
+            b.assign(sxr, b.mod(ins.x, ins.y)),
+            b.assign(mxq, b.div(ins.x, ins.b)),
+            b.assign(mxr, b.mod(ins.x, ins.b)),
+            b.assign(xlt, b.lt(ins.x, ins.y)),
         });
         try mb.assign(outs.uq, uq);
         try mb.assign(outs.ur, ur);
@@ -147,6 +170,11 @@ pub const Probe = struct {
         try mb.assign(outs.sr16w, sr16w);
         try mb.assign(outs.tq, tq);
         try mb.assign(outs.tsq, tsq);
+        try mb.assign(outs.sxq, sxq);
+        try mb.assign(outs.sxr, sxr);
+        try mb.assign(outs.mxq, mxq);
+        try mb.assign(outs.mxr, mxr);
+        try mb.assign(outs.xlt, xlt);
 
         // Constant folds, including the minimum signed value over -1.
         try mb.assign(outs.fq, b.div(b.lit(8, 20), b.lit(8, 3)));
@@ -193,16 +221,16 @@ pub const Zero = struct {
 // Independent integer model
 // ============================================================================
 
-const Row = struct { a: u8, b: u8, c: u12, d: u5 };
+const Row = struct { a: u8, b: u8, c: u12, d: u5, x: u8, y: u8 };
 
 /// Stimulus rows covering nonzero divisors only.
 const schedule = [_]Row{
-    .{ .a = 20, .b = 3, .c = 100, .d = 3 },
-    .{ .a = 0xFF, .b = 0x02, .c = 0x800, .d = 1 },
-    .{ .a = 0x80, .b = 0xFF, .c = 0xF80, .d = 1 },
-    .{ .a = 0xF9, .b = 0x02, .c = 0xFFF, .d = 3 },
-    .{ .a = 0x01, .b = 0x01, .c = 0x001, .d = 1 },
-    .{ .a = 0x7F, .b = 0x03, .c = 0x7FF, .d = 2 },
+    .{ .a = 20, .b = 3, .c = 100, .d = 3, .x = 20, .y = 3 },
+    .{ .a = 0xFF, .b = 0x02, .c = 0x800, .d = 1, .x = 0xF9, .y = 0x02 },
+    .{ .a = 0x80, .b = 0xFF, .c = 0xF80, .d = 1, .x = 0x80, .y = 0xFF },
+    .{ .a = 0xF9, .b = 0x02, .c = 0xFFF, .d = 3, .x = 0x7F, .y = 0xFE },
+    .{ .a = 0x01, .b = 0x01, .c = 0x001, .d = 1, .x = 0x01, .y = 0x01 },
+    .{ .a = 0x7F, .b = 0x03, .c = 0x7FF, .d = 2, .x = 0xF0, .y = 0x10 },
 };
 
 fn maskOf(width: usize) u64 {
@@ -239,6 +267,12 @@ fn unsignedMod(a: u64, aw: usize, b: u64, bw: usize) u64 {
     return ((a & maskOf(aw)) % (b & maskOf(bw))) & maskOf(width);
 }
 
+fn signedLess(a: u64, aw: usize, b: u64, bw: usize) u64 {
+    const sa: i64 = @bitCast(signExtend(a, aw));
+    const sb: i64 = @bitCast(signExtend(b, bw));
+    return @intFromBool(sa < sb);
+}
+
 const ProbeValues = struct {
     uq: u64,
     ur: u64,
@@ -268,6 +302,11 @@ const ProbeValues = struct {
     fminr8: u64,
     fmin16: u64,
     fminw16: u64,
+    sxq: u64,
+    sxr: u64,
+    mxq: u64,
+    mxr: u64,
+    xlt: u64,
 };
 
 const OutputSpec = struct { name: []const u8, width: usize };
@@ -301,6 +340,11 @@ const probe_outputs = [_]OutputSpec{
     .{ .name = "fminr8", .width = 8 },
     .{ .name = "fmin16", .width = 16 },
     .{ .name = "fminw16", .width = 16 },
+    .{ .name = "sxq", .width = 8 },
+    .{ .name = "sxr", .width = 8 },
+    .{ .name = "mxq", .width = 8 },
+    .{ .name = "mxr", .width = 8 },
+    .{ .name = "xlt", .width = 1 },
 };
 
 fn modelRow(row: Row) ProbeValues {
@@ -337,6 +381,13 @@ fn modelRow(row: Row) ProbeValues {
         .fminr8 = signedMod(0x80, 8, 0xFF, 8),
         .fmin16 = signExtend(signedDiv(0x80, 8, 0xFF, 8), 8) & maskOf(16),
         .fminw16 = signedDiv(signExtend(0x80, 8), 16, signExtend(0xFF, 8), 16),
+        // Declaration-level signed operands: signed div/mod/comparison; a
+        // mixed signed/unsigned pair follows Verilog's unsigned rule.
+        .sxq = signedDiv(row.x, 8, row.y, 8),
+        .sxr = signedMod(row.x, 8, row.y, 8),
+        .mxq = unsignedDiv(row.x, 8, row.b, 8),
+        .mxr = unsignedMod(row.x, 8, row.b, 8),
+        .xlt = signedLess(row.x, 8, row.y, 8),
     };
 }
 
@@ -375,6 +426,8 @@ fn emitProbeStimulus(alloc: std.mem.Allocator) ![]u8 {
         .{ .name = "b", .width = 8 },
         .{ .name = "c", .width = 12 },
         .{ .name = "d", .width = 5 },
+        .{ .name = "x", .width = 8 },
+        .{ .name = "y", .width = 8 },
     };
     var first = true;
     inline for (inputs) |spec| {
@@ -402,6 +455,8 @@ fn emitProbeStimulus(alloc: std.mem.Allocator) ![]u8 {
         try appendValue(&out, alloc, row.b, 8);
         try appendValue(&out, alloc, row.c, 12);
         try appendValue(&out, alloc, row.d, 5);
+        try appendValue(&out, alloc, row.x, 8);
+        try appendValue(&out, alloc, row.y, 8);
         try out.appendSlice(alloc, "\",\"expect\":\"");
         inline for (probe_outputs) |spec| {
             try appendValue(&out, alloc, @field(values, spec.name), spec.width);
@@ -488,7 +543,7 @@ fn emitManifest(alloc: std.mem.Allocator, probe_rtl: []const u8, probe_stim: []c
             "zero_rtl: out/divmod/zero.v bytes={d} sha256={s}\n" ++
             "zero_stimulus: out/divmod/zero.jsonl bytes={d} sha256={s} cycles=2 inputs=16 outputs=16\n" ++
             "semantics: each operator evaluates at max(operand widths); widening is an explicit sext/zext of the self-determined result, so folded and signal-driven values agree\n" ++
-            "coverage: unsigned/signed/mixed sign combinations, unequal operand widths, narrower and wider destinations, minimum signed value over -1 (wrapped and widened-first), folded and signal-driven comparison\n" ++
+            "coverage: unsigned/signed/mixed sign combinations, unequal operand widths, narrower and wider destinations, minimum signed value over -1 (wrapped and widened-first), declaration-level signed x/y ports proving the no-cast signed operator path, folded and signal-driven comparison\n" ++
             "zero: Icarus must observe x for q/r when b=0; a consumer must report an explicit unsupported-value failure instead of treating the bits as zero or skipping the row\n" ++
             "generate: zig build divmod\n",
         .{

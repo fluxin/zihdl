@@ -80,7 +80,13 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
             .inout => "inout  wire",
             else => unreachable,
         };
-        if (sym.width == 1) {
+        if (sym.is_signed) {
+            if (sym.width == 1) {
+                try render.appendFmt(out, allocator, "    {s} signed {s}{s}\n", .{ dir_str, sym.name, comma });
+            } else {
+                try render.appendFmt(out, allocator, "    {s} signed [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+            }
+        } else if (sym.width == 1) {
             try render.appendFmt(out, allocator, "    {s}        {s}{s}\n", .{ dir_str, sym.name, comma });
         } else {
             try render.appendFmt(out, allocator, "    {s} [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
@@ -106,7 +112,13 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     wrote_section = false;
     for (module.scope.symbols.items) |sym| {
         if (sym.kind != .wire or sym.dead) continue;
-        if (sym.width == 1) {
+        if (sym.is_signed) {
+            if (sym.width == 1) {
+                try render.appendFmt(out, allocator, "    wire signed {s};\n", .{sym.name});
+            } else {
+                try render.appendFmt(out, allocator, "    wire signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            }
+        } else if (sym.width == 1) {
             try render.appendFmt(out, allocator, "    wire        {s};\n", .{sym.name});
         } else {
             try render.appendFmt(out, allocator, "    wire [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
@@ -118,10 +130,11 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     // Hoisted shared subexpressions
     if (renderer.temps.items.len > 0) {
         for (renderer.temps.items) |temp| {
+            const signed: []const u8 = if (temp.is_signed) " signed" else "";
             if (temp.width == 1) {
-                try render.appendFmt(out, allocator, "    wire        {s};\n", .{temp.name});
+                try render.appendFmt(out, allocator, "    wire{s}        {s};\n", .{ signed, temp.name });
             } else {
-                try render.appendFmt(out, allocator, "    wire [{d}:0]  {s};\n", .{ temp.width - 1, temp.name });
+                try render.appendFmt(out, allocator, "    wire{s} [{d}:0]  {s};\n", .{ signed, temp.width - 1, temp.name });
             }
         }
         try render.appendStr(out, allocator, "\n");
@@ -131,7 +144,13 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     wrote_section = false;
     for (module.scope.symbols.items) |sym| {
         if (sym.kind != .reg or sym.dead) continue;
-        if (sym.width == 1) {
+        if (sym.is_signed) {
+            if (sym.width == 1) {
+                try render.appendFmt(out, allocator, "    reg signed {s};\n", .{sym.name});
+            } else {
+                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            }
+        } else if (sym.width == 1) {
             try render.appendFmt(out, allocator, "    reg         {s};\n", .{sym.name});
         } else {
             try render.appendFmt(out, allocator, "    reg [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
@@ -144,7 +163,13 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     wrote_section = false;
     for (module.scope.symbols.items) |sym| {
         if (sym.kind != .mem or sym.dead) continue;
-        if (sym.width == 1) {
+        if (sym.is_signed) {
+            if (sym.width == 1) {
+                try render.appendFmt(out, allocator, "    reg signed {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
+            } else {
+                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
+            }
+        } else if (sym.width == 1) {
             try render.appendFmt(out, allocator, "    reg         {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
         } else {
             try render.appendFmt(out, allocator, "    reg [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
