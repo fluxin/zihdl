@@ -122,7 +122,7 @@ downward. Descriptive only: the lint never changes RTL.
 |---|---|
 | `verilog.emitModule` / `emitModuleInto` / `emitDesign` | Verilog-2001 (portable default) |
 | `systemverilog.emitModule` / `emitDesign` | SystemVerilog (`logic`, `always_*`, enums, packed struct bundles) |
-| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, per-bit slew/load, output load/required and clock relationship/reset-release topology), provenance |
+| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, per-bit slew/load, output load/required and clock relationship/reset-release topology), resolved per-instance `Shape` values, forwarded-parameter sources, provenance |
 | `sdc.emitDesignSdc` | `create_clock`, uncertainty, reset false paths |
 | `provenance.Collector` | operation rows, authored groups, byte-exact RTL spans, artifact hash binding |
 | `timing_contract` fixture | the consumer contract fixture (RTL, v2 JSON, v1 projection, stimulus, manifest) |
@@ -203,7 +203,9 @@ rather than the authoring half of this specific project.
   without being frozen to a literal; forwarded widths are checked against the
   child parameter. There is still no automatic propagation for symbols that
   are not explicitly passed. Structural `Shape` values are explicit at each
-  instantiation.
+  instantiation, and `instantiateShape` records the resolved shape (defaults
+  merged with overrides) on the instance as `instances[].shape` in
+  `design.json`.
 
 **Memory**
 - One read port plus one write path per memory (`syncRead`, `readWritePort`);
@@ -264,10 +266,11 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Parameter propagation**: structural `Shape` specialization from a
-   parent's comptime values landed with `instantiateShape`. Remaining: runtime
-   parameter propagation (constrained by comptime widths), richer shape
-   constraint errors, and recording resolved shape values in `design.json`.
+1. **Parameter propagation**: structural `Shape` specialization from a parent's
+   comptime values, forwarding a parent `Param`/constant into a child override,
+   and per-instance resolved-shape export in `design.json` landed. Remaining:
+   richer shape constraint errors and automatic propagation for symbols that
+   are not explicitly passed.
 2. **Consume the per-bit timing rows**: declaration, validation and additive
    `/2` export for per-bit slew/load landed, and hierarchy contradictions are
    rejected transitively through silent levels and siblings. The live consumer

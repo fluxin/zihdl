@@ -278,6 +278,23 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
             try j.endObject();
         }
         try j.endArray();
+        if (inst.shape.len > 0) {
+            try j.objectField("shape");
+            try j.beginArray();
+            for (inst.shape) |field| {
+                try j.beginObject();
+                try j.objectField("name");
+                try j.write(field.name);
+                try j.objectField("value");
+                switch (field.value) {
+                    .int => |v| try j.write(v),
+                    .boolean => |v| try j.write(v),
+                    .tag => |t| try j.write(t),
+                }
+                try j.endObject();
+            }
+            try j.endArray();
+        }
         try j.objectField("connections");
         try j.beginArray();
         for (inst.connections) |conn| {

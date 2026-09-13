@@ -85,6 +85,8 @@ test "design.json exports hierarchy, widths, enums, clocks, memories and asserti
     try std.testing.expectEqualStrings("json_child", inst.object.get("module").?.string);
     try std.testing.expectEqualStrings("u_child", inst.object.get("instance").?.string);
     try std.testing.expectEqual(@as(i64, 16), inst.object.get("params").?.array.items[0].object.get("value").?.integer);
+    // Plain instances do not grow a shape row.
+    try std.testing.expect(inst.object.get("shape") == null);
 
     const child = findModule(root, "json_child").?;
     try std.testing.expect(!child.object.get("top").?.bool);
@@ -295,4 +297,60 @@ test "design.json records a forwarded instance parameter symbol" {
     try std.testing.expectEqualStrings("MASK", param.object.get("name").?.string);
     try std.testing.expectEqual(@as(i64, 0x3C), param.object.get("value").?.integer);
     try std.testing.expectEqualStrings("INHERITED", param.object.get("symbol").?.string);
+}
+
+test "design.json records resolved structural shapes on instances" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Mode = enum { fast, slow };
+    const Family = struct {
+        pub const Shape = struct { WIDTH: usize = 8, DEEP: bool = false, MODE: Mode = .fast };
+        pub fn specialize(comptime shape: Shape) type {
+            return struct {
+                pub const name = std.fmt.comptimePrint("json_shape_{d}_{d}_{s}", .{ shape.WIDTH, @intFromBool(shape.DEEP), @tagName(shape.MODE) });
+                pub const Inputs = struct { a: Signal(shape.WIDTH) };
+                pub const Outputs = struct { y: Signal(shape.WIDTH) };
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const outs = try mb.declareOutputs(Outputs);
+                    try mb.assign(outs.y, ins.a);
+                }
+            };
+        }
+    };
+
+    const Top = struct {
+        pub const name = "json_shape_top";
+        pub const Inputs = struct { a8: Signal(8), a16: Signal(16) };
+        pub const Outputs = struct { y8: Signal(8), y16: Signal(16) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiateShape(Family, "u_wide", .{ .WIDTH = 16, .DEEP = true, .MODE = .slow }, .{ .a = ins.a16 }, .{ .y = outs.y16 }, .{});
+            _ = try mb.instantiateShape(Family, "u_narrow", .{}, .{ .a = ins.a8 }, .{ .y = outs.y8 }, .{});
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Top);
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const top = findModule(root, "json_shape_top").?;
+    const instances = top.object.get("instances").?.array.items;
+
+    const wide = instances[0].object.get("shape").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), wide.len);
+    try std.testing.expectEqualStrings("WIDTH", wide[0].object.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 16), wide[0].object.get("value").?.integer);
+    try std.testing.expectEqualStrings("DEEP", wide[1].object.get("name").?.string);
+    try std.testing.expect(wide[1].object.get("value").?.bool);
+    try std.testing.expectEqualStrings("MODE", wide[2].object.get("name").?.string);
+    try std.testing.expectEqualStrings("slow", wide[2].object.get("value").?.string);
+
+    const narrow = instances[1].object.get("shape").?.array.items;
+    try std.testing.expectEqual(@as(i64, 8), narrow[0].object.get("value").?.integer);
+    try std.testing.expect(!narrow[1].object.get("value").?.bool);
+    try std.testing.expectEqualStrings("fast", narrow[2].object.get("value").?.string);
 }

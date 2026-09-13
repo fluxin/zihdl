@@ -1291,11 +1291,28 @@ pub const ParamOverride = struct {
     symbol: ?SymRef = null,
 };
 
+/// One resolved structural-shape value recorded on an instance for metadata:
+/// integer and boolean schema fields keep their type, enums record their tag.
+pub const ShapeFieldValue = union(enum) {
+    int: i64,
+    boolean: bool,
+    tag: []const u8,
+};
+
+/// One resolved `Shape` field of a specialized instance, defaults included.
+pub const ShapeField = struct {
+    name: []const u8,
+    value: ShapeFieldValue,
+};
+
 pub const Instance = struct {
     module_name: []const u8,
     instance_name: []const u8,
     connections: []const Connection,
     params: []const ParamOverride = &.{},
+    /// Resolved family shape for `instantiateShape` instances; empty for plain
+    /// instantiations.
+    shape: []const ShapeField = &.{},
 };
 
 pub const Assign = struct {
@@ -2098,14 +2115,12 @@ fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
     }
 }
 
-/// Resolves a block family's `Shape` schema with instance-site overrides:
-/// unknown fields, missing defaults, non-struct schemas and non-comptime
-/// values are compile errors. The merged shape value is handed to
-/// `Family.specialize`, which returns the concrete block type.
-pub fn specializeShape(comptime Family: type, comptime overrides: anytype) type {
+/// Validates a block family's `Shape` schema and merges instance-site
+/// overrides over the defaults: unknown fields, missing defaults, non-struct
+/// schemas and non-comptime values are compile errors.
+fn resolveShape(comptime Family: type, comptime overrides: anytype) Family.Shape {
     comptime {
         if (!@hasDecl(Family, "Shape")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub const Shape`");
-        if (!@hasDecl(Family, "specialize")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub fn specialize`");
         if (@typeInfo(Family.Shape) != .@"struct") @compileError(@typeName(Family) ++ ".Shape must be a struct");
         if (@typeInfo(@TypeOf(overrides)) != .@"struct") @compileError("instantiateShape overrides must be a struct");
         for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
@@ -2119,14 +2134,35 @@ pub fn specializeShape(comptime Family: type, comptime overrides: anytype) type 
             }
         }
     }
-    const merged = comptime blk: {
+    return comptime blk: {
         var m: Family.Shape = .{};
         for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
             @field(m, field.name) = @field(overrides, field.name);
         }
         break :blk m;
     };
-    return Family.specialize(merged);
+}
+
+/// Resolves a block family's `Shape` schema with instance-site overrides and
+/// hands the merged value to `Family.specialize`, which returns the concrete
+/// block type. The merged value is also recorded per instance by
+/// `instantiateShape` so `design.json` can state the resolved shape.
+pub fn specializeShape(comptime Family: type, comptime overrides: anytype) type {
+    comptime {
+        if (!@hasDecl(Family, "specialize")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub fn specialize`");
+    }
+    return Family.specialize(resolveShape(Family, overrides));
+}
+
+/// Converts one resolved shape field into its metadata form.
+fn shapeFieldValue(value: anytype, comptime name: []const u8) ShapeFieldValue {
+    const T = @TypeOf(value);
+    return switch (@typeInfo(T)) {
+        .int => .{ .int = @intCast(value) },
+        .bool => .{ .boolean = value },
+        .@"enum" => .{ .tag = @tagName(value) },
+        else => @compileError("structural parameter '" ++ name ++ "' must be an integer, bool or enum to be recorded in metadata"),
+    };
 }
 
 pub const Design = struct {
@@ -3103,7 +3139,9 @@ pub const ModuleBuilder = struct {
     ///
     /// This is how a parent's structural parameter specializes a child's
     /// shape: a parent can forward its own comptime value (for example a field
-    /// of its own `Shape`) without duplicating the child definition.
+    /// of its own `Shape`) without duplicating the child definition. The
+    /// resolved shape (defaults merged with overrides) is recorded on the
+    /// instance for `design.json`.
     pub fn instantiateShape(
         self: *ModuleBuilder,
         comptime Family: type,
@@ -3114,7 +3152,24 @@ pub const ModuleBuilder = struct {
         params: anytype,
     ) !specializeShape(Family, shape).Outputs {
         const Concrete = comptime specializeShape(Family, shape);
-        return self.instantiateChecked(Concrete, instance_name, inputs, outputs_binding, params);
+        const result = try self.instantiateChecked(Concrete, instance_name, inputs, outputs_binding, params);
+        try self.recordShape(Family, shape);
+        return result;
+    }
+
+    /// Records the merged shape of the instance appended last by
+    /// `instantiateChecked`, so metadata can state what a specialized module
+    /// actually resolved to. Integer and boolean fields keep their JSON type,
+    /// enums record their tag name.
+    fn recordShape(self: *ModuleBuilder, comptime Family: type, comptime overrides: anytype) !void {
+        const fields_info = @typeInfo(Family.Shape).@"struct".fields;
+        if (fields_info.len == 0) return;
+        const resolved = comptime resolveShape(Family, overrides);
+        const rows = try self.allocator.alloc(ShapeField, fields_info.len);
+        inline for (fields_info, 0..) |field, i| {
+            rows[i] = .{ .name = field.name, .value = shapeFieldValue(@field(resolved, field.name), field.name) };
+        }
+        self.instances.items[self.instances.items.len - 1].shape = rows;
     }
 
     fn addInputConnections(
