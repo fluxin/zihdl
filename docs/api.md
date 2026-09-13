@@ -260,24 +260,19 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **CDC depth (authoring side done).** The handshake block family (four-phase
-   bridge, quasi-static bundled data, single-slot and FIFO mailboxes, async
-   FIFO) and the structural lint, with per-bit ownership, per-bit
-   declared/structural coverage and hierarchy-resolved asynchronous-input
-   coverage, landed. A formal crossing proof stays consumer-side.
-2. **Parameter propagation**: structural `Shape` specialization from a
+1. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape
    constraint errors, and recording resolved shape values in `design.json`.
-3. **Consume the per-bit timing rows**: declaration, validation and additive
+2. **Consume the per-bit timing rows**: declaration, validation and additive
    `/2` export for per-bit slew/load landed, and hierarchy contradictions are
    rejected transitively through silent levels and siblings. The live consumer
    still reads whole-port rows only and constraint resolution stays
    consumer-side; `/3` remains reserved for incompatible schema changes.
-4. **Reusable reference model**: lift the per-fixture cycle models into a
+3. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.
-5. **Process**: add a `LICENSE`, decide whether docs ship in the package
+4. **Process**: add a `LICENSE`, decide whether docs ship in the package
    `paths`, and tag versions when consumers pin hashes.
 
 ## Stability policy
