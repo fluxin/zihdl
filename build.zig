@@ -192,6 +192,32 @@ pub fn build(b: *std.Build) void {
     async_fifo_step.dependOn(&async_fifo_lint.step);
     async_fifo_step.dependOn(&async_fifo_run.step);
 
+    // UART witness: single-clock TX/RX loopback replayed with Icarus.
+    const uart_exe = b.addExecutable(.{
+        .name = "js_asic_uart_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/uart_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const uart_gen = b.addRunArtifact(uart_exe);
+    const uart_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/uart_witness.v" });
+    uart_lint.step.dependOn(&uart_gen.step);
+    const uart_compile = b.addSystemCommand(&.{
+        "iverilog",           "-g2001",                    "-o", "out/uart_iv",
+        "out/uart_witness.v", "examples/blocks/uart_tb.v",
+    });
+    uart_compile.step.dependOn(&uart_gen.step);
+    const uart_run = b.addSystemCommand(&.{ "vvp", "out/uart_iv" });
+    uart_run.step.dependOn(&uart_compile.step);
+    const uart_step = b.step("uart", "Emit, lint and replay the single-clock UART loopback witness");
+    uart_step.dependOn(&uart_lint.step);
+    uart_step.dependOn(&uart_run.step);
+
     // CDC witness: request/acknowledge bridge and mailbox replayed across
     // asynchronous source/destination clocks.
     const cdc_exe = b.addExecutable(.{
@@ -402,6 +428,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&width_run.step);
     sim_step.dependOn(&eth_run.step);
     sim_step.dependOn(&async_fifo_run.step);
+    sim_step.dependOn(&uart_run.step);
     sim_step.dependOn(&cdc_run.step);
     sim_step.dependOn(&divmod_run.step);
     sim_step.dependOn(&divmod_zero_run.step);
@@ -423,6 +450,8 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&eth_run.step);
     verify_step.dependOn(&async_fifo_lint.step);
     verify_step.dependOn(&async_fifo_run.step);
+    verify_step.dependOn(&uart_lint.step);
+    verify_step.dependOn(&uart_run.step);
     verify_step.dependOn(&cdc_lint.step);
     verify_step.dependOn(&cdc_run.step);
     verify_step.dependOn(&divmod_lint.step);

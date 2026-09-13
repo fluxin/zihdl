@@ -3316,7 +3316,6 @@ pub const ModuleBuilder = struct {
                 const forwarded: SymRef = raw.ref;
                 const sym = forwarded.symbol();
                 if (sym.kind != .module_param and sym.kind != .constant) {
-                    std.log.warn("js_asic: parameter '{s}' for module '{s}' must forward a module parameter or constant, not '{s}'", .{ field.name, BlockType.name, forwarded.name() });
                     return error.InvalidParameter;
                 }
                 if (comptime valWidth(@TypeOf(raw)) > width) {

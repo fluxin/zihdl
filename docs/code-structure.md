@@ -24,7 +24,7 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, shift reg, edge det, counter)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
@@ -147,6 +147,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build verify` | Enforced lint + simulation of every artifact + contract fixture |
 | `zig build contract` | Emits the timing-intent fixture under `out/contract/` |
 | `zig build async-fifo` | Emits, lints and Icarus-replays the dual-clock async FIFO witness |
+| `zig build uart` | Emits, lints and Icarus-replays the single-clock UART loopback witness |
 | `zig build cdc` | Emits, lints and Icarus-replays the request/acknowledge bridge + bundled-data + mailbox/FIFO-mailbox witness |
 | `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |

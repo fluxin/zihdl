@@ -262,7 +262,9 @@ oasic-side development required for this:
 ### Phase 3 — IP library
 
 15. **Protocol blocks**: AXI4-Lite, UART, SPI master/target, I2C target, async
-    FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers.
+    FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers. First
+    library block beyond the CDC set: `blocks.UartBlock` (5..8 data bits,
+    mid-bit sampling) with the `zig build uart` loopback witness.
 16. **Testbench scaffolding**: emit TB skeletons and trace-driven checks
     (execution stays external). First instance done: `examples/blocks/vector_tb.zig`
     (a generated vector player with sampled-input checks) plus
