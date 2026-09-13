@@ -15,12 +15,13 @@ const rtl = try verilog.emitDesign(alloc, &design, .{});
 ```
 
 Everything else hangs off that. The public surface is exported through
-`src/root.zig`: `netlist`, `lib`, `blocks`, `backend`.
+`src/root.zig`: `netlist`, `lib`, `blocks`, `backend`, `cdc`.
 
 - `netlist` — the IR and builder: the only way to create hardware.
 - `lib` — idioms built on the public builder (`Stream`, FSM, registers, CDC).
 - `blocks` — parameterized structural IP.
 - `backend` — artifact writers and the target hub.
+- `cdc` — structural clock-domain-crossing lint over an elaborated design.
 
 ## The authoring surface
 
@@ -85,7 +86,16 @@ Everything else hangs off that. The public surface is exported through
 ### blocks
 
 `SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
-`ShiftRegisterBlock`, `EdgeDetectorBlock`, `CounterBlock`.
+`ReqAckBridgeBlock`, `MailboxBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
+`CounterBlock`.
+
+### cdc
+
+`lint(allocator, design)` returns `[]Crossing` for sequential captures that
+read a signal driven only by another clock domain without a declared
+synchronizer stage, a recognized two-flop structure, a declared synchronous
+clock relationship or a request/acknowledge handshake. Descriptive only: the
+lint never changes RTL.
 
 ### backend
 
@@ -168,11 +178,15 @@ rather than the authoring half of this specific project.
 **Clocking, reset, CDC**
 - `ResetRelease` is descriptive; `lib.resetSync` lowers an async-assert /
   sync-release chain, but the policy field itself still does not generate one.
-- `sync2`, `syncInput`, `pulseSync` and `AsyncFifoBlock` cover level, edge and
-  gray-pointer crossings; no request/acknowledge bridge, mailbox or
-  bundled-data handoff, and no CDC structural lint.
+- `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock` and
+  `MailboxBlock` cover level, edge, gray-pointer and bundled-data handshake
+  crossings, and `cdc.lint` audits elaborated designs structurally. The lint is
+  heuristic: it cannot see metastability risk beyond structure, per-bit
+  synchronizer declarations are treated as whole signals, and a formal crossing
+  proof is future work.
 - No clock divider/PLL/gating primitives; PLLs are foreign macros.
-- No multi-clock-domain structural check beyond per-process reset coverage.
+- No multi-clock-domain structural check beyond per-process reset coverage and
+  the opt-in `cdc.lint` pass.
 
 **Timing and constraints**
 - Timing intent covers input classification, synchronizer stages, arrival
@@ -211,9 +225,10 @@ rather than the authoring half of this specific project.
    operands explicitly, so folded and signal-driven values agree. Comparisons
    and the right operand of shifts still rely on Verilog operator context;
    apply the same normalization there.
-2. **Handshake and bundled-data CDC.** `sync2`, `syncInput`, `pulseSync`,
-   `resetSync` and `AsyncFifoBlock` now cover the common crossings; add
-   request/acknowledge bridges, mailboxes and a CDC structural lint.
+2. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
+   next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
+   per-bit synchronizer intent in the lint, and a formal crossing proof rather
+   than a heuristic audit.
 3. **Parameter propagation**: a way for a parent parameter to specialize a
    child's structural widths/depths, so generated suites do not need comptime
    duplication.

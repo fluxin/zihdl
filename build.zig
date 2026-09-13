@@ -192,6 +192,33 @@ pub fn build(b: *std.Build) void {
     async_fifo_step.dependOn(&async_fifo_lint.step);
     async_fifo_step.dependOn(&async_fifo_run.step);
 
+    // CDC witness: request/acknowledge bridge and mailbox replayed across
+    // asynchronous source/destination clocks.
+    const cdc_exe = b.addExecutable(.{
+        .name = "js_asic_cdc_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/cdc_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const cdc_gen = b.addRunArtifact(cdc_exe);
+    const cdc_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/cdc_witness.v" });
+    cdc_lint.step.dependOn(&cdc_gen.step);
+    const cdc_compile = b.addSystemCommand(&.{
+        "iverilog",          "-g2001",                   "-o", "out/cdc_iv",
+        "out/cdc_witness.v", "examples/blocks/cdc_tb.v",
+    });
+    cdc_compile.step.dependOn(&cdc_gen.step);
+    const cdc_run = b.addSystemCommand(&.{ "vvp", "out/cdc_iv" });
+    cdc_run.step.dependOn(&cdc_compile.step);
+    const cdc_step = b.step("cdc", "Emit, lint and replay the request/acknowledge bridge and mailbox witness");
+    cdc_step.dependOn(&cdc_lint.step);
+    cdc_step.dependOn(&cdc_run.step);
+
     // Division/remainder witness: signal-driven `/` and `%` plus folded
     // constants (including signed cases) replayed against the simulator.
     const divmod_exe = b.addExecutable(.{
@@ -375,6 +402,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&width_run.step);
     sim_step.dependOn(&eth_run.step);
     sim_step.dependOn(&async_fifo_run.step);
+    sim_step.dependOn(&cdc_run.step);
     sim_step.dependOn(&divmod_run.step);
     sim_step.dependOn(&divmod_zero_run.step);
     sim_step.dependOn(zio_step);
@@ -395,6 +423,8 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&eth_run.step);
     verify_step.dependOn(&async_fifo_lint.step);
     verify_step.dependOn(&async_fifo_run.step);
+    verify_step.dependOn(&cdc_lint.step);
+    verify_step.dependOn(&cdc_run.step);
     verify_step.dependOn(&divmod_lint.step);
     verify_step.dependOn(&divmod_zero_lint.step);
     verify_step.dependOn(&divmod_run.step);

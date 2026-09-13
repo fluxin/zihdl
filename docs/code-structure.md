@@ -24,14 +24,16 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, sync + async FIFO, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/mailbox, shift reg, edge det, counter)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
+cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
-root.zig             module root; exports netlist, lib, blocks, backend
+root.zig             module root; exports netlist, lib, blocks, backend, cdc
 ```
 
 `src/root.zig` is the single import surface: examples import `js_asic` and use
-`js_asic.netlist`, `js_asic.lib`, `js_asic.blocks`, `js_asic.backend`.
+`js_asic.netlist`, `js_asic.lib`, `js_asic.blocks`, `js_asic.backend` and
+`js_asic.cdc`.
 
 ## What each layer owns
 
@@ -78,6 +80,7 @@ resolved at emission.
 | New arithmetic/select/statement capability, new validation | `src/netlist.zig` |
 | New reusable idiom (register, stream, encoder) | `src/lib.zig` |
 | New parameterized structural block | `src/blocks/<name>.zig` + export in `src/blocks.zig` |
+| New analysis over an elaborated design | `src/cdc.zig` (lint) or a new `src/<pass>.zig`, exported from `src/root.zig` |
 | New output artifact or HDL target | `src/backend/` + wire into `src/backend.zig` and `src/root.zig` tests |
 | New application/example | `examples/` |
 | Contract fixture coverage | `src/backend/<x>_fixture.zig` + runner in `examples/` when consumers replay it |
@@ -126,6 +129,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build verify` | Enforced lint + simulation of every artifact + contract fixture |
 | `zig build contract` | Emits the timing-intent fixture under `out/contract/` |
 | `zig build async-fifo` | Emits, lints and Icarus-replays the dual-clock async FIFO witness |
+| `zig build cdc` | Emits, lints and Icarus-replays the request/acknowledge bridge + mailbox witness |
 | `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 
