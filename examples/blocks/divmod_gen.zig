@@ -309,9 +309,18 @@ const ProbeValues = struct {
     xlt: u64,
 };
 
-const OutputSpec = struct { name: []const u8, width: usize };
+const BitSpec = struct { name: []const u8, width: usize };
 
-const probe_outputs = [_]OutputSpec{
+const probe_inputs = [_]BitSpec{
+    .{ .name = "a", .width = 8 },
+    .{ .name = "b", .width = 8 },
+    .{ .name = "c", .width = 12 },
+    .{ .name = "d", .width = 5 },
+    .{ .name = "x", .width = 8 },
+    .{ .name = "y", .width = 8 },
+};
+
+const probe_outputs = [_]BitSpec{
     .{ .name = "uq", .width = 8 },
     .{ .name = "ur", .width = 8 },
     .{ .name = "sq", .width = 8 },
@@ -414,6 +423,26 @@ fn appendFmt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []
     try out.appendSlice(alloc, formatted);
 }
 
+/// One character of the `drive`/`expect` strings per declared bit. A 1-bit
+/// signal is a scalar name (`xlt`), wider signals are per-bit (`d[0]`), which
+/// is the naming every oasic.stimulus/1 binding expects.
+fn appendBitNames(out: *std.ArrayList(u8), alloc: std.mem.Allocator, specs: []const BitSpec) !void {
+    var first = true;
+    for (specs) |spec| {
+        if (spec.width == 1) {
+            if (!first) try out.append(alloc, ',');
+            first = false;
+            try appendFmt(out, alloc, "\"{s}\"", .{spec.name});
+            continue;
+        }
+        for (0..spec.width) |bit| {
+            if (!first) try out.append(alloc, ',');
+            first = false;
+            try appendFmt(out, alloc, "\"{s}[{d}]\"", .{ spec.name, bit });
+        }
+    }
+}
+
 fn emitProbeStimulus(alloc: std.mem.Allocator) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -421,31 +450,9 @@ fn emitProbeStimulus(alloc: std.mem.Allocator) ![]u8 {
     try out.appendSlice(alloc, "{\"schema\":\"" ++ stimulus_schema ++ "\",\"top\":\"" ++ probe_name ++ "\",\"clock\":\"" ++ clock_name ++ "\",\"period_ps\":");
     try appendFmt(&out, alloc, "{d}", .{period_ps});
     try out.appendSlice(alloc, ",\"inputs\":[");
-    const inputs = [_]struct { name: []const u8, width: usize }{
-        .{ .name = "a", .width = 8 },
-        .{ .name = "b", .width = 8 },
-        .{ .name = "c", .width = 12 },
-        .{ .name = "d", .width = 5 },
-        .{ .name = "x", .width = 8 },
-        .{ .name = "y", .width = 8 },
-    };
-    var first = true;
-    inline for (inputs) |spec| {
-        for (0..spec.width) |bit| {
-            if (!first) try out.append(alloc, ',');
-            first = false;
-            try appendFmt(&out, alloc, "\"{s}[{d}]\"", .{ spec.name, bit });
-        }
-    }
+    try appendBitNames(&out, alloc, &probe_inputs);
     try out.appendSlice(alloc, "],\"outputs\":[");
-    first = true;
-    inline for (probe_outputs) |spec| {
-        for (0..spec.width) |bit| {
-            if (!first) try out.append(alloc, ',');
-            first = false;
-            try appendFmt(&out, alloc, "\"{s}[{d}]\"", .{ spec.name, bit });
-        }
-    }
+    try appendBitNames(&out, alloc, &probe_outputs);
     try out.appendSlice(alloc, "]}\n");
 
     for (schedule) |row| {
@@ -522,6 +529,10 @@ fn sha256Hex(alloc: std.mem.Allocator, bytes: []const u8) ![]const u8 {
 
 fn checkProbeShape(design: *const netlist.Design) !void {
     const module = design.findModule(probe_name) orelse return error.MissingProbeModule;
+    for (probe_inputs) |spec| {
+        const sym = module.scope.find(spec.name) orelse return error.MissingProbeInput;
+        if (sym.width() != spec.width) return error.ProbeWidthMismatch;
+    }
     for (probe_outputs) |spec| {
         const sym = module.scope.find(spec.name) orelse return error.MissingProbeOutput;
         if (sym.width() != spec.width) return error.ProbeWidthMismatch;
@@ -539,7 +550,7 @@ fn emitManifest(alloc: std.mem.Allocator, probe_rtl: []const u8, probe_stim: []c
             "top: {s}\n" ++
             "schema: oasic.stimulus/1 (verilog2001 target)\n" ++
             "rtl: out/divmod/probe.v bytes={d} sha256={s}\n" ++
-            "stimulus: out/divmod/probe.jsonl bytes={d} sha256={s} cycles={d} inputs=32 outputs={d}\n" ++
+            "stimulus: out/divmod/probe.jsonl bytes={d} sha256={s} cycles={d} inputs={d} outputs={d}\n" ++
             "zero_rtl: out/divmod/zero.v bytes={d} sha256={s}\n" ++
             "zero_stimulus: out/divmod/zero.jsonl bytes={d} sha256={s} cycles=2 inputs=16 outputs=16\n" ++
             "semantics: each operator evaluates at max(operand widths); widening is an explicit sext/zext of the self-determined result, so folded and signal-driven values agree\n" ++
@@ -553,6 +564,7 @@ fn emitManifest(alloc: std.mem.Allocator, probe_rtl: []const u8, probe_stim: []c
             probe_stim.len,
             probe_stim_sha,
             schedule.len,
+            totalBits(probe_inputs),
             totalBits(probe_outputs),
             zero_rtl.len,
             zero_rtl_sha,
