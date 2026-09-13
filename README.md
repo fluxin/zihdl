@@ -72,7 +72,7 @@ incompatible schema changes.
 | `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
 | `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
 | `outputs[].required.min` / `.max` | Required arrival window relative to the destination clock's active edge, same explicit-time shape as `arrival`. A null bound is unknown, never zero; the destination clock stays consumer-resolved. |
-| `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first. Empty when none is declared; stages must be registers matching the reset width. |
+| `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first, declared by the module that owns the chain registers. A released domain's reset is the chain output (directly or through hierarchy), never the raw reset; empty when none is declared. |
 | `clocks[].relationship.relation` / `.related_to` / `.source_period` / `.jitter` | Relation to a reference clock (`synchronous`, `asynchronous`, `mesochronous`, `plesiochronous`), the related 1-bit input in the declaring module (`null` means an external reference), and explicit source period / jitter times. |
 
 #### Hierarchy resolution
@@ -96,13 +96,14 @@ The fixture's canonical artifact is `out/contract/timing_contract.json` (v2);
 consumers that do not parse v2 yet. Both bind the same RTL and stimulus. It
 covers both arrival bounds, a 2-bit vector synchronizer (per-bit vector stage
 identities are unit-test covered; current consumers reject them), an
-intentionally unsynchronized input, reset policy with a declared
-async-assert/sync-release chain, an asynchronous parent and child clock
-relationship to an external reference, declared-but-unknown (null)
-slew/load/required values, both load units, output required windows, child
-output defaults with per-instance parent row overrides (value, unit change,
-explicit null and required replacement) and no-parent-row fallback, plus
-compatible parent/child input merges (parent slew, child
+intentionally unsynchronized input, a real async-assert/sync-release reset
+chain (`reset_sync_2`) whose output resets the flat child domains, with the
+two-edge release latency replayed across the contract stimulus, an
+asynchronous parent and child clock relationship to an external reference,
+declared-but-unknown (null) slew/load/required values, both load units, output
+required windows, child output defaults with per-instance parent row overrides
+(value, unit change, explicit null and required replacement) and no-parent-row
+fallback, plus compatible parent/child input merges (parent slew, child
 classification/synchronizer/arrival).
 
 Per-bit slew/load stays whole-port: one row applies to every bit of its port

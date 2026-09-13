@@ -16,6 +16,7 @@ pub const FifoBlock = fifo.FifoBlock;
 pub const AsyncFifoBlock = async_fifo.AsyncFifoBlock;
 pub const ReqAckBridgeBlock = cdc.ReqAckBridgeBlock;
 pub const MailboxBlock = cdc.MailboxBlock;
+pub const ResetSyncBlock = cdc.ResetSyncBlock;
 pub const ShiftRegisterBlock = shift_reg.ShiftRegisterBlock;
 pub const ShiftDirection = shift_reg.ShiftDirection;
 pub const EdgeDetectorBlock = edge_det.EdgeDetectorBlock;

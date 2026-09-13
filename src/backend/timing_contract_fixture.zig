@@ -3,7 +3,8 @@
 //! with a two-stage synchronizer, an asynchronous 2-bit bus with vector
 //! synchronizer stage identities (per-bit stage intent is unit-test covered;
 //! current consumers reject it), an intentionally unsynchronized asynchronous
-//! input, an async-assert/sync-release reset chain, an asynchronous clock
+//! input, an async-assert/sync-release reset chain whose released output is the
+//! domain reset every functional register uses, an asynchronous clock
 //! relationship to an external reference, and a reset policy. The top
 //! instantiates the child twice through renamed connections so consumers can
 //! exercise hierarchical binding, and uses v2 parent rows to override child
@@ -13,12 +14,16 @@
 //!
 //! `emitStimulus` builds an independent `oasic.stimulus/1` program whose
 //! expectations come from the cycle model written here, never from emitted RTL.
-//! Arrival, slew, load and required values are fixture values that exercise
-//! the schema; they are not board requirements and must not be treated as such.
+//! The model advances the reset synchronizer edge by edge, so the replay pins
+//! the released domain's two-edge release latency: inputs driven during the
+//! release edges must not appear at the outputs. Arrival, slew, load and
+//! required values are fixture values that exercise the schema; they are not
+//! board requirements and must not be treated as such.
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
 const lib = @import("../lib.zig");
+const cdc_blocks = @import("../blocks/cdc.zig");
 
 const Signal = netlist.Signal;
 const Design = netlist.Design;
@@ -52,8 +57,28 @@ pub const Child = struct {
     pub fn build(mb: *ModuleBuilder) !void {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
-        const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
         const b = mb.exprs();
+
+        // The released reset arrives from the top's reset-synchronizer
+        // instance; this module is flat so structural consumers can bind its
+        // timing intent, and every functional register here resets from the
+        // released signal (never from the raw reset port).
+        const domain = ClockDomain{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .freq_hz = 120_000_000,
+            .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
+            // v2 clock relationship: this domain is asynchronous to the
+            // external reference clock the top passes in.
+            .relationship = .{
+                .relation = .asynchronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 10.0, .unit = .ns },
+                .jitter = .{ .value = 50.0, .unit = .ps },
+            },
+        };
+        try mb.addClockDomain(domain);
 
         // Synchronous input with a declared arrival window. Slew stays
         // undeclared (null) at this level; the top authors distinct v2 slew
@@ -79,29 +104,6 @@ pub const Child = struct {
         try mb.assign(outs.raw_out, ins.raw_in);
 
         try mb.seq(domain, &.{b.assign(sync_q, ins.sync_in)});
-
-        // Real async-assert / sync-release reset chain whose stages are named
-        // by the clock-domain topology below (v2 release_synchronizer).
-        const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, domain);
-        try mb.addClockDomain(.{
-            .name = "sys",
-            .clk = ins.clk,
-            .rst_n = ins.rst_n,
-            .freq_hz = 120_000_000,
-            .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
-            .release_synchronizer = &.{
-                .{ .signal = rel.sync0.ref, .bit = 0 },
-                .{ .signal = rel.sync1.ref, .bit = 0 },
-            },
-            // v2 clock relationship: this domain is asynchronous to the
-            // external reference clock the top passes in.
-            .relationship = .{
-                .relation = .asynchronous,
-                .related_to = ins.ref_clk.ref,
-                .source_period = .{ .value = 10.0, .unit = .ns },
-                .jitter = .{ .value = 50.0, .unit = .ps },
-            },
-        });
 
         try mb.addInputTiming(.{
             .signal = ins.sync_in.ref,
@@ -188,13 +190,24 @@ pub const Top = struct {
     pub fn build(mb: *ModuleBuilder) !void {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
+
+        // One async-assert / sync-release chain for the whole domain: the raw
+        // reset only clocks the reset_sync_2 instance, its rst_n_sync output
+        // is the reset both child instances (and this module's domain row)
+        // actually use, and reset_sync_2's clock row names the chain.
+        const rel = try mb.instantiate(cdc_blocks.ResetSyncBlock(2), "u_rel", .{
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+        }, .{}, .{});
+
         // v2 clock relationship authored at the parent boundary: the system
         // clock is mesochronous to the external reference clock.
         try mb.addClockDomain(.{
             .name = "sys",
             .clk = ins.clk,
-            .rst_n = ins.rst_n,
+            .rst_n = rel.rst_n_sync,
             .freq_hz = 120_000_000,
+            .reset = .{ .release = .synchronous },
             .relationship = .{
                 .relation = .mesochronous,
                 .related_to = ins.ref_clk.ref,
@@ -205,9 +218,10 @@ pub const Top = struct {
 
         // Same child definition, two instances, renamed parent-side ports:
         // consumers resolve the child's intent through the instance rows.
+        // Both are reset by the shared released reset.
         _ = try mb.instantiate(Child, "u_fast", .{
             .clk = ins.clk,
-            .rst_n = ins.rst_n,
+            .rst_n = rel.rst_n_sync,
             .ref_clk = ins.ref_clk,
             .sync_in = ins.fast_sync_in,
             .async_in = ins.fast_async_in,
@@ -221,7 +235,7 @@ pub const Top = struct {
         }, .{});
         _ = try mb.instantiate(Child, "u_slow", .{
             .clk = ins.clk,
-            .rst_n = ins.rst_n,
+            .rst_n = rel.rst_n_sync,
             .ref_clk = ins.ref_clk,
             .sync_in = ins.slow_sync_in,
             .async_in = ins.slow_async_in,
@@ -370,14 +384,20 @@ const Row = struct {
     slow_raw: u1 = 0,
 };
 
-/// Reset, synchronous capture on both instances, independent rise/fall
-/// sequences on each instance's asynchronous input, and distinct 2-bit bus
-/// patterns on each instance's per-bit synchronizer.
+/// Reset, then two driven release-latency edges (inputs move while the
+/// released domain is still held in reset), then synchronous capture on both
+/// instances, independent rise/fall sequences on each instance's asynchronous
+/// input, and distinct 2-bit bus patterns on each instance's per-bit
+/// synchronizer.
 const schedule = [_]Row{
     .{},
     .{},
     .{},
     .{},
+    // The chain output is still low on these edges; driven inputs must not
+    // reach the functional registers until the next edge.
+    .{ .rst_n = 1, .fast_sync = 0x11, .slow_sync = 0x22, .fast_raw = 1 },
+    .{ .rst_n = 1, .fast_sync = 0x33, .slow_sync = 0x44, .fast_async = 1, .slow_raw = 1 },
     .{ .rst_n = 1, .fast_sync = 0xA5, .slow_sync = 0x3C, .fast_raw = 1 },
     .{ .rst_n = 1, .fast_sync = 0x5A, .slow_sync = 0xC3, .fast_async = 1, .slow_raw = 1, .fast_bus = 0b01, .slow_bus = 0b10 },
     .{ .rst_n = 1, .fast_sync = 0x0F, .slow_sync = 0xF0, .fast_async = 1, .slow_async = 1, .fast_raw = 1, .slow_raw = 1, .fast_bus = 0b01, .slow_bus = 0b10 },
@@ -430,8 +450,13 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
 
     var fast = Sync{};
     var slow = Sync{};
+    // Released-domain reset chain: raw reset asserts asynchronously, the
+    // chain releases two clock edges after it rises.
+    var rel0: u1 = 0;
+    var rel1: u1 = 0;
     for (schedule) |row| {
-        if (row.rst_n == 0) {
+        const released = row.rst_n == 1 and rel1 == 1;
+        if (!released) {
             fast = .{};
             slow = .{};
         } else {
@@ -453,6 +478,14 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
                 .bus_d0 = row.slow_bus,
                 .bus_d1 = old_slow.bus_d0,
             };
+        }
+        if (row.rst_n == 0) {
+            rel0 = 0;
+            rel1 = 0;
+        } else {
+            const old_rel0 = rel0;
+            rel0 = 1;
+            rel1 = old_rel0;
         }
 
         var drive = [_]u8{'0'} ** input_names.len;
@@ -505,11 +538,13 @@ test "contract fixture elaborates with two renamed instances" {
 
     const design = try buildDesign(alloc);
     const top = design.findModule(top_name).?;
-    try std.testing.expectEqual(@as(usize, 2), top.instances.len);
-    try std.testing.expectEqualStrings("u_fast", top.instances[0].instance_name);
-    try std.testing.expectEqualStrings("u_slow", top.instances[1].instance_name);
-    try std.testing.expectEqualStrings(child_name, top.instances[0].module_name);
+    try std.testing.expectEqual(@as(usize, 3), top.instances.len);
+    try std.testing.expectEqualStrings("u_rel", top.instances[0].instance_name);
+    try std.testing.expectEqualStrings("reset_sync_2", top.instances[0].module_name);
+    try std.testing.expectEqualStrings("u_fast", top.instances[1].instance_name);
+    try std.testing.expectEqualStrings("u_slow", top.instances[2].instance_name);
     try std.testing.expectEqualStrings(child_name, top.instances[1].module_name);
+    try std.testing.expectEqualStrings(child_name, top.instances[2].module_name);
 
     const child = design.findModule(child_name).?;
     try std.testing.expectEqual(@as(usize, 4), child.timing.len);
@@ -535,16 +570,26 @@ test "contract fixture elaborates with two renamed instances" {
         }
     }
 
-    // The clock domain names the real async-assert/sync-release chain and its
-    // relationship to the external reference clock.
+    // The released domain is flat and resets from its rst_n port, which the
+    // top drives with the reset-synchronizer instance output; the chain
+    // registers themselves are declared by `reset_sync_2`, whose clock row
+    // names them.
     try std.testing.expectEqual(@as(usize, 1), child.clocks.len);
     const child_clock = child.clocks[0];
     try std.testing.expectEqual(netlist.ResetRelease.synchronous, child_clock.reset.release);
-    try std.testing.expectEqual(@as(usize, 2), child_clock.release_synchronizer.len);
-    try std.testing.expectEqualStrings("rel_sync0", child_clock.release_synchronizer[0].signal.name());
-    try std.testing.expectEqualStrings("rel_sync1", child_clock.release_synchronizer[1].signal.name());
+    try std.testing.expectEqual(@as(usize, 0), child_clock.release_synchronizer.len);
+    try std.testing.expectEqualStrings("rst_n", child_clock.rst_n.name());
     try std.testing.expectEqual(netlist.ClockRelation.asynchronous, child_clock.relationship.?.relation);
     try std.testing.expectEqualStrings("ref_clk", child_clock.relationship.?.related_to.?.name());
+    try std.testing.expectEqual(@as(usize, 0), child.instances.len);
+
+    const reset_mod = design.findModule("reset_sync_2").?;
+    try std.testing.expectEqual(@as(usize, 1), reset_mod.clocks.len);
+    const reset_clock = reset_mod.clocks[0];
+    try std.testing.expectEqual(netlist.ResetRelease.synchronous, reset_clock.reset.release);
+    try std.testing.expectEqual(@as(usize, 2), reset_clock.release_synchronizer.len);
+    try std.testing.expectEqualStrings("sync0", reset_clock.release_synchronizer[0].signal.name());
+    try std.testing.expectEqualStrings("sync1", reset_clock.release_synchronizer[1].signal.name());
 
     // Child output rows carry the required windows; the no-parent-row port
     // keeps them in force for consumers.
@@ -590,4 +635,48 @@ test "contract stimulus binds every input and output with a model-derived row" {
         rows += 1;
     }
     try std.testing.expectEqual(schedule.len, rows);
+}
+
+test "contract stimulus pins the released-domain release latency" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const text = try emitStimulus(alloc);
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    _ = lines.next();
+
+    var index: usize = 0;
+    var release_edges: usize = 0;
+    while (lines.next()) |line| : (index += 1) {
+        // The two driven edges after raw reset release.
+        if (index != 4 and index != 5) continue;
+        const drive_tag = std.mem.indexOf(u8, line, "\"drive\":\"").?;
+        const expect_tag = std.mem.indexOf(u8, line, "\"expect\":\"").?;
+        const drive_start = drive_tag + 9;
+        const expect_start = expect_tag + 10;
+        const drive = line[drive_start .. expect_tag - 2];
+        const expect = line[expect_start .. line.len - 2];
+        // Inputs move on these edges...
+        try std.testing.expect(!std.mem.eql(u8, drive[1..9], "00000000"));
+        // ...but the released domain still holds its reset values.
+        try std.testing.expectEqualStrings("00000000", expect[0..8]);
+        try std.testing.expectEqualStrings("00000000", expect[8..16]);
+        try std.testing.expectEqualStrings("00", expect[18..20]);
+        try std.testing.expectEqualStrings("00", expect[20..22]);
+        release_edges += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), release_edges);
+
+    // The third edge after release captures the driven word.
+    var capture_lines = std.mem.tokenizeScalar(u8, text, '\n');
+    _ = capture_lines.next();
+    index = 0;
+    while (capture_lines.next()) |line| : (index += 1) {
+        if (index != 6) continue;
+        const expect_tag = std.mem.indexOf(u8, line, "\"expect\":\"").?;
+        const expect_start = expect_tag + 10;
+        // fast_sync_out[7:0] = 0xA5, MSB-first.
+        try std.testing.expectEqualStrings("10100101", line[expect_start .. expect_start + 8]);
+    }
 }

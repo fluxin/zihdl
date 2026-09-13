@@ -24,7 +24,7 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/mailbox, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/mailbox/reset sync, shift reg, edge det, counter)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design

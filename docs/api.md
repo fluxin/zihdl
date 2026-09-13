@@ -87,8 +87,8 @@ Everything else hangs off that. The public surface is exported through
 ### blocks
 
 `SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
-`ReqAckBridgeBlock`, `MailboxBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
-`CounterBlock`.
+`ReqAckBridgeBlock`, `MailboxBlock`, `ResetSyncBlock`, `ShiftRegisterBlock`,
+`EdgeDetectorBlock`, `CounterBlock`.
 
 ### cdc
 
@@ -183,7 +183,10 @@ rather than the authoring half of this specific project.
 
 **Clocking, reset, CDC**
 - `ResetRelease` is descriptive; `lib.resetSync` lowers an async-assert /
-  sync-release chain, but the policy field itself still does not generate one.
+  sync-release chain in place, and `blocks.ResetSyncBlock` packages the same
+  chain as a flat module that declares its `release_synchronizer` and is meant
+  to drive the released domain's reset. The policy field itself still does not
+  generate the chain.
 - `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock` and
   `MailboxBlock` cover level, edge, gray-pointer and bundled-data handshake
   crossings, and `cdc.lint` audits elaborated designs structurally. The lint is

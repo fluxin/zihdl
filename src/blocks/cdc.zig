@@ -190,6 +190,61 @@ pub fn MailboxBlock(comptime data_width: usize) type {
     };
 }
 
+/// Reset synchronizer with a declared release chain. The module asynchronously
+/// asserts its active-low output while `rst_n` is low and releases it
+/// `stage_count` clock edges later (classic async-assert / sync-release). It
+/// declares its own clock domain so `clocks[].reset.release_synchronizer`
+/// names the chain registers, and `rst_n_sync` is meant to be used as the
+/// reset of the released domain. Keeping the raw-reset chain in its own module
+/// also means every reset-bearing process of the consuming module resets from
+/// the released signal, which is what lets structural consumers bind the
+/// domain's reset policy to real RTL.
+pub fn ResetSyncBlock(comptime stage_count: usize) type {
+    comptime {
+        if (stage_count < 2) @compileError("ResetSyncBlock requires stage_count >= 2");
+    }
+    return struct {
+        pub const name = std.fmt.comptimePrint("reset_sync_{d}", .{stage_count});
+        pub const stages_val = stage_count;
+
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
+        pub const Outputs = struct { rst_n_sync: Signal(1) };
+
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            var chain: [stage_count]Signal(1) = undefined;
+            inline for (0..stage_count) |i| {
+                chain[i] = try mb.reg(std.fmt.comptimePrint("sync{d}", .{i}), 1, 0);
+            }
+
+            var stmts = std.ArrayList(netlist.Stmt).empty;
+            defer stmts.deinit(mb.allocator);
+            inline for (chain, 0..) |stage, i| {
+                const src = if (i == 0) 1 else chain[i - 1].expr();
+                try stmts.append(mb.allocator, b.assign(stage, src));
+            }
+            try mb.seqReset(ins.clk, .{ .signal = ins.rst_n, .kind = .async_low }, stmts.items);
+
+            var declared: [stage_count]netlist.SyncStage = undefined;
+            inline for (chain, 0..) |stage, i| {
+                declared[i] = .{ .signal = stage.ref, .bit = 0 };
+            }
+            try mb.addClockDomain(.{
+                .name = "reset",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
+                .release_synchronizer = &declared,
+            });
+
+            try mb.assign(outs.rst_n_sync, chain[stage_count - 1].expr());
+        }
+    };
+}
+
 test "request/acknowledge bridge elaborates with dual-clock synchronizers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -231,6 +286,29 @@ test "mailbox keeps the slot until the read consumes it" {
     try std.testing.expectEqual(@as(usize, 2), mod.clocks.len);
 }
 
+test "reset synchronizer declares its release chain and releases through it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = netlist.Design.init(alloc);
+    _ = try design.elaborate(ResetSyncBlock(2));
+    const mod = design.findModule("reset_sync_2").?;
+    try std.testing.expectEqual(@as(usize, 1), mod.clocks.len);
+    const clock = mod.clocks[0];
+    try std.testing.expectEqual(netlist.ResetRelease.synchronous, clock.reset.release);
+    try std.testing.expectEqual(@as(usize, 2), clock.release_synchronizer.len);
+    try std.testing.expectEqualStrings("sync0", clock.release_synchronizer[0].signal.name());
+    try std.testing.expectEqualStrings("sync1", clock.release_synchronizer[1].signal.name());
+
+    const rtl = try @import("../backend/verilog.zig").emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "module reset_sync_2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(posedge clk or negedge rst_n) begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "sync0 <= 1'b1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "sync1 <= sync0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign rst_n_sync = sync1;") != null);
+}
+
 test "CDC lint is clean on the async FIFO, handshake bridge and mailbox" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -254,4 +332,10 @@ test "CDC lint is clean on the async FIFO, handshake bridge and mailbox" {
     const mailbox_crossings = try @import("../cdc.zig").lint(alloc, &mailbox_design);
     defer alloc.free(mailbox_crossings);
     try std.testing.expectEqual(@as(usize, 0), mailbox_crossings.len);
+
+    var reset_design = netlist.Design.init(alloc);
+    _ = try reset_design.elaborate(ResetSyncBlock(2));
+    const reset_crossings = try @import("../cdc.zig").lint(alloc, &reset_design);
+    defer alloc.free(reset_crossings);
+    try std.testing.expectEqual(@as(usize, 0), reset_crossings.len);
 }

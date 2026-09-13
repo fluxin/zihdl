@@ -70,7 +70,7 @@ fn buildManifest(alloc: std.mem.Allocator, rtl: []const u8, json: []const u8, js
             "slew: inputs[].slew rise/fall bounds are measured between the explicit low_fraction and high_fraction of the transition; null bound = unknown, never zero\n" ++
             "load: outputs[].load is the additional external load per port bit (ff or pf, one unit per value), excluding internal cell-pin and wire capacitance; null load = unknown\n" ++
             "required: outputs[].required is the arrival window relative to the destination clock's active edge, same explicit-time shape as arrival; null bound = unknown, never zero; the destination clock stays consumer-resolved\n" ++
-            "reset: clocks[].reset.release_synchronizer names the reset-release chain as (module, signal, bit), first stage first; empty when none is declared\n" ++
+            "reset: clocks[].reset.release_synchronizer names the reset-release chain as (module, signal, bit), first stage first; the chain registers live in reset_sync_2 and the released domain's reset is its rst_n_sync output wire\n" ++
             "relationship: clocks[].relationship is {{ relation, related_to, source_period, jitter }}; relation is synchronous/asynchronous/mesochronous/plesiochronous, related_to is a 1-bit input of the declaring module (null = external reference), times are explicit\n" ++
             "resolution: parent output rows replace the bound child row as a whole (load and required, explicit nulls included); no parent row keeps the child row; input rows merge only when compatible, conflicts are errors\n" ++
             "per_bit: slew and load rows apply to every bit of their port; per-bit distinct values are deferred (no consumer analysis can act on them yet)\n" ++
