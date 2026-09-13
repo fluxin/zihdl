@@ -70,6 +70,16 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
             try mb.addClockDomain(domain);
 
+            // GPIO is a physical asynchronous input. The ZIO sampling contract
+            // treats it as architectural (the core samples pins at instruction
+            // execute time), so it is recorded as an unsynchronized crossing
+            // rather than silently claiming setup/hold intent.
+            try mb.addInputTiming(.{
+                .signal = ins.gpio_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+
             _ = try mb.constant("PROGRAM_WORDS", 9, program_words);
             _ = try mb.constant("CAPTURE_WORDS", 9, capture_words);
             _ = try mb.constant("TX_FIFO_HOST_ADDR", 8, tx_fifo_host_addr);

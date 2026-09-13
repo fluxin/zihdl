@@ -29,6 +29,14 @@ artifact SHA-256. Expressions folded during elaboration are reported as
 `omitted` with a reason and no spans. It is descriptive only: RTL bytes are
 identical with or without it. Schema: `src/backend/provenance.zig`.
 
+Declared input timing intent adds an optional `timing_intent` section
+(`js_asic.timing_intent/1`): per-input classification (synchronous,
+asynchronous, unknown) and destination clock/domain, synchronizer stage
+identities as `(module, register, bit)`, reset polarity and assertion/release
+policy, and synchronous arrival windows with explicit units only where a real
+requirement exists. Anything not declared stays unknown. Schema and emitted
+example: `src/backend/metadata.zig`.
+
 ## Quick Start
 
 ```bash

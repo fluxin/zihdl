@@ -49,11 +49,40 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
+            const domain = netlist.ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+            try mb.addClockDomain(domain);
 
-            const scl_d0 = try mb.reg("scl_d0", 1, 1);
-            const scl_d1 = try mb.reg("scl_d1", 1, 1);
-            const sda_d0 = try mb.reg("sda_d0", 1, 1);
-            const sda_d1 = try mb.reg("sda_d1", 1, 1);
+            // I2C is an asynchronous external bus: each line gets a two-flop
+            // synchronizer plus a separate previous synchronized sample. The
+            // first stage feeds only the second stage; all functional logic and
+            // edge detection below reads `value`/`prev`, never `d0`.
+            const scl = try lib.syncInput(mb, "scl", ins.i2c_scl, domain, 1);
+            const sda = try lib.syncInput(mb, "sda", ins.i2c_sda_in, domain, 1);
+
+            // Authored timing intent for the metadata sidecar (descriptive only).
+            try mb.addInputTiming(.{
+                .signal = ins.i2c_scl.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = scl.d0.ref, .bit = 0 },
+                    .{ .signal = scl.value.ref, .bit = 0 },
+                },
+            });
+            try mb.addInputTiming(.{
+                .signal = ins.i2c_sda_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = sda.d0.ref, .bit = 0 },
+                    .{ .signal = sda.value.ref, .bit = 0 },
+                },
+            });
+            // Host handshake inputs come from the same clock domain.
+            try mb.addInputTiming(.{ .signal = ins.host_rdata.ref, .classification = .synchronous, .clock = ins.clk.ref });
+            try mb.addInputTiming(.{ .signal = ins.host_ack.ref, .classification = .synchronous, .clock = ins.clk.ref });
+            try mb.addInputTiming(.{ .signal = ins.host_rvalid.ref, .classification = .synchronous, .clock = ins.clk.ref });
+
             const fsm = try lib.StateMachine(I2cState, .idle, .binary).create(mb, "state");
             const bit_cnt = try mb.reg("bit_cnt", 4, 0);
             const byte_cnt = try mb.reg("byte_cnt", 2, 0);
@@ -70,16 +99,16 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const wr_addr = try mb.reg("wr_addr", 8, 0);
             const wr_data = try mb.reg("wr_data", 32, 0);
 
-            // Edge detections and bus conditions
-            const scl_rise = b.and_(scl_d0.expr(), b.not(scl_d1.expr()));
-            const scl_fall = b.and_(b.not(scl_d0.expr()), scl_d1.expr());
-            const sda_fall = b.and_(b.not(sda_d0.expr()), sda_d1.expr());
-            const sda_rise = b.and_(sda_d0.expr(), b.not(sda_d1.expr()));
+            // Edge detections and bus conditions over the synchronized samples.
+            const scl_rise = b.and_(scl.value.expr(), b.not(scl.prev.expr()));
+            const scl_fall = b.and_(b.not(scl.value.expr()), scl.prev.expr());
+            const sda_fall = b.and_(b.not(sda.value.expr()), sda.prev.expr());
+            const sda_rise = b.and_(sda.value.expr(), b.not(sda.prev.expr()));
 
-            const i2c_start = b.and_(sda_fall, scl_d0.expr());
-            const i2c_stop = b.and_(sda_rise, scl_d0.expr());
+            const i2c_start = b.and_(sda_fall, scl.value.expr());
+            const i2c_stop = b.and_(sda_rise, scl.value.expr());
 
-            const rx_next = b.concat(.{ rx_byte.slice(6, 0), sda_d0 });
+            const rx_next = b.concat(.{ rx_byte.slice(6, 0), sda.value });
             const bit_cnt_inc = b.add(bit_cnt.expr(), 1);
             const bit_cnt_lt_8 = b.lt(bit_cnt.expr(), 8);
             const bit_cnt_is_8 = b.eq(bit_cnt.expr(), 8);
@@ -157,13 +186,9 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             try mb.assign(outs.host_wdata, wr_data);
 
             const stmts = &.{
-                // 1. Default pulse outputs and synchronizers
+                // 1. Default pulse outputs
                 b.assign(outs.ctrl_start, 0),
                 b.assign(outs.ctrl_stop, 0),
-                b.assign(scl_d0, ins.i2c_scl.expr()),
-                b.assign(scl_d1, scl_d0.expr()),
-                b.assign(sda_d0, ins.i2c_sda_in.expr()),
-                b.assign(sda_d1, sda_d0.expr()),
 
                 // Host read handshake: latch the whole word once the partition
                 // returns read-valid, then serialize from the latch so bytes
@@ -221,7 +246,7 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                                         }, &.{}),
                                         // 9th rise in a read: sample the master's ACK/NACK.
                                         b.when(b.and_(is_read, ack_wait.expr()), &.{
-                                            b.when(sda_d0.expr(), &.{
+                                            b.when(sda.value.expr(), &.{
                                                 // NACK: stop; the read pointer stays put.
                                                 fsm.goto(.idle),
                                                 b.assign(ack_wait, 0),
@@ -335,7 +360,7 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
                     },
                 ),
             };
-            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, stmts);
+            try mb.seq(domain, stmts);
         }
     };
 }
@@ -377,4 +402,125 @@ test "i2c slave loader emission" {
     try std.testing.expect(std.mem.indexOf(u8, v, "host_raddr <= tmp") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "host_req <= 1'b1;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign host_we = wr_hold;") != null);
+}
+
+fn isFirstStage(name: []const u8) bool {
+    return std.mem.eql(u8, name, "scl_d0") or std.mem.eql(u8, name, "sda_d0");
+}
+
+fn expectReads(alloc: std.mem.Allocator, expr: netlist.AnyExpr, names: []const []const u8) !void {
+    var reads = std.ArrayList(netlist.SymRef).empty;
+    defer reads.deinit(alloc);
+    try netlist.collectReads(alloc, expr, &reads);
+    if (reads.items.len != names.len) return error.UnexpectedReads;
+    for (reads.items, names) |read, expected| {
+        if (!std.mem.eql(u8, read.name(), expected)) return error.UnexpectedReads;
+    }
+}
+
+fn forbidFirstStage(alloc: std.mem.Allocator, expr: netlist.AnyExpr) !void {
+    var reads = std.ArrayList(netlist.SymRef).empty;
+    defer reads.deinit(alloc);
+    try netlist.collectReads(alloc, expr, &reads);
+    for (reads.items) |read| {
+        if (isFirstStage(read.name())) return error.FirstStageFanout;
+    }
+}
+
+fn checkFanoutAssign(alloc: std.mem.Allocator, dst: netlist.SymRef, src: netlist.AnyExpr) !void {
+    const name = dst.name();
+    if (std.mem.eql(u8, name, "scl_d0")) {
+        try expectReads(alloc, src, &.{"i2c_scl"});
+    } else if (std.mem.eql(u8, name, "scl_d1")) {
+        try expectReads(alloc, src, &.{"scl_d0"});
+    } else if (std.mem.eql(u8, name, "scl_prev")) {
+        try expectReads(alloc, src, &.{"scl_d1"});
+    } else if (std.mem.eql(u8, name, "sda_d0")) {
+        try expectReads(alloc, src, &.{"i2c_sda_in"});
+    } else if (std.mem.eql(u8, name, "sda_d1")) {
+        try expectReads(alloc, src, &.{"sda_d0"});
+    } else if (std.mem.eql(u8, name, "sda_prev")) {
+        try expectReads(alloc, src, &.{"sda_d1"});
+    } else {
+        try forbidFirstStage(alloc, src);
+    }
+}
+
+fn checkFanoutStmts(alloc: std.mem.Allocator, stmts: []const netlist.Stmt) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .nop => {},
+            .assign => |a| try checkFanoutAssign(alloc, a.dst, a.src),
+            .slice_assign => |a| try forbidFirstStage(alloc, a.src),
+            .mem_write => |a| {
+                try forbidFirstStage(alloc, a.addr);
+                try forbidFirstStage(alloc, a.src);
+            },
+            .mem_write_bytes => |a| {
+                try forbidFirstStage(alloc, a.addr);
+                try forbidFirstStage(alloc, a.src);
+                try forbidFirstStage(alloc, a.be);
+            },
+            .assert_ => |a| try forbidFirstStage(alloc, a.cond),
+            .assume_ => |a| try forbidFirstStage(alloc, a.cond),
+            .cover_ => |a| try forbidFirstStage(alloc, a.cond),
+            .if_then => |it| {
+                try forbidFirstStage(alloc, it.cond);
+                try checkFanoutStmts(alloc, it.then_stmts);
+                try checkFanoutStmts(alloc, it.else_stmts);
+            },
+            .case_block => |cb| {
+                try forbidFirstStage(alloc, cb.sel);
+                for (cb.cases) |c| try checkFanoutStmts(alloc, c.stmts);
+                try checkFanoutStmts(alloc, cb.default_stmts);
+            },
+        }
+    }
+}
+
+// The first synchronizer stage must feed only the second stage: no functional
+// statement or edge expression may read `scl_d0`/`sda_d0`, and the stage chain
+// must be exactly input -> d0 -> d1 -> prev.
+test "i2c synchronizer first stage only feeds the second stage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = netlist.Design.init(alloc);
+    var top = try netlist.ModuleBuilder.init(alloc, &design, "top");
+    const clk = try top.input("clk", 1);
+    const rst_n = try top.input("rst_n", 1);
+    const scl = try top.input("i2c_scl", 1);
+    const sda = try top.input("i2c_sda_in", 1);
+    const rdata = try top.input("host_rdata", 32);
+    const host_ack = try top.input("host_ack", 1);
+    const host_rvalid = try top.input("host_rvalid", 1);
+
+    _ = try top.instantiate(I2cSlaveLoaderBlock(0x42), "u_i2c", .{
+        .clk = clk,
+        .rst_n = rst_n,
+        .i2c_scl = scl,
+        .i2c_sda_in = sda,
+        .host_rdata = rdata,
+        .host_ack = host_ack,
+        .host_rvalid = host_rvalid,
+    }, .{}, .{});
+    _ = try top.finish();
+
+    const mod = design.findModule("i2c_slave_loader_42").?;
+    for (mod.assigns) |a| try checkFanoutAssign(alloc, a.dst, a.src);
+    for (mod.processes) |proc| try checkFanoutStmts(alloc, proc.stmts);
+
+    // Functional logic consumes the synchronized samples and the previous
+    // synchronized samples, never the first stage.
+    var seen = std.StringHashMap(void).init(alloc);
+    defer seen.deinit();
+    var reads = std.ArrayList(netlist.SymRef).empty;
+    defer reads.deinit(alloc);
+    for (mod.processes) |proc| try netlist.collectStmtReads(alloc, proc.stmts, &reads);
+    for (mod.assigns) |a| try netlist.collectReads(alloc, a.src, &reads);
+    for (reads.items) |read| try seen.put(read.name(), {});
+    for ([_][]const u8{ "scl_d1", "sda_d1", "scl_prev", "sda_prev" }) |name| {
+        try std.testing.expect(seen.contains(name));
+    }
 }

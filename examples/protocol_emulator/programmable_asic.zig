@@ -387,6 +387,15 @@ pub fn ProgrammableAsicBlock(
             try mb.addClockDomain(domain);
             try mb.addEnumType("opcode", isa.Opcode);
 
+            // GPIO is a physical asynchronous input without a synchronizer: the
+            // sequencer samples pins as an architectural part of instruction
+            // execution, so the crossing is recorded rather than inferred.
+            try mb.addInputTiming(.{
+                .signal = ins.gpio_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+
             // The SPI programmer has no read path, so capture is only meaningful
             // with the I2C loader; the effective option is recorded below.
             const capture = capture_enabled and loader == .i2c;

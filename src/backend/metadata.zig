@@ -41,6 +41,7 @@ pub fn emitDesignJson(allocator: std.mem.Allocator, design: *const ir.Design, op
     try j.beginArray();
     for (design.modules.items) |module| try writeModule(&j, allocator, module);
     try j.endArray();
+    if (hasTimingIntent(design)) try writeTimingIntent(&j, design);
     if (options.provenance) |collector| try provenance.writeJson(&j, collector);
     try j.endObject();
     try aw.writer.writeAll("\n");
@@ -324,4 +325,132 @@ fn isPort(kind: ir.SymbolKind) bool {
         .input, .output, .inout => true,
         else => false,
     };
+}
+
+// ============================================================================
+// Timing intent (js_asic.timing_intent/1)
+// ============================================================================
+//
+// Optional, versioned export of authored input timing intent. Module rows are
+// emitted when a module declares clock domains (which carry reset policy) or
+// per-input intent; everything not declared stays unknown. Identity for
+// synchronizer stages is hierarchical RTL `(module, register, bit)`. Arrival
+// windows carry explicit units and are only emitted for synchronous inputs
+// whose author declared a real requirement. The section never changes RTL.
+
+pub const timing_schema = "js_asic.timing_intent/1";
+
+fn hasTimingIntent(design: *const ir.Design) bool {
+    for (design.modules.items) |module| {
+        if (module.timing.len > 0 or module.clocks.len > 0) return true;
+    }
+    return false;
+}
+
+fn writeTimingIntent(j: *std.json.Stringify, design: *const ir.Design) !void {
+    try j.objectField("timing_intent");
+    try j.beginObject();
+    try j.objectField("schema");
+    try j.write(timing_schema);
+    try j.objectField("modules");
+    try j.beginArray();
+    for (design.modules.items) |module| {
+        if (module.timing.len == 0 and module.clocks.len == 0) continue;
+        try j.beginObject();
+        try j.objectField("name");
+        try j.write(module.name);
+
+        try j.objectField("clocks");
+        try j.beginArray();
+        for (module.clocks) |clock| {
+            try j.beginObject();
+            try j.objectField("name");
+            try j.write(clock.name);
+            try j.objectField("clock");
+            try j.write(clock.clk.name());
+            try j.objectField("reset");
+            try j.beginObject();
+            try j.objectField("signal");
+            try j.write(clock.rst_n.name());
+            try j.objectField("polarity");
+            try j.write(@tagName(clock.reset.polarity));
+            try j.objectField("assertion");
+            try j.write(@tagName(clock.reset.assertion));
+            try j.objectField("release");
+            try j.write(@tagName(clock.reset.release));
+            try j.endObject();
+            try j.endObject();
+        }
+        try j.endArray();
+
+        try j.objectField("inputs");
+        try j.beginArray();
+        for (module.timing) |intent| try writeInputTiming(j, module, intent);
+        try j.endArray();
+        try j.endObject();
+    }
+    try j.endArray();
+    try j.endObject();
+}
+
+fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir.InputTiming) !void {
+    try j.beginObject();
+    try j.objectField("signal");
+    try j.write(intent.signal.name());
+    try j.objectField("width");
+    try j.write(intent.signal.width());
+    try j.objectField("classification");
+    try j.write(@tagName(intent.classification));
+    try j.objectField("clock");
+    if (intent.clock) |clk| try j.write(clk.name()) else try j.write(null);
+    try j.objectField("domain");
+    if (clockDomainName(module, intent.clock)) |name| try j.write(name) else try j.write(null);
+    try j.objectField("synchronizer");
+    try j.beginArray();
+    for (intent.stages) |stage| {
+        try j.beginObject();
+        try j.objectField("module");
+        try j.write(module.name);
+        try j.objectField("signal");
+        try j.write(stage.signal.name());
+        if (stage.bit) |bit| {
+            try j.objectField("bit");
+            try j.write(bit);
+        }
+        try j.endObject();
+    }
+    try j.endArray();
+    try j.objectField("arrival");
+    if (intent.arrival_min == null and intent.arrival_max == null) {
+        try j.write(null);
+    } else {
+        try j.beginObject();
+        try j.objectField("min");
+        try writeTimeValue(j, intent.arrival_min);
+        try j.objectField("max");
+        try writeTimeValue(j, intent.arrival_max);
+        try j.endObject();
+    }
+    try j.endObject();
+}
+
+fn writeTimeValue(j: *std.json.Stringify, value: ?ir.TimeValue) !void {
+    if (value) |v| {
+        try j.beginObject();
+        try j.objectField("value");
+        try j.write(v.value);
+        try j.objectField("unit");
+        try j.write(@tagName(v.unit));
+        try j.endObject();
+    } else {
+        try j.write(null);
+    }
+}
+
+fn clockDomainName(module: *const ir.Module, clk: ?ir.SymRef) ?[]const u8 {
+    const want = clk orelse return null;
+    for (module.clocks) |clock| {
+        if (clock.clk.ref.scope == want.scope and clock.clk.ref.idx == want.idx) return clock.name;
+    }
+    return null;
 }

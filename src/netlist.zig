@@ -1189,7 +1189,78 @@ pub const ClockDomain = struct {
     rst_n: Signal(1),
     power: PowerDomain = .{},
     freq_hz: u64 = 120_000_000,
+    reset: ResetPolicy = .{},
 };
+
+/// Reset polarity and assertion/release policy for a clock domain. `polarity`
+/// and `assertion` select the emitted reset network; `release` is descriptive
+/// (how the reset source releases) and does not change emitted RTL.
+pub const ResetPolarity = enum { active_low, active_high };
+pub const ResetAssertion = enum { asynchronous, synchronous };
+pub const ResetRelease = enum { asynchronous, synchronous };
+
+pub const ResetPolicy = struct {
+    polarity: ResetPolarity = .active_low,
+    assertion: ResetAssertion = .asynchronous,
+    release: ResetRelease = .asynchronous,
+};
+
+fn resetKindOf(policy: ResetPolicy) ResetKind {
+    return switch (policy.assertion) {
+        .asynchronous => if (policy.polarity == .active_low) .async_low else .async_high,
+        .synchronous => if (policy.polarity == .active_low) .sync_low else .sync_high,
+    };
+}
+
+// ============================================================================
+// Timing intent
+// ============================================================================
+
+/// Input timing classification for the timing-intent metadata sidecar.
+/// `unknown` means the author has not established the relationship; inputs
+/// without a declared row also stay unknown.
+pub const InputClass = enum { synchronous, asynchronous, unknown };
+
+/// Explicit time unit for an authored arrival-time requirement.
+pub const TimeUnit = enum { ps, ns, us, ms };
+
+/// One time value in an explicit unit.
+pub const TimeValue = struct {
+    value: f64,
+    unit: TimeUnit,
+};
+
+/// One register/bit in a declared synchronizer chain, resolved against the
+/// declaring module's scope.
+pub const SyncStage = struct {
+    signal: SymRef,
+    /// Bit index for a vector stage; null means the whole signal.
+    bit: ?u8 = null,
+};
+
+/// Authored timing intent for one input port. Arrival windows are only legal
+/// for synchronous inputs, and only declare them when a real design
+/// requirement exists; absence keeps the constraint unknown.
+pub const InputTiming = struct {
+    signal: SymRef,
+    classification: InputClass = .unknown,
+    /// Destination clock; null keeps the destination unknown.
+    clock: ?SymRef = null,
+    /// Synchronizer stages, first stage first; empty means none declared.
+    stages: []const SyncStage = &.{},
+    arrival_min: ?TimeValue = null,
+    arrival_max: ?TimeValue = null,
+};
+
+/// Converts an authored time to picoseconds, used only for ordering checks.
+pub fn timeValueInPs(value: TimeValue) f64 {
+    return switch (value.unit) {
+        .ps => value.value,
+        .ns => value.value * 1000.0,
+        .us => value.value * 1_000_000.0,
+        .ms => value.value * 1_000_000_000.0,
+    };
+}
 
 // ============================================================================
 // Target-neutral design metadata
@@ -1282,6 +1353,8 @@ pub const Module = struct {
     groups: []const GroupTag = &.{},
     /// Constant-fold events observed while elaborating this module.
     folds: []const FoldEvent = &.{},
+    /// Authored per-input timing intent (timing-intent metadata sidecar).
+    timing: []const InputTiming = &.{},
 };
 
 // ============================================================================
@@ -1316,8 +1389,9 @@ fn addUniqueSym(alloc: std.mem.Allocator, list: *std.ArrayList(SymRef), ref: Sym
 }
 
 /// Symbols read by an expression. Memory arrays are state, so a `mem_read`
-/// contributes its address but not the array itself.
-fn collectReads(alloc: std.mem.Allocator, expr: AnyExpr, list: *std.ArrayList(SymRef)) error{OutOfMemory}!void {
+/// contributes its address but not the array itself. Backends and structural
+/// audits share this to reason about fanout.
+pub fn collectReads(alloc: std.mem.Allocator, expr: AnyExpr, list: *std.ArrayList(SymRef)) error{OutOfMemory}!void {
     switch (expr.node) {
         .ref => |r| try addUniqueSym(alloc, list, r),
         .lit => {},
@@ -1350,7 +1424,8 @@ fn collectSelectBase(alloc: std.mem.Allocator, base: SelectBase, list: *std.Arra
     }
 }
 
-fn collectStmtReads(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
+/// Symbols read by a statement list (conditions, addresses, data).
+pub fn collectStmtReads(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
     for (stmts) |stmt| {
         switch (stmt) {
             .nop => {},
@@ -1869,6 +1944,7 @@ pub const ModuleBuilder = struct {
     bundles: std.ArrayList(Bundle),
     groups: std.ArrayList(GroupTag),
     fold_log: std.ArrayList(FoldEvent),
+    timing: std.ArrayList(InputTiming),
 
     pub fn init(allocator: std.mem.Allocator, design: *Design, name: []const u8) !ModuleBuilder {
         return .{
@@ -1885,6 +1961,7 @@ pub const ModuleBuilder = struct {
             .bundles = .empty,
             .groups = .empty,
             .fold_log = .empty,
+            .timing = .empty,
         };
     }
 
@@ -1898,6 +1975,7 @@ pub const ModuleBuilder = struct {
         self.bundles.deinit(self.allocator);
         self.groups.deinit(self.allocator);
         self.fold_log.deinit(self.allocator);
+        self.timing.deinit(self.allocator);
     }
 
     pub fn exprs(self: *ModuleBuilder) ExprBuilder {
@@ -1910,6 +1988,15 @@ pub const ModuleBuilder = struct {
     /// Metadata only: grouping never changes emitted RTL.
     pub fn tagGroup(self: *ModuleBuilder, name: []const u8, expr: anytype) !void {
         try self.groups.append(self.allocator, .{ .name = name, .root = self.intern(expr) });
+    }
+
+    /// Declares authored timing intent for one input port of this module.
+    /// Metadata only: it never changes emitted RTL. References and widths are
+    /// validated by `finish()`; anything not declared stays unknown.
+    pub fn addInputTiming(self: *ModuleBuilder, timing: InputTiming) !void {
+        var row = timing;
+        row.stages = try self.allocator.dupe(SyncStage, timing.stages);
+        try self.timing.append(self.allocator, row);
     }
 
     /// Canonicalizes and constant-folds an expression root into this module's
@@ -2174,7 +2261,7 @@ pub const ModuleBuilder = struct {
     pub fn seq(self: *ModuleBuilder, domain: ClockDomain, stmts: []const Stmt) !void {
         try self.addProcess(.{ .edge = .{
             .clk = domain.clk.ref,
-            .rst = .{ .signal = domain.rst_n.ref, .kind = .async_low },
+            .rst = .{ .signal = domain.rst_n.ref, .kind = resetKindOf(domain.reset) },
         } }, stmts);
     }
 
@@ -2194,7 +2281,7 @@ pub const ModuleBuilder = struct {
     pub fn seqEnable(self: *ModuleBuilder, domain: ClockDomain, en: anytype, stmts: []const Stmt) !void {
         try self.addProcessEnabled(.{ .edge = .{
             .clk = domain.clk.ref,
-            .rst = .{ .signal = domain.rst_n.ref, .kind = .async_low },
+            .rst = .{ .signal = domain.rst_n.ref, .kind = resetKindOf(domain.reset) },
         } }, en, stmts);
     }
 
@@ -2635,6 +2722,66 @@ pub const ModuleBuilder = struct {
         }
     }
 
+    /// Validates authored timing intent: references must resolve inside this
+    /// module, ports must be inputs, synchronizer stages must be registers of
+    /// the input's width, and arrival windows must be synchronous and ordered.
+    /// Missing fields are left unknown rather than inferred.
+    fn validateTimingIntent(self: *ModuleBuilder) !void {
+        for (self.timing.items, 0..) |intent, i| {
+            if (intent.signal.scope != self.scope or intent.signal.kind() != .input) {
+                std.log.warn("js_asic: timing intent for '{s}' in module '{s}' must reference an input port of this module", .{ intent.signal.name(), self.name });
+                return error.InvalidTimingIntent;
+            }
+            for (self.timing.items[0..i]) |other| {
+                if (other.signal.scope == intent.signal.scope and other.signal.idx == intent.signal.idx) {
+                    std.log.warn("js_asic: duplicate timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+            const width = intent.signal.width();
+            if (intent.clock) |clk| {
+                if (clk.scope != self.scope or clk.kind() != .input or clk.width() != 1) {
+                    std.log.warn("js_asic: timing intent clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+            for (intent.stages, 0..) |stage, si| {
+                if (stage.signal.scope != self.scope) {
+                    std.log.warn("js_asic: synchronizer stage {d} for '{s}' in module '{s}' is not in this module", .{ si, intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+                const sym = stage.signal.symbol();
+                const is_reg = sym.kind == .reg or (sym.kind == .output and sym.is_reg);
+                if (!is_reg or sym.width != width) {
+                    std.log.warn("js_asic: synchronizer stage '{s}' for '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), intent.signal.name(), self.name, width });
+                    return error.InvalidTimingIntent;
+                }
+                if (stage.bit) |bit| {
+                    if (bit >= sym.width) {
+                        std.log.warn("js_asic: synchronizer stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+                for (intent.stages[0..si]) |other| {
+                    if (other.signal.scope == stage.signal.scope and other.signal.idx == stage.signal.idx and other.bit == stage.bit) {
+                        std.log.warn("js_asic: duplicate synchronizer stage '{s}' for '{s}' in module '{s}'", .{ stage.signal.name(), intent.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+            }
+            if (intent.classification != .synchronous and (intent.arrival_min != null or intent.arrival_max != null)) {
+                std.log.warn("js_asic: timing intent for '{s}' in module '{s}' declares arrival times but is not synchronous", .{ intent.signal.name(), self.name });
+                return error.InvalidTimingIntent;
+            }
+            if (intent.arrival_min != null and intent.arrival_max != null) {
+                if (timeValueInPs(intent.arrival_min.?) > timeValueInPs(intent.arrival_max.?)) {
+                    std.log.warn("js_asic: timing intent arrival window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+        }
+    }
+
     /// Dead-code elimination: mark symbols unreachable from ports, parameters,
     /// assertions and instance connections, then drop dead continuous assigns
     /// and processes. Kept processes pin the symbols they assign so no emitted
@@ -2717,6 +2864,7 @@ pub const ModuleBuilder = struct {
     pub fn finish(self: *ModuleBuilder) !*Module {
         try self.markRegisters();
         try self.validate();
+        try self.validateTimingIntent();
         try self.eliminateDead();
 
         const mod = try self.allocator.create(Module);
@@ -2732,6 +2880,7 @@ pub const ModuleBuilder = struct {
             .bundles = try self.bundles.toOwnedSlice(self.allocator),
             .groups = try self.groups.toOwnedSlice(self.allocator),
             .folds = try self.fold_log.toOwnedSlice(self.allocator),
+            .timing = try self.timing.toOwnedSlice(self.allocator),
         };
         try self.design.register(mod);
         return mod;

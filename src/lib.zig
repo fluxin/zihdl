@@ -186,6 +186,40 @@ pub fn sync2(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDo
     return d1;
 }
 
+/// Result of `syncInput`: a two-flop synchronizer for one asynchronous 1-bit
+/// input plus the previous synchronized sample.
+pub const SyncInput = struct {
+    /// First (possibly metastable) stage. It feeds only the second stage and
+    /// the declared timing intent; functional logic must never read it.
+    d0: Signal(1),
+    /// Second-stage synchronized sample; functional logic reads this.
+    value: Signal(1),
+    /// `value` one cycle earlier, for edge detection against `value`.
+    prev: Signal(1),
+};
+
+/// Two-flop synchronizer for one asynchronous 1-bit input plus a separate
+/// previous synchronized sample for edge detection. All three registers reset
+/// to `init`, so an idle-high (or idle-low) input produces no spurious edge at
+/// reset release. `value` and `prev` are the only samples functional logic may
+/// consume; `d0` exists so the timing-intent table can name the first stage.
+///
+/// The three registers live in their own clocked process and each is assigned
+/// exactly once, so backends can see by construction that the first stage has
+/// no fanout into functional logic.
+pub fn syncInput(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain, comptime init: u64) !SyncInput {
+    const d0 = try mb.reg(try memberName(mb, name, "d0"), 1, init);
+    const d1 = try mb.reg(try memberName(mb, name, "d1"), 1, init);
+    const prev = try mb.reg(try memberName(mb, name, "prev"), 1, init);
+    const b = mb.exprs();
+    try mb.seq(domain, &.{
+        b.assign(d0, src),
+        b.assign(d1, d0.expr()),
+        b.assign(prev, d1.expr()),
+    });
+    return .{ .d0 = d0, .value = d1, .prev = prev };
+}
+
 // ============================================================================
 // Encoders / decoders
 // ============================================================================

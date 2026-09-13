@@ -36,8 +36,10 @@ module i2c_slave_loader_42 (
 
     reg         scl_d0;
     reg         scl_d1;
+    reg         scl_prev;
     reg         sda_d0;
     reg         sda_d1;
+    reg         sda_prev;
     reg [2:0]  state;
     reg [3:0]  bit_cnt;
     reg [1:0]  byte_cnt;
@@ -63,6 +65,30 @@ module i2c_slave_loader_42 (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            scl_d0 <= 1'b1;
+            scl_d1 <= 1'b1;
+            scl_prev <= 1'b1;
+        end else begin
+            scl_d0 <= i2c_scl;
+            scl_d1 <= scl_d0;
+            scl_prev <= scl_d1;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sda_d0 <= 1'b1;
+            sda_d1 <= 1'b1;
+            sda_prev <= 1'b1;
+        end else begin
+            sda_d0 <= i2c_sda_in;
+            sda_d1 <= sda_d0;
+            sda_prev <= sda_d1;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             i2c_sda_out <= 1'b0;
             i2c_sda_oe <= 1'b0;
             host_req <= 1'b0;
@@ -70,10 +96,6 @@ module i2c_slave_loader_42 (
             ctrl_start <= 1'b0;
             ctrl_stop <= 1'b0;
             start_pc <= 8'd0;
-            scl_d0 <= 1'b1;
-            scl_d1 <= 1'b1;
-            sda_d0 <= 1'b1;
-            sda_d1 <= 1'b1;
             state <= 3'd0;
             bit_cnt <= 4'd0;
             byte_cnt <= 2'd0;
@@ -92,10 +114,6 @@ module i2c_slave_loader_42 (
         end else begin
             ctrl_start <= 1'b0;
             ctrl_stop <= 1'b0;
-            scl_d0 <= i2c_scl;
-            scl_d1 <= scl_d0;
-            sda_d0 <= i2c_sda_in;
-            sda_d1 <= sda_d0;
             if (host_rvalid) begin
                 read_word <= host_rdata;
                 host_req <= 1'b0;
@@ -108,7 +126,7 @@ module i2c_slave_loader_42 (
                 wr_hold <= 1'b0;
                 reg_ptr <= tmp0;
             end
-            if (((sda_d0 && (!sda_d1)) && scl_d0)) begin
+            if (((sda_d1 && (!sda_prev)) && scl_d1)) begin
                 state <= state_idle;
                 i2c_sda_oe <= 1'b0;
                 bit_cnt <= 4'd0;
@@ -119,7 +137,7 @@ module i2c_slave_loader_42 (
                 host_req <= 1'b0;
                 rd_first <= 1'b0;
             end else begin
-                if ((((!sda_d0) && sda_d1) && scl_d0)) begin
+                if ((((!sda_d1) && sda_prev) && scl_d1)) begin
                     state <= state_dev_addr;
                     i2c_sda_oe <= 1'b0;
                     bit_cnt <= 4'd0;
@@ -127,13 +145,13 @@ module i2c_slave_loader_42 (
                     tx_bit <= 4'd0;
                     host_raddr <= reg_ptr;
                 end else begin
-                    if ((scl_d0 && (!scl_d1))) begin
+                    if ((scl_d1 && (!scl_prev))) begin
                         if (((bit_cnt < 4'd8) && (!tmp1))) begin
-                            rx_byte <= {rx_byte[6:0], sda_d0};
+                            rx_byte <= {rx_byte[6:0], sda_d1};
                             bit_cnt <= (bit_cnt + 4'd1);
                         end
                         if ((tmp1 && ack_wait)) begin
-                            if (sda_d0) begin
+                            if (sda_d1) begin
                                 state <= state_idle;
                                 ack_wait <= 1'b0;
                                 commit_pending <= 1'b0;
@@ -148,7 +166,7 @@ module i2c_slave_loader_42 (
                             end
                         end
                     end
-                    if (((!scl_d0) && scl_d1)) begin
+                    if (((!scl_d1) && scl_prev)) begin
                         if (tmp1) begin
                             if ((tx_bit < 4'd8)) begin
                                 i2c_sda_out <= tx_byte[7];
