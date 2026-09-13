@@ -1767,3 +1767,39 @@ test "hoisted signed subexpressions keep a signed temp declaration" {
     try std.testing.expect(std.mem.indexOf(u8, v, "assign tmp0 = $signed(($signed(a) + $signed(b)));") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign y = $signed(($signed(tmp0) & $signed(tmp0)));") != null);
 }
+
+test "signed memories emit signed declarations and signed reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const S = struct {
+        pub const name = "signed_mem_rtl";
+        pub const Inputs = struct { clk: Signal(1), addr: Signal(2), wdata: SignedSignal(8), we: Signal(1) };
+        pub const Outputs = struct { dout: SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const mem = try mb.mem(8, "ram", 4, .{ .signed = true });
+            const b = mb.exprs();
+            try mb.assign(outs.dout, b.memRead(mem, ins.addr));
+            try mb.seqNoReset(ins.clk, &.{
+                b.when(ins.we, &.{b.memWrite(mem, ins.addr, ins.wdata)}, &.{}),
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const clk = try top.input("clk", 1);
+    const addr = try top.input("addr", 2);
+    const wdata = try top.signedInput("wdata", 8);
+    const we = try top.input("we", 1);
+    _ = try top.instantiate(S, "u_mem", .{ .clk = clk, .addr = addr, .wdata = wdata, .we = we }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "reg signed [7:0]  ram [0:3];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign dout = $signed(ram[addr]);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "ram[addr] <= $signed(wdata);") != null);
+}

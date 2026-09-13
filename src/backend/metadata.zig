@@ -150,6 +150,10 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(sym.name);
         try j.objectField("width");
         try j.write(sym.width);
+        if (sym.is_signed) {
+            try j.objectField("is_signed");
+            try j.write(true);
+        }
         try j.objectField("depth");
         try j.write(sym.depth);
         try j.objectField("read");
@@ -182,6 +186,10 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
             try j.write(member.ref.name());
             try j.objectField("width");
             try j.write(member.ref.width());
+            if (member.ref.symbol().is_signed) {
+                try j.objectField("is_signed");
+                try j.write(true);
+            }
             try j.endObject();
         }
         try j.endArray();

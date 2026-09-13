@@ -18,17 +18,18 @@ const Design = netlist.Design;
 // Registers
 // ============================================================================
 
-/// One-deep register (`RegNext`).
-pub fn regNext(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
-    const r = try mb.reg(name, @TypeOf(src).width, 0);
+/// One-deep register (`RegNext`). Mirrors the source's declared handle type,
+/// so a signed source yields a signed register.
+pub fn regNext(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.HandleType(@TypeOf(src)) {
+    const r = try mb.declareReg(netlist.HandleType(@TypeOf(src)), name, 0);
     const b = mb.exprs();
     try mb.seq(domain, &.{b.assign(r, src)});
     return r;
 }
 
-/// Enabled register (`RegEnable`).
-pub fn regEnable(mb: *ModuleBuilder, name: []const u8, src: anytype, en: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
-    const r = try mb.reg(name, @TypeOf(src).width, 0);
+/// Enabled register (`RegEnable`); mirrors the source's declared handle type.
+pub fn regEnable(mb: *ModuleBuilder, name: []const u8, src: anytype, en: anytype, domain: ClockDomain) !netlist.HandleType(@TypeOf(src)) {
+    const r = try mb.declareReg(netlist.HandleType(@TypeOf(src)), name, 0);
     const b = mb.exprs();
     try mb.seq(domain, &.{b.when(en, &.{b.assign(r, src)}, &.{})});
     return r;
@@ -96,7 +97,7 @@ pub fn rotr(mb: *ModuleBuilder, x: anytype, comptime n: usize) netlist.Expr(@Typ
 /// `domain`. Unlike SVA's `$past`, the value starts at the register reset value
 /// (0) rather than X, so two-state simulators and formal tools see no spurious
 /// first-cycle triggers.
-pub fn past(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
+pub fn past(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.HandleType(@TypeOf(src)) {
     return regNext(mb, name, src, domain);
 }
 
@@ -135,19 +136,30 @@ pub fn changed(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clock
 /// Producer-perspective ready/valid bundle: `data`/`valid` flow downstream,
 /// `ready` flows upstream. Bundles are plain structs of typed handles, so they
 /// can be declared as ports (`declarePorts`), wires (`wireBundle`), or
-/// assembled inside a block.
-pub fn Stream(comptime W: usize) type {
+/// assembled inside a block. `D` is the data handle type, which lets
+/// `SignedStream(W)` carry a signed payload.
+fn StreamOf(comptime D: type) type {
     return struct {
-        pub const width = W;
+        pub const width = D.width;
         pub const dirs = .{
             .data = netlist.PortDir.output,
             .valid = netlist.PortDir.output,
             .ready = netlist.PortDir.input,
         };
-        data: Signal(W),
+        data: D,
         valid: Signal(1),
         ready: Signal(1),
     };
+}
+
+/// Unsigned ready/valid stream.
+pub fn Stream(comptime W: usize) type {
+    return StreamOf(Signal(W));
+}
+
+/// Ready/valid stream whose payload is a declaration-level signed handle.
+pub fn SignedStream(comptime W: usize) type {
+    return StreamOf(netlist.SignedSignal(W));
 }
 
 fn memberName(mb: *ModuleBuilder, name: []const u8, suffix: []const u8) ![]const u8 {
@@ -160,15 +172,30 @@ pub fn streamSource(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !St
     return mb.declarePorts(Stream(W), name, false);
 }
 
+/// Declares a signed stream as module ports where this module is the producer.
+pub fn signedStreamSource(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedStream(W) {
+    return mb.declarePorts(SignedStream(W), name, false);
+}
+
 /// Declares a stream as module ports where this module is the consumer:
 /// `data`/`valid` inputs, `ready` output.
 pub fn streamSink(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !Stream(W) {
     return mb.declarePorts(Stream(W), name, true);
 }
 
+/// Declares a signed stream as module ports where this module is the consumer.
+pub fn signedStreamSink(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedStream(W) {
+    return mb.declarePorts(SignedStream(W), name, true);
+}
+
 /// Declares a stream as internal wires.
 pub fn streamWire(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !Stream(W) {
     return mb.wireBundle(Stream(W), name);
+}
+
+/// Declares a signed stream as internal wires.
+pub fn signedStreamWire(mb: *ModuleBuilder, name: []const u8, comptime W: usize) !SignedStream(W) {
+    return mb.wireBundle(SignedStream(W), name);
 }
 
 /// Connects upstream `from` to downstream `to`: `data`/`valid` forward,
@@ -181,10 +208,17 @@ pub fn connectStream(mb: *ModuleBuilder, from: anytype, to: anytype) !void {
 }
 
 /// One pipeline stage: `data`/`valid` registered, `ready` passed through.
-pub fn regStream(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Stream(@TypeOf(src).width) {
-    const W = @TypeOf(src).width;
-    const out = try streamWire(mb, name, W);
-    const data_r = try mb.reg(try memberName(mb, name, "data_r"), W, 0);
+/// Returns the same stream shape, so a signed payload registers signed.
+pub fn regStream(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !@TypeOf(src) {
+    const S = @TypeOf(src);
+    comptime {
+        if (!@hasField(S, "data") or !@hasField(S, "valid") or !@hasField(S, "ready")) {
+            @compileError("regStream source must be a Stream bundle");
+        }
+    }
+    const D = @FieldType(S, "data");
+    const out = try mb.wireBundle(S, name);
+    const data_r = try mb.declareReg(D, try memberName(mb, name, "data_r"), 0);
     const valid_r = try mb.reg(try memberName(mb, name, "valid_r"), 1, 0);
     const b = mb.exprs();
     try mb.seq(domain, &.{
@@ -201,11 +235,12 @@ pub fn regStream(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clo
 // Clock domain crossing
 // ============================================================================
 
-/// Two-flop synchronizer for a 1-bit or bus signal.
-pub fn sync2(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !Signal(@TypeOf(src).width) {
-    const W = @TypeOf(src).width;
-    const d0 = try mb.reg(try memberName(mb, name, "d0"), W, 0);
-    const d1 = try mb.reg(try memberName(mb, name, "d1"), W, 0);
+/// Two-flop synchronizer for a 1-bit or bus signal. Mirrors the source's
+/// declared handle type, so a signed bus synchronizes into signed stages.
+pub fn sync2(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: ClockDomain) !netlist.HandleType(@TypeOf(src)) {
+    const T = netlist.HandleType(@TypeOf(src));
+    const d0 = try mb.declareReg(T, try memberName(mb, name, "d0"), 0);
+    const d1 = try mb.declareReg(T, try memberName(mb, name, "d1"), 0);
     const b = mb.exprs();
     try mb.seq(domain, &.{
         b.assign(d0, src),
@@ -510,4 +545,67 @@ test "CDC helpers emit a toggle synchronizer and an async-assert reset chain" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_pulse = (evt_q2 ^ evt_q3);") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(posedge dst_clk or negedge src_rst_n) begin") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_rst_n = rst_sync1;") != null);
+}
+
+test "register and synchronizer helpers preserve signed declarations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const S = struct {
+        pub const name = "lib_signed_regs";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: netlist.SignedSignal(8) };
+        pub const Outputs = struct { q: netlist.SignedSignal(8), s: netlist.SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            const q = try regNext(mb, "q_r", ins.a, domain);
+            const s = try sync2(mb, "s", ins.a, domain);
+            try std.testing.expect(q.ref.symbol().is_signed);
+            try std.testing.expect(s.ref.symbol().is_signed);
+            try mb.assign(outs.q, q);
+            try mb.assign(outs.s, s);
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(S);
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg signed [7:0]  q_r;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg signed [7:0]  s_d0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg signed [7:0]  s_d1;") != null);
+}
+
+test "signed streams declare signed data through ports, wires and stages" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const S = struct {
+        pub const name = "lib_signed_stream";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
+        pub const Outputs = struct { tx: SignedStream(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            const sink = try signedStreamSink(mb, "sink", 8);
+            const mid = try signedStreamWire(mb, "mid", 8);
+            try connectStream(mb, sink, mid);
+            const staged = try regStream(mb, "staged", mid, domain);
+            try connectStream(mb, staged, outs.tx);
+            try std.testing.expect(staged.data.ref.symbol().is_signed);
+            try std.testing.expect(mid.data.ref.symbol().is_signed);
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(S);
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "input  wire signed [7:0]  sink_data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "output wire signed [7:0]  tx_data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "wire signed [7:0]  mid_data;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "wire signed [7:0]  staged_data;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg signed [7:0]  staged_data_r;") != null);
 }

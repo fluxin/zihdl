@@ -37,6 +37,9 @@ pub const MemOpts = struct {
     read: ReadKind = .comb,
     write_mode: WriteMode = .read_first,
     init_file: ?[]const u8 = null,
+    /// Declares the memory signed: the emitted memory and every `memRead`
+    /// expression are signed, so consumers need no `asSigned` reinterpretation.
+    signed: bool = false,
 };
 
 pub const Symbol = struct {
@@ -345,6 +348,15 @@ pub fn Signal(comptime W: usize) type {
 /// stays for reinterpreting values that are not declared signed.
 pub fn SignedSignal(comptime W: usize) type {
     return SignalHandle(W, true);
+}
+
+/// Handle type for a declaration built from a hardware value `T`: signal
+/// handles keep their width and declared signedness, anything else becomes an
+/// unsigned `Signal(W)`. Used by helpers that materialize a register or wire
+/// from an operand without forcing the caller to restate the handle type.
+pub fn HandleType(comptime T: type) type {
+    if (isSignalHandle(T)) return T;
+    return Signal(valWidth(T));
 }
 
 pub const Sig = Signal;
@@ -1080,12 +1092,16 @@ pub const ExprBuilder = struct {
     }
 
     pub fn memRead(self: ExprBuilder, mem: anytype, addr: anytype) Expr(valWidth(@TypeOf(mem))) {
+        const m = asRef(mem);
         const ae = asAny(addr);
-        return .{ .e = .{
-            .width = valWidth(@TypeOf(mem)),
-            .is_signed = false,
-            .node = .{ .mem_read = .{ .mem = asRef(mem), .addr = self.dup(ae) } },
-        } };
+        return .{
+            .e = .{
+                .width = valWidth(@TypeOf(mem)),
+                // A signed memory reads signed, like a signed vector reference.
+                .is_signed = m.symbol().is_signed,
+                .node = .{ .mem_read = .{ .mem = m, .addr = self.dup(ae) } },
+            },
+        };
     }
 
     pub fn nop(self: ExprBuilder) Stmt {
@@ -2434,6 +2450,13 @@ pub const ModuleBuilder = struct {
         return self.declareLeaf(SignedSignal(W), .reg, name, init_val);
     }
 
+    /// Declares a register whose handle type is `T` (a `Signal`/`SignedSignal`
+    /// handle or any width-typed value; see `HandleType`). Helpers that mirror
+    /// an operand's declaration use this so signedness survives.
+    pub fn declareReg(self: *ModuleBuilder, comptime T: type, name: []const u8, init_val: u64) !T {
+        return self.declareLeaf(T, .reg, name, init_val);
+    }
+
     /// Non-overridable named constant.
     pub fn constant(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
         return .{ .ref = try self.scope.add(.constant, name, W, val, 0) };
@@ -2477,6 +2500,7 @@ pub const ModuleBuilder = struct {
         self.scope.symbols.items[ref.idx].read_kind = opts.read;
         self.scope.symbols.items[ref.idx].write_mode = opts.write_mode;
         self.scope.symbols.items[ref.idx].init_file = opts.init_file;
+        self.scope.symbols.items[ref.idx].is_signed = opts.signed;
         return .{ .ref = ref, .depth = depth };
     }
 
@@ -4181,4 +4205,23 @@ test "resize and truncate honor declared signedness" {
     try std.testing.expectEqual(AnyExpr.Node.sext, std.meta.activeTag(widened.e.node));
     try std.testing.expect(b.resize(signed_src, 4).e.is_signed);
     try std.testing.expectEqual(AnyExpr.Node.trunc, std.meta.activeTag(b.resize(signed_src, 4).e.node));
+}
+
+test "signed memories declare and read signedness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    var mb = try ModuleBuilder.init(alloc, &design, "signed_mem_ir");
+    defer mb.deinit();
+    const signed_mem = try mb.mem(8, "sm", 4, .{ .signed = true });
+    const plain_mem = try mb.mem(8, "um", 4, .{});
+    try std.testing.expect(signed_mem.ref.symbol().is_signed);
+    try std.testing.expect(!plain_mem.ref.symbol().is_signed);
+
+    const b = mb.exprs();
+    const addr = b.lit(2, 0);
+    try std.testing.expect(b.memRead(signed_mem, addr).e.is_signed);
+    try std.testing.expect(!b.memRead(plain_mem, addr).e.is_signed);
 }

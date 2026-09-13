@@ -197,3 +197,60 @@ test "design.json marks signed ports and signals additively" {
     try std.testing.expect(std.mem.indexOf(u8, plain_json, "is_signed") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"is_signed\": true") != null);
 }
+
+test "design.json marks signed memories and bundle members additively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Bus = struct {
+        signed_val: SignedSignal(8),
+        plain_val: Signal(8),
+    };
+    const Blk = struct {
+        pub const name = "json_signed_mem";
+        pub const Inputs = struct { clk: Signal(1), addr: Signal(2), wdata: SignedSignal(8), we: Signal(1) };
+        pub const Outputs = struct { dout: SignedSignal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const signed_mem = try mb.mem(8, "ram", 4, .{ .signed = true });
+            _ = try mb.mem(8, "plain", 4, .{});
+            _ = try mb.wireBundle(Bus, "pack");
+            try mb.assign(outs.dout, b.memRead(signed_mem, ins.addr));
+            try mb.seqNoReset(ins.clk, &.{
+                b.when(ins.we, &.{b.memWrite(signed_mem, ins.addr, ins.wdata)}, &.{}),
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Blk);
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const module = findModule(root, "json_signed_mem").?;
+
+    var saw_signed_mem = false;
+    var saw_plain_mem = false;
+    for (module.object.get("memories").?.array.items) |mem| {
+        if (std.mem.eql(u8, mem.object.get("name").?.string, "ram")) {
+            saw_signed_mem = true;
+            try std.testing.expect(mem.object.get("is_signed").?.bool);
+        }
+        if (std.mem.eql(u8, mem.object.get("name").?.string, "plain")) {
+            saw_plain_mem = true;
+            try std.testing.expect(mem.object.get("is_signed") == null);
+        }
+    }
+    try std.testing.expect(saw_signed_mem and saw_plain_mem);
+
+    const bundle = module.object.get("bundles").?.array.items[0];
+    try std.testing.expectEqualStrings("pack", bundle.object.get("name").?.string);
+    const signed_member = bundle.object.get("members").?.array.items[0];
+    try std.testing.expectEqualStrings("signed_val", signed_member.object.get("path").?.string);
+    try std.testing.expect(signed_member.object.get("is_signed").?.bool);
+    const plain_member = bundle.object.get("members").?.array.items[1];
+    try std.testing.expectEqualStrings("plain_val", plain_member.object.get("path").?.string);
+    try std.testing.expect(plain_member.object.get("is_signed") == null);
+}

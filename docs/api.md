@@ -29,7 +29,7 @@ Everything else hangs off that. The public surface is exported through
 
 | Item | Purpose |
 |---|---|
-| `Signal(W)`, `SignedSignal(W)`, `Param(W)`, `Mem(W)` | nameless, width-typed handles; names live in the `Scope`. `SignedSignal` declares signed ports/wires/registers and references inherit the declaration, so `asSigned` is only reinterpretation |
+| `Signal(W)`, `SignedSignal(W)`, `Param(W)`, `Mem(W)` | nameless, width-typed handles; names live in the `Scope`. `SignedSignal` declares signed ports/wires/registers, `MemOpts.signed` declares a signed memory whose reads inherit it, and `asSigned` is only reinterpretation |
 | `Expr(W)` / `AnyExpr` | width-carrying expressions; `AnyExpr` is the erased form |
 | `ParamSpec(W)` | a value-parameter field type for `Params` schemas |
 | `specializeShape(Family, overrides)` | resolves a family `Shape` schema (with defaults) to a concrete block type |
@@ -78,8 +78,11 @@ Everything else hangs off that. The public surface is exported through
 ### lib
 
 `regNext`, `regEnable`, `muxLookup`, `rotl`, `rotr`, `past`, `rose`, `fell`,
-`stable`, `changed`; `Stream(W)` with `streamSource`/`streamSink`/
-`streamWire`/`connectStream`/`regStream`; `sync2`, `syncInput`, `pulseSync`,
+`stable`, `changed` (the register/sync helpers mirror a signed source
+declaration, so their outputs stay signed); `Stream(W)` and
+`SignedStream(W)` with `streamSource`/`streamSink`/`streamWire`,
+`signedStreamSource`/`signedStreamSink`/`signedStreamWire`,
+`connectStream`/`regStream`; `sync2`, `syncInput`, `pulseSync`,
 `resetSync`, `resetSyncStages`; `decode`, `priorityEncode`, `isOneHot`;
 `stateWidth`, `StateEncoding`, `StateMachine` (`create`, `current`, `param`,
 `goto`, `arm`, `case_`, `run`).
@@ -160,10 +163,9 @@ rather than the authoring half of this specific project.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
   bit at runtime. Variable field extraction needs `shift`+`mask` today.
 - Signedness is declaration-level through `SignedSignal(W)` for ports, wires
-  and registers (the symbol records it and references inherit it), and
+  and registers, `MemOpts.signed` for memories and `SignedStream(W)` for
+  streams (the symbol records it and references inherit it), and
   expression-level through `asSigned`/`asUnsigned` for reinterpretation.
-  Memories cannot declare signedness, and `lib` register helpers still create
-  unsigned declarations, so their consumers re-apply the cast.
 - No `x`/`z`/tristate value; `inout` ports can be declared but not driven as
   high-impedance. Bidirectional pads are modeled as separate in/out/oe pins.
 - No user-authored `initial`, `$display`, `$finish`, or file I/O. The IR has no
@@ -242,25 +244,22 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Signed breadth.** Ports, wires and registers declare signedness through
-   `SignedSignal(W)`; extend it to memories and the `lib` register/synchronizer
-   helpers so their consumers do not have to re-apply `asSigned` either.
-2. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
+1. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
    next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
    per-bit synchronizer intent in the lint, and a formal crossing proof rather
    than a heuristic audit.
-3. **Parameter propagation**: structural `Shape` specialization from a
+2. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape
    constraint errors, and recording resolved shape values in `design.json`.
-4. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
+3. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
    rows, deeper-than-immediate-child resolution, and /3 only for incompatible
    schema changes. Required windows already carry an explicit clock and edge;
    a consumer must reject one without a clock rather than guess.
-5. **Reusable reference model**: lift the per-fixture cycle models into a
+4. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.
-6. **Process**: add a `LICENSE`, decide whether docs ship in the package
+5. **Process**: add a `LICENSE`, decide whether docs ship in the package
    `paths`, and tag versions when consumers pin hashes.
 
 ## Stability policy
