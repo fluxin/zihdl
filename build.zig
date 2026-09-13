@@ -206,18 +206,29 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const divmod_gen = b.addRunArtifact(divmod_exe);
-    const divmod_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/div_mod_probe.v" });
+    const divmod_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/divmod/probe.v" });
     divmod_lint.step.dependOn(&divmod_gen.step);
+    const divmod_zero_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/divmod/zero.v" });
+    divmod_zero_lint.step.dependOn(&divmod_gen.step);
     const divmod_compile = b.addSystemCommand(&.{
-        "iverilog",            "-g2001",                      "-o", "out/div_mod_probe_iv",
-        "out/div_mod_probe.v", "examples/blocks/divmod_tb.v",
+        "iverilog",           "-g2001",                      "-o", "out/divmod/probe_iv",
+        "out/divmod/probe.v", "examples/blocks/divmod_tb.v",
     });
     divmod_compile.step.dependOn(&divmod_gen.step);
-    const divmod_run = b.addSystemCommand(&.{ "vvp", "out/div_mod_probe_iv" });
+    const divmod_run = b.addSystemCommand(&.{ "vvp", "out/divmod/probe_iv" });
     divmod_run.step.dependOn(&divmod_compile.step);
-    const divmod_step = b.step("divmod", "Emit, lint and replay the division/remainder witness");
+    const divmod_zero_compile = b.addSystemCommand(&.{
+        "iverilog",          "-g2001",                           "-o", "out/divmod/zero_iv",
+        "out/divmod/zero.v", "examples/blocks/divmod_zero_tb.v",
+    });
+    divmod_zero_compile.step.dependOn(&divmod_gen.step);
+    const divmod_zero_run = b.addSystemCommand(&.{ "vvp", "out/divmod/zero_iv" });
+    divmod_zero_run.step.dependOn(&divmod_zero_compile.step);
+    const divmod_step = b.step("divmod", "Emit, lint and replay the division/remainder fixtures (probe and zero divisor)");
     divmod_step.dependOn(&divmod_lint.step);
+    divmod_step.dependOn(&divmod_zero_lint.step);
     divmod_step.dependOn(&divmod_run.step);
+    divmod_step.dependOn(&divmod_zero_run.step);
 
     // Integrated ZIO witness bundles (RTL, design.json, SDC, microcode,
     // payload, harness, model-checked JSONL) for 60 and 120 MHz.
@@ -365,6 +376,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&eth_run.step);
     sim_step.dependOn(&async_fifo_run.step);
     sim_step.dependOn(&divmod_run.step);
+    sim_step.dependOn(&divmod_zero_run.step);
     sim_step.dependOn(zio_step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
@@ -384,7 +396,9 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&async_fifo_lint.step);
     verify_step.dependOn(&async_fifo_run.step);
     verify_step.dependOn(&divmod_lint.step);
+    verify_step.dependOn(&divmod_zero_lint.step);
     verify_step.dependOn(&divmod_run.step);
+    verify_step.dependOn(&divmod_zero_run.step);
     verify_step.dependOn(zio_step);
 
     // By making the run step depend on the default step, it will be run from the

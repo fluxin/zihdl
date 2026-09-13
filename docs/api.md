@@ -125,10 +125,11 @@ rather than the authoring half of this specific project.
 ### Gaps by category
 
 **Expression language**
-- `div`/`mod` emit `/` and `%` with Verilog width and sign rules, but
-  `oasic`'s parser has no slash/percent token yet, so designs using them are
-  Icarus-verified only until the checker catches up. Constant divide-by-zero
-  stays unfolded and is left to the simulator as Verilog `x`.
+- `div`/`mod` emit `/` and `%` with Verilog width and sign rules; operands are
+  normalized to the operation width with explicit zero/sign extension, so the
+  emitted RTL is self-determined and constant folds match simulation. Division
+  by zero stays unfolded: Icarus yields `x` and `oasic` reports an explicit
+  unknown-value failure.
 - Rotate has no operator: constant rotate is `lib.rotl`/`rotr` (slice
   concatenation); dynamic rotate is built from shifts/ors.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
@@ -200,11 +201,12 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **`oasic` arithmetic parity.** `/` and `%` now exist here (with folding and
-   an Icarus witness), so the checker side is the remaining step: slash and
-   percent tokens plus lowering and simulator semantics, then replay a divider
-   example through `-sim-verilog`. Signed port/register declarations are the
-   other parser-relevant arithmetic item.
+1. **Context-free normalization for the rest of the operators.** `div`/`mod`
+   extend unequal-width operands explicitly and widening is an explicit
+   sext/zext, so folded and signal-driven values agree. `add`/`sub`/`mul` and
+   bitwise operators still rely on Verilog operator context for unequal widths;
+   apply the same normalization there so self-determined evaluation is a
+   property of the emitter, not of the operator.
 2. **Handshake and bundled-data CDC.** `sync2`, `syncInput`, `pulseSync`,
    `resetSync` and `AsyncFifoBlock` now cover the common crossings; add
    request/acknowledge bridges, mailboxes and a CDC structural lint.

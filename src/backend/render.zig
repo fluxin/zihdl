@@ -20,6 +20,15 @@ pub const Timescale = struct {
 
 const ExprMap = std.HashMapUnmanaged(ir.AnyExpr, u32, ir.ExprContext, 80);
 
+/// Select-capable base nodes: symbols and part-selects can be extended by bit
+/// selection; every other expression must be hoisted first.
+fn isSelectable(e: ir.AnyExpr) bool {
+    return switch (e.node) {
+        .ref, .slice, .bit, .bit_dyn => true,
+        else => false,
+    };
+}
+
 /// Naming pass: subexpressions shared by two or more statement roots are
 /// hoisted into deterministic `tmpN` wires so emitted expressions stay
 /// readable. Topmost shared nodes win; their descendants stay inline.
@@ -176,7 +185,22 @@ pub const Renderer = struct {
             .slice => |s| try self.forceSelectBase(module, s.base),
             .concat => |items| for (items) |item| try self.forceSelectBases(module, item),
             .mem_read => |mr| try self.forceSelectBases(module, mr.addr.*),
-            .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| try self.forceSelectBases(module, n.*),
+            .not, .bit_not, .neg, .zext, .reduce_and, .reduce_or, .reduce_xor => |n| try self.forceSelectBases(module, n.*),
+            .sext => |n| {
+                try self.forceSelectBases(module, n.*);
+                // A sign extension over a non-select base must not lean on the
+                // assignment context to widen the base's evaluation: js_asic
+                // folds and composes at the IR width, so hoist the base into a
+                // width-typed temp and extend that explicitly.
+                if (expr.width > n.width and !isSelectable(n.*)) try self.forceWholeExpr(module, n.*);
+            },
+            .trunc => |n| {
+                try self.forceSelectBases(module, n.*);
+                // Narrowing a non-select expression is emitted as a part-select
+                // of a width-typed temp, so the assignment never implicitly
+                // truncates a wider expression.
+                if (expr.width < n.width and !isSelectable(n.*)) try self.forceWholeExpr(module, n.*);
+            },
             .replicate => |rep| try self.forceSelectBases(module, rep.base.*),
             .bin_op => |bo| {
                 try self.forceSelectBases(module, bo.lhs.*);
@@ -196,13 +220,20 @@ pub const Renderer = struct {
             .expr => |e| {
                 // Hoist deeper bases first so definitions read top-down.
                 try self.forceSelectBases(module, e.*);
-                const gop = try self.hoist.getOrPut(self.allocator, e.*);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = @intCast(self.temps.items.len);
-                    try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = e.width });
-                    try self.hoisted.append(self.allocator, e.*);
-                }
+                try self.forceWholeExpr(module, e.*);
             },
+        }
+    }
+
+    /// Hoists `e` into a width-typed temp wire (idempotent). Used for select
+    /// bases and for sign-extension bases, whose evaluation must stay at the
+    /// IR width instead of being widened by the assignment context.
+    fn forceWholeExpr(self: *Renderer, module: *const ir.Module, e: ir.AnyExpr) !void {
+        const gop = try self.hoist.getOrPut(self.allocator, e);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(self.temps.items.len);
+            try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = e.width });
+            try self.hoisted.append(self.allocator, e);
         }
     }
 
@@ -753,7 +784,20 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
                     try emitRawTo(out, r, n.*, record);
                     try appendStr(out, alloc, "}");
                 },
-                else => try emitRawTo(out, r, n.*, record),
+                else => {
+                    // Non-select bases cannot be part-selected. The base was
+                    // hoisted by `prepare` so it is evaluated at its IR width;
+                    // emit the sign extension explicitly rather than letting
+                    // the assignment context widen the base's evaluation.
+                    try appendStr(out, alloc, "{{");
+                    try appendFmt(out, alloc, "{d}", .{k});
+                    try appendStr(out, alloc, "{");
+                    try emitRawTo(out, r, n.*, record);
+                    try appendFmt(out, alloc, "[{d}]", .{n.width - 1});
+                    try appendStr(out, alloc, "}}, ");
+                    try emitRawTo(out, r, n.*, record);
+                    try appendStr(out, alloc, "}");
+                },
             }
         },
         .zext => |n| {
@@ -769,20 +813,22 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
             }
         },
         .trunc => |n| {
-            // Part-select is only legal on vectors; mask wider expressions so
-            // the low bits survive in a wider context.
+            // Part-select is only legal on vectors; select-capable bases keep
+            // their direct part-select, every other expression is hoisted by
+            // `prepare` into a width-typed temp so the narrowing is explicit.
             switch (n.*.node) {
                 .ref, .bit, .slice, .bit_dyn => {
                     try emitExprTo(out, r, n.*);
                     try appendFmt(out, alloc, "[{d}:0]", .{expr.width - 1});
                 },
                 else => {
-                    const zeros = n.width - expr.width;
-                    if (zeros == 0) {
-                        try appendStr(out, alloc, "(");
-                        try emitExprTo(out, r, n.*);
-                        try appendStr(out, alloc, ")");
+                    if (r.hoist.get(n.*) != null) {
+                        try emitRawTo(out, r, n.*, record);
+                        try appendFmt(out, alloc, "[{d}:0]", .{expr.width - 1});
                     } else {
+                        // Descriptive-only renderer without a prepare pass:
+                        // mask the low bits instead.
+                        const zeros = n.width - expr.width;
                         try appendStr(out, alloc, "(");
                         try emitExprTo(out, r, n.*);
                         try appendStr(out, alloc, " & {{");

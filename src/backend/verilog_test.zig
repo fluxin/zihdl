@@ -141,8 +141,8 @@ test "division and remainder emit target operators with Verilog widths" {
     const alloc = arena.allocator();
 
     const D = struct {
-        pub const Inputs = struct { a: Signal(8), b: Signal(8), c: Signal(8), d: Signal(8) };
-        pub const Outputs = struct { uq: Signal(8), ur: Signal(8), sq: Signal(8), sr: Signal(8) };
+        pub const Inputs = struct { a: Signal(8), b: Signal(8), c: Signal(8), d: Signal(8), w: Signal(12) };
+        pub const Outputs = struct { uq: Signal(8), ur: Signal(8), sq: Signal(8), sr: Signal(8), uwq: Signal(12), swq: Signal(12) };
         pub const name = "div_mod_ops";
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
@@ -155,6 +155,9 @@ test "division and remainder emit target operators with Verilog widths" {
             try mb.assign(outs.ur, b.mod(ins.a, ins.b));
             try mb.assign(outs.sq, b.div(b.asSigned(ins.c), b.asSigned(ins.d)));
             try mb.assign(outs.sr, b.mod(b.asSigned(ins.c), b.asSigned(ins.d)));
+            // Unequal widths extend the narrower operand explicitly.
+            try mb.assign(outs.uwq, b.div(ins.w, ins.b));
+            try mb.assign(outs.swq, b.div(b.asSigned(ins.w), b.asSigned(ins.d)));
         }
     };
 
@@ -164,7 +167,8 @@ test "division and remainder emit target operators with Verilog widths" {
     const b8 = try top.input("b", 8);
     const c = try top.input("c", 8);
     const d = try top.input("d", 8);
-    _ = try top.instantiate(D, "u_d", .{ .a = a, .b = b8, .c = c, .d = d }, .{}, .{});
+    const w = try top.input("w", 12);
+    _ = try top.instantiate(D, "u_d", .{ .a = a, .b = b8, .c = c, .d = d, .w = w }, .{}, .{});
     _ = try top.finish();
 
     const v = try verilog.emitDesign(alloc, &design, .{});
@@ -172,6 +176,8 @@ test "division and remainder emit target operators with Verilog widths" {
     try std.testing.expect(std.mem.indexOf(u8, v, "assign ur = (a % b);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign sq = $signed(($signed(c) / $signed(d)));") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign sr = $signed(($signed(c) % $signed(d)));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign uwq = (w / {{4{1'b0}}, b});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign swq = $signed(($signed(w) / $signed({{4{d[7]}}, d})));") != null);
 }
 
 test "localparam symbols are usable in expressions and case labels" {

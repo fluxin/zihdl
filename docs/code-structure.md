@@ -126,7 +126,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build verify` | Enforced lint + simulation of every artifact + contract fixture |
 | `zig build contract` | Emits the timing-intent fixture under `out/contract/` |
 | `zig build async-fifo` | Emits, lints and Icarus-replays the dual-clock async FIFO witness |
-| `zig build divmod` | Emits, lints and Icarus-replays the division/remainder witness (operators and folds) |
+| `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 
 ## Tests

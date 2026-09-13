@@ -829,12 +829,43 @@ pub const ExprBuilder = struct {
     /// Truncating division. Signed when both operands are signed (Verilog
     /// `$signed` semantics); division by zero is left to the simulator.
     pub fn div(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
-        return self.bin(.div, a, b);
+        return self.divmod(.div, a, b);
     }
     /// Remainder (Verilog `%`): the result takes the sign of the dividend when
     /// both operands are signed.
     pub fn mod(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
-        return self.bin(.mod, a, b);
+        return self.divmod(.mod, a, b);
+    }
+
+    fn divmod(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
+        const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
+        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
+        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
+        const signed_op = a_signed and b_signed;
+        return self.bin(op, self.divOperand(a, W, signed_op), self.divOperand(b, W, signed_op));
+    }
+
+    /// Normalizes one division/remainder operand to the operation width with an
+    /// explicit extension: both operands are zero-extended unless both are
+    /// signed, matching Verilog's rule. Making the extension explicit keeps the
+    /// emitted RTL self-determined and lint-clean instead of relying on the
+    /// operator context to widen a narrower operand.
+    fn divOperand(self: ExprBuilder, x: anytype, comptime W: usize, signed_op: bool) Expr(W) {
+        if (@TypeOf(x) == comptime_int) {
+            var value = self.lit(W, x).e;
+            value.is_signed = signed_op;
+            return .{ .e = value };
+        }
+        const CW = comptime valWidth(@TypeOf(x));
+        if (CW == W) {
+            var same = asAny(x);
+            same.is_signed = signed_op;
+            return .{ .e = same };
+        }
+        var src = asAny(x);
+        src.is_signed = signed_op;
+        const typed = Expr(CW){ .e = src };
+        return if (signed_op) self.sext(typed, W) else self.zext(typed, W);
     }
     pub fn band(self: ExprBuilder, a: anytype, b: anytype) Expr(operandWidth(@TypeOf(a), @TypeOf(b))) {
         return self.bin(.bit_and, a, b);
