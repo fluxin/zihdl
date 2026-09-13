@@ -9,20 +9,30 @@
 //!     or clock reset-release chain) for the captured data bit: a stage
 //!     declared without a bit exempts the whole signal, a per-bit stage only
 //!     its own bit, or
-//!   * the destination is a structurally recognized two-flop synchronizer
-//!     (assigned in one domain, never observed combinationally and read only
-//!     through direct captures in that same domain), or
+//!   * the destination bit is a structurally recognized first flop of a
+//!     two-flop synchronizer (assigned in one domain, never observed
+//!     combinationally and read only through direct captures in that same
+//!     domain), or
 //!   * the source and destination domains are linked by a declared clock
 //!     relationship of kind `synchronous`, or
 //!   * the capture is bundled data landing in a domain pair that already has a
 //!     two-way request/acknowledge synchronizer handshake.
 //!
-//! Per-bit declared stages only narrow a width-aligned direct capture. When
-//! the source is a slice, bit select or expression, no bit mapping is guessed:
-//! the capture is exempt only when every destination bit is declared. The
-//! structural two-flop recognition stays whole-signal because domain ownership
-//! is tracked per signal, not per bit, so per-bit structural inference is out
-//! of scope.
+//! Domain ownership, combinational observation and edge reads are tracked per
+//! data bit for the first 64 bits of every signal, and combinational
+//! expressions propagate that ownership bit by bit where the mapping is exact
+//! (references, constant bit/slice selects, concatenation, replication,
+//! extension and truncation, bitwise not and equal-width bitwise operators).
+//! Harder shapes (arithmetic, comparisons, logical/reduction ops, dynamic
+//! selects, memory reads, control conditions) stay whole-signal conservative,
+//! as do signals wider than 64 bits. A signal whose whole-symbol ownership
+//! carries a domain no tracked bit does falls back to whole-symbol reporting.
+//!
+//! Per-bit declared and structural coverage only narrows a width-aligned direct
+//! capture. When the source is a slice, bit select or expression, no bit
+//! mapping is guessed: the capture is exempt only when every destination bit is
+//! covered. Combinational observation and direct-capture shape remain
+//! whole-symbol conservative for the structural pattern.
 //!
 //! It also checks authored input intent: an input classified `asynchronous`
 //! with any data bit covered by fewer than two declared synchronizer stages is
@@ -64,11 +74,19 @@ pub const Crossing = struct {
     /// Clock port of the capturing process or destination domain.
     to_clock: []const u8,
     /// Data bit of `signal` the finding is about; null reports the signal as a
-    /// whole (the fallback when no per-bit declaration narrows it).
+    /// whole (the fallback when neither a per-bit declaration nor mixed
+    /// per-bit ownership narrows it).
     bit: ?u8 = null,
 };
 
 const Mask = u64;
+
+/// Data bits for which ownership, reads and captures are tracked per bit; the
+/// same 64-bit bound as the domain masks.
+const MaxBits = 64;
+
+/// Per-bit domain masks of one signal, least-significant bit first.
+const Bits = [MaxBits]Mask;
 
 /// Data-bit mask of a signal: every representable bit for widths at or beyond
 /// the mask, zero for a zero-width symbol.
@@ -105,6 +123,148 @@ fn appendRow(allocator: std.mem.Allocator, findings: *std.ArrayList(Crossing), r
     try findings.append(allocator, row);
 }
 
+/// OR of all tracked per-bit ownership of one symbol.
+fn ownedUnion(owned: []const Mask, idx: usize) Mask {
+    var union_bits: Mask = 0;
+    const base = idx * MaxBits;
+    for (owned[base .. base + MaxBits]) |m| union_bits |= m;
+    return union_bits;
+}
+
+/// Per-bit domain ownership of an expression. The mapping is exact for
+/// references and bit-preserving shapes; shapes whose bit mapping cannot be
+/// inferred OR every operand domain into every result bit conservatively. Bits
+/// at or beyond `MaxBits` are not represented here.
+fn exprBits(owned: []const Mask, expr: ir.AnyExpr) Bits {
+    var out = [_]Mask{0} ** MaxBits;
+    const width = @min(expr.width, MaxBits);
+    switch (expr.node) {
+        .ref => |r| {
+            const base = r.idx * MaxBits;
+            for (0..width) |b| out[b] = owned[base + b];
+        },
+        .lit => {},
+        .bit => |b| {
+            if (width > 0) out[0] = selectBitUnion(owned, b.base, b.index);
+        },
+        .bit_dyn => |b| {
+            const union_mask = selectBaseUnion(owned, b.base) | exprUnion(owned, b.index.*);
+            for (0..width) |b_i| out[b_i] = union_mask;
+        },
+        .slice => |s| {
+            for (0..width) |b| out[b] = selectBitUnion(owned, s.base, s.lo + b);
+        },
+        .concat => |items| {
+            // Verilog concatenation is MSB-first, so the last item lands at the
+            // least-significant positions.
+            var offset: usize = 0;
+            var i = items.len;
+            while (i > 0) {
+                i -= 1;
+                const item = items[i];
+                if (offset >= MaxBits) break;
+                const item_bits = exprBits(owned, item);
+                const count = @min(item.width, MaxBits - offset);
+                for (0..count) |b| out[offset + b] |= item_bits[b];
+                offset += item.width;
+            }
+        },
+        .mem_read => |mr| {
+            const union_mask = ownedUnion(owned, mr.mem.idx) | exprUnion(owned, mr.addr.*);
+            for (0..width) |b_i| out[b_i] = union_mask;
+        },
+        .not, .neg, .reduce_and, .reduce_or, .reduce_xor => |n| {
+            const union_mask = exprUnion(owned, n.*);
+            for (0..width) |b_i| out[b_i] = union_mask;
+        },
+        .bit_not => |n| {
+            const inner = exprBits(owned, n.*);
+            for (0..width) |b| out[b] = inner[b];
+        },
+        .bin_op => |bo| {
+            if ((bo.op == .bit_and or bo.op == .bit_or or bo.op == .bit_xor) and
+                bo.lhs.width == expr.width and bo.rhs.width == expr.width)
+            {
+                const lhs = exprBits(owned, bo.lhs.*);
+                const rhs = exprBits(owned, bo.rhs.*);
+                for (0..width) |b| out[b] = lhs[b] | rhs[b];
+            } else {
+                const union_mask = exprUnion(owned, bo.lhs.*) | exprUnion(owned, bo.rhs.*);
+                for (0..width) |b_i| out[b_i] = union_mask;
+            }
+        },
+        .ternary => |t| {
+            const cond_mask = exprUnion(owned, t.cond.*);
+            if (t.then_e.width == expr.width and t.else_e.width == expr.width) {
+                const then_bits = exprBits(owned, t.then_e.*);
+                const else_bits = exprBits(owned, t.else_e.*);
+                for (0..width) |b| out[b] = then_bits[b] | else_bits[b] | cond_mask;
+            } else {
+                const union_mask = cond_mask | exprUnion(owned, t.then_e.*) | exprUnion(owned, t.else_e.*);
+                for (0..width) |b_i| out[b_i] = union_mask;
+            }
+        },
+        .sext => |n| {
+            const inner = exprBits(owned, n.*);
+            const inner_width = @min(n.width, MaxBits);
+            var extension: Mask = 0;
+            if (n.width > 0 and n.width <= MaxBits) {
+                extension = inner[n.width - 1];
+            } else if (n.width > 0) {
+                extension = exprUnion(owned, n.*);
+            }
+            for (0..width) |b| out[b] = if (b < inner_width) inner[b] else extension;
+        },
+        .zext => |n| {
+            const inner = exprBits(owned, n.*);
+            const inner_width = @min(n.width, MaxBits);
+            for (0..@min(width, inner_width)) |b| out[b] = inner[b];
+        },
+        .trunc => |n| {
+            const inner = exprBits(owned, n.*);
+            for (0..width) |b| out[b] = inner[b];
+        },
+        .replicate => |r| {
+            const inner = exprBits(owned, r.base.*);
+            const inner_width = r.base.width;
+            if (inner_width == 0) return out;
+            var copy: usize = 0;
+            while (copy < r.count) : (copy += 1) {
+                const start = copy * inner_width;
+                if (start >= width) break;
+                const count = @min(inner_width, width - start);
+                for (0..count) |b| out[start + b] |= inner[b];
+            }
+        },
+    }
+    return out;
+}
+
+fn exprUnion(owned: []const Mask, expr: ir.AnyExpr) Mask {
+    const bits = exprBits(owned, expr);
+    const width = @min(expr.width, MaxBits);
+    var union_bits: Mask = 0;
+    for (bits[0..width]) |m| union_bits |= m;
+    return union_bits;
+}
+
+fn selectBitUnion(owned: []const Mask, base: ir.SelectBase, index: usize) Mask {
+    return switch (base) {
+        .sym => |r| if (index < MaxBits) owned[r.idx * MaxBits + index] else 0,
+        .expr => |e| bit: {
+            if (index >= MaxBits) break :bit exprUnion(owned, e.*);
+            break :bit exprBits(owned, e.*)[index];
+        },
+    };
+}
+
+fn selectBaseUnion(owned: []const Mask, base: ir.SelectBase) Mask {
+    return switch (base) {
+        .sym => |r| ownedUnion(owned, r.idx),
+        .expr => |e| exprUnion(owned, e.*),
+    };
+}
+
 const ReadMode = enum { comb, edge };
 
 const ModuleLint = struct {
@@ -114,6 +274,14 @@ const ModuleLint = struct {
     comb_read: []bool,
     read_masks: []Mask,
     direct_capture: []bool,
+    /// Per-bit domain ownership (assignment plus combinational propagation),
+    /// edge reads and combinational observations, and bits consumed by a
+    /// direct capture. All are `symbols.len * MaxBits` and indexed by
+    /// `symbol * MaxBits + bit`.
+    owned: []Mask,
+    read: []Mask,
+    comb: []Mask,
+    captured: []Mask,
     domains: std.ArrayListUnmanaged(ir.SymRef) = .empty,
     coupled: []bool = &.{},
     sync_exempt: []Mask = &.{},
@@ -135,6 +303,10 @@ const ModuleLint = struct {
             if (existing.scope == clk.scope and existing.idx == clk.idx) return @intCast(i);
         }
         return null;
+    }
+
+    fn ownedUnionSym(self: *const ModuleLint, idx: usize) Mask {
+        return ownedUnion(self.owned, idx);
     }
 
     /// Data bits of symbol `idx` covered by declared synchronizer stages, from
@@ -161,7 +333,7 @@ const ModuleLint = struct {
     /// Structurally recognized first flop of a two-flop synchronizer: a
     /// register assigned in exactly one domain, never observed combinationally
     /// and read only through direct captures inside that same domain. Always
-    /// whole-signal; per-bit domain ownership is not tracked.
+    /// whole-signal; used for the bundled-data handshake shortcut.
     fn structuralStage(self: *const ModuleLint, idx: usize) bool {
         const sym = self.module.scope.symbols.items[idx];
         if (sym.kind != .reg) return false;
@@ -172,8 +344,126 @@ const ModuleLint = struct {
         return self.direct_capture[idx];
     }
 
+    /// Per-bit structural coverage: bits of a register where every tracked
+    /// condition of the first-flop pattern holds for that bit alone. A bit
+    /// never observed combinationally, assigned in exactly one domain, read
+    /// only by that same domain and consumed by a direct capture qualifies.
+    /// Combinational observation of any bit and the direct-capture shape stay
+    /// whole-symbol conservative for the bit-level pattern only in that a bit
+    /// without a direct capture never qualifies.
+    fn structuralBits(self: *const ModuleLint, idx: usize) Mask {
+        const sym = self.module.scope.symbols.items[idx];
+        if (sym.kind != .reg) return 0;
+        var bits: Mask = 0;
+        const width = @min(sym.width, MaxBits);
+        var b: usize = 0;
+        while (b < width) : (b += 1) {
+            const one = @as(Mask, 1) << @intCast(b);
+            const assigned = self.owned[idx * MaxBits + b];
+            if (assigned == 0 or @popCount(assigned) != 1) continue;
+            if (self.comb[idx * MaxBits + b] != 0) continue;
+            if (self.read[idx * MaxBits + b] != assigned) continue;
+            if (self.captured[idx] & one == 0) continue;
+            bits |= one;
+        }
+        return bits;
+    }
+
     fn isCoupled(self: *const ModuleLint, from: u32, to: u32) bool {
         return self.coupled[from * self.domains.items.len + to];
+    }
+
+    // -- per-bit ownership -------------------------------------------------
+
+    /// Marks `[lo, hi)` of one symbol as owned by `domain_bit`.
+    fn markOwned(self: *ModuleLint, idx: usize, lo: usize, hi: usize, domain_bit: Mask) void {
+        self.masks[idx] |= domain_bit;
+        const end = @min(hi, MaxBits);
+        var b = lo;
+        while (b < end) : (b += 1) self.owned[idx * MaxBits + b] |= domain_bit;
+    }
+
+    /// Domain ownership seeded by one sequential process: every assigned bit is
+    /// owned by the process's clock domain.
+    fn markOwnedStmts(self: *ModuleLint, stmts: []const ir.Stmt, domain_bit: Mask) void {
+        for (stmts) |stmt| {
+            switch (stmt) {
+                .nop, .assert_, .assume_, .cover_ => {},
+                .assign => |a| self.markOwned(a.dst.idx, 0, a.dst.width(), domain_bit),
+                .slice_assign => |a| self.markOwned(a.dst.idx, a.lo, a.hi + 1, domain_bit),
+                .mem_write => |a| self.markOwned(a.mem.idx, 0, a.mem.width(), domain_bit),
+                .mem_write_bytes => |a| self.markOwned(a.mem.idx, 0, a.mem.width(), domain_bit),
+                .if_then => |it| {
+                    self.markOwnedStmts(it.then_stmts, domain_bit);
+                    self.markOwnedStmts(it.else_stmts, domain_bit);
+                },
+                .case_block => |cb| {
+                    for (cb.cases) |c| self.markOwnedStmts(c.stmts, domain_bit);
+                    self.markOwnedStmts(cb.default_stmts, domain_bit);
+                },
+            }
+        }
+    }
+
+    /// ORs the per-bit ownership of `bits` into `[lo, hi)` of `dst`.
+    fn orDstBits(self: *ModuleLint, dst: usize, lo: usize, hi: usize, bits: Bits) bool {
+        var changed = false;
+        const end = @min(hi, MaxBits);
+        var b = lo;
+        while (b < end) : (b += 1) {
+            const slot = &self.owned[dst * MaxBits + b];
+            const m = bits[b - lo];
+            if (slot.* | m != slot.*) {
+                slot.* |= m;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// ORs one domain union into every tracked bit of `dst`.
+    fn orUniformBits(self: *ModuleLint, dst: usize, union_bits: Mask) bool {
+        var changed = false;
+        const width = @min(self.module.scope.symbols.items[dst].width, MaxBits);
+        var b: usize = 0;
+        while (b < width) : (b += 1) {
+            const slot = &self.owned[dst * MaxBits + b];
+            if (slot.* | union_bits != slot.*) {
+                slot.* |= union_bits;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// Combinational propagation of one statement list into per-bit ownership;
+    /// returns whether anything grew.
+    fn propagateStmts(self: *ModuleLint, stmts: []const ir.Stmt) bool {
+        var changed = false;
+        for (stmts) |stmt| {
+            switch (stmt) {
+                .nop, .assert_, .assume_, .cover_ => {},
+                .assign => |a| changed = self.orDstBits(a.dst.idx, 0, a.dst.width(), exprBits(self.owned, a.src)) or changed,
+                .slice_assign => |a| changed = self.orDstBits(a.dst.idx, a.lo, a.hi + 1, exprBits(self.owned, a.src)) or changed,
+                .mem_write => |a| {
+                    const union_bits = exprUnion(self.owned, a.addr) | exprUnion(self.owned, a.src);
+                    changed = self.orUniformBits(a.mem.idx, union_bits) or changed;
+                },
+                .mem_write_bytes => |a| {
+                    const union_bits = exprUnion(self.owned, a.addr) | exprUnion(self.owned, a.src) | exprUnion(self.owned, a.be);
+                    changed = self.orUniformBits(a.mem.idx, union_bits) or changed;
+                },
+                .if_then => |it| {
+                    changed = self.propagateStmts(it.then_stmts) or changed;
+                    changed = self.propagateStmts(it.else_stmts) or changed;
+                },
+                .case_block => |cb| {
+                    for (cb.cases) |c| changed = self.propagateStmts(c.stmts) or changed;
+                    changed = self.propagateStmts(cb.default_stmts) or changed;
+                },
+            }
+        }
+        return changed;
     }
 
     // -- detection ---------------------------------------------------------
@@ -214,27 +504,72 @@ const ModuleLint = struct {
     }
 
     /// Reports a foreign read of symbol `idx` into `dst`. A zero `exempt` mask
-    /// reports the signal as a whole (one row per foreign domain); a non-zero
-    /// mask names data bits of a width-aligned direct capture already covered
-    /// by a per-bit declared stage, and only the remaining bits are reported.
+    /// reports whole-signal rows when every data bit carries the same foreign
+    /// ownership (as before), and per-bit rows otherwise. A non-zero mask names
+    /// data bits of a width-aligned direct capture already covered, and only
+    /// the remaining bits are reported.
     fn checkSym(self: *ModuleLint, findings: *std.ArrayList(Crossing), idx: usize, domain: u32, dst: []const u8, exempt: Mask) std.mem.Allocator.Error!void {
-        const mask = self.masks[idx];
-        if (mask == 0) return;
-        if (mask & domainBit(domain) != 0) return;
-        const foreign = mask & ~self.sync_exempt[domain];
         const width = self.module.scope.symbols.items[idx].width;
-        var d: u32 = 0;
-        while (d < 64) : (d += 1) {
-            const one = @as(Mask, 1) << @intCast(d);
-            if (foreign & one == 0) continue;
-            if (exempt == 0) {
-                try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, null);
-                continue;
+        const capture_domain = domainBit(domain);
+        // Whole-symbol fallback when ownership is only tracked coarsely: a
+        // signal wider than the bit masks, or one whose whole-symbol ownership
+        // carries a domain no tracked bit does (control conditions and shapes
+        // the per-bit propagation cannot map).
+        if (width > MaxBits or (self.masks[idx] & ~self.ownedUnionSym(idx)) != 0) {
+            const mask = self.masks[idx];
+            if (mask == 0) return;
+            if (mask & capture_domain != 0) return;
+            const foreign = mask & ~self.sync_exempt[domain];
+            var d: u32 = 0;
+            while (d < 64) : (d += 1) {
+                const one = @as(Mask, 1) << @intCast(d);
+                if (foreign & one == 0) continue;
+                if (exempt == 0) {
+                    try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, null);
+                    continue;
+                }
+                var b: u32 = 0;
+                while (b < 64 and b < width) : (b += 1) {
+                    const bit_mask = @as(Mask, 1) << @intCast(b);
+                    if (exempt & bit_mask != 0) continue;
+                    try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, @intCast(b));
+                }
             }
-            var b: u32 = 0;
-            while (b < 64 and b < width) : (b += 1) {
-                const bit_mask = @as(Mask, 1) << @intCast(b);
-                if (exempt & bit_mask != 0) continue;
+            return;
+        }
+        if (exempt == 0) {
+            var uniform: Mask = 0;
+            var is_uniform = true;
+            var b: usize = 0;
+            while (b < width) : (b += 1) {
+                const foreign = self.owned[idx * MaxBits + b] & ~capture_domain & ~self.sync_exempt[domain];
+                if (b == 0) {
+                    uniform = foreign;
+                } else if (foreign != uniform) {
+                    is_uniform = false;
+                    break;
+                }
+            }
+            if (is_uniform) {
+                if (uniform == 0) return;
+                var d: u32 = 0;
+                while (d < 64) : (d += 1) {
+                    const one = @as(Mask, 1) << @intCast(d);
+                    if (uniform & one == 0) continue;
+                    try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, null);
+                }
+                return;
+            }
+        }
+        var b: usize = 0;
+        while (b < width) : (b += 1) {
+            const bit_mask = @as(Mask, 1) << @intCast(b);
+            if (exempt & bit_mask != 0) continue;
+            const foreign = self.owned[idx * MaxBits + b] & ~capture_domain & ~self.sync_exempt[domain];
+            var d: u32 = 0;
+            while (d < 64) : (d += 1) {
+                const one = @as(Mask, 1) << @intCast(d);
+                if (foreign & one == 0) continue;
                 try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, @intCast(b));
             }
         }
@@ -288,15 +623,17 @@ const ModuleLint = struct {
         const dst_idx = dst.idx;
         const dst_sym = self.module.scope.symbols.items[dst_idx];
         const full = widthMask(dst_sym.width);
-        const covered = self.declaredBits(dst_idx) & full;
-        // Every destination bit declared exempts the whole capture, whatever
-        // the source shape; a partial declaration needs a width-aligned direct
-        // reference to exempt exactly its bits, and is otherwise ignored
-        // because a partial bit mapping cannot be inferred.
+        var covered = self.declaredBits(dst_idx) & full;
+        // Every destination bit exempts the whole capture, whatever the source
+        // shape; partial coverage needs a width-aligned direct reference to
+        // exempt exactly its bits, and is otherwise ignored because a partial
+        // bit mapping cannot be inferred.
         if (covered == full) return;
         if (src.node == .ref) {
             const src_idx = src.node.ref.idx;
             if (self.structuralStage(dst_idx)) return;
+            covered |= self.structuralBits(dst_idx) & full;
+            if (covered == full) return;
             if (dst_sym.kind == .reg) {
                 const src_mask = self.masks[src_idx];
                 if (src_mask != 0 and @popCount(src_mask) == 1) {
@@ -349,17 +686,28 @@ const ModuleLint = struct {
 
     fn noteExpr(self: *ModuleLint, expr: ir.AnyExpr, mode: ReadMode, domain: u32) void {
         switch (expr.node) {
-            .ref => |r| self.noteSym(r.idx, mode, domain),
+            .ref => |r| {
+                self.noteSym(r.idx, mode, domain);
+                self.markReadBits(r.idx, 0, expr.width, mode, domain);
+            },
             .lit => {},
-            .bit => |b| self.noteBase(b.base, mode, domain),
+            .bit => |b| {
+                self.noteBase(b.base, mode, domain);
+                self.noteSelectBits(b.base, b.index, b.index + 1, mode, domain);
+            },
             .bit_dyn => |b| {
                 self.noteBase(b.base, mode, domain);
+                self.noteBaseBits(b.base, mode, domain);
                 self.noteExpr(b.index.*, mode, domain);
             },
-            .slice => |s| self.noteBase(s.base, mode, domain),
+            .slice => |s| {
+                self.noteBase(s.base, mode, domain);
+                self.noteSelectBits(s.base, s.lo, s.hi + 1, mode, domain);
+            },
             .concat => |items| for (items) |item| self.noteExpr(item, mode, domain),
             .mem_read => |mr| {
                 self.noteSym(mr.mem.idx, mode, domain);
+                self.markReadBits(mr.mem.idx, 0, mr.mem.symbol().width, mode, domain);
                 self.noteExpr(mr.addr.*, mode, domain);
             },
             .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| self.noteExpr(n.*, mode, domain),
@@ -383,6 +731,24 @@ const ModuleLint = struct {
         }
     }
 
+    /// Per-bit read marking for a constant select: only the selected bits of a
+    /// symbol base are read, while an expression base stays whole-signal
+    /// conservative.
+    fn noteSelectBits(self: *ModuleLint, base: ir.SelectBase, lo: usize, hi: usize, mode: ReadMode, domain: u32) void {
+        switch (base) {
+            .sym => |r| self.markReadBits(r.idx, lo, hi, mode, domain),
+            .expr => |e| self.noteExpr(e.*, mode, domain),
+        }
+    }
+
+    /// Per-bit read marking for a dynamic select: every base bit is read.
+    fn noteBaseBits(self: *ModuleLint, base: ir.SelectBase, mode: ReadMode, domain: u32) void {
+        switch (base) {
+            .sym => |r| self.markReadBits(r.idx, 0, r.symbol().width, mode, domain),
+            .expr => |e| self.noteExpr(e.*, mode, domain),
+        }
+    }
+
     fn noteSym(self: *ModuleLint, idx: usize, mode: ReadMode, domain: u32) void {
         switch (mode) {
             .comb => self.comb_read[idx] = true,
@@ -390,14 +756,34 @@ const ModuleLint = struct {
         }
     }
 
-    /// Marks every symbol captured by a direct `dst <= sym` assignment inside a
-    /// sequential process, the shape a two-flop synchronizer's first stage has.
+    /// Records `[lo, hi)` of one symbol as read: combinationally, or by an edge
+    /// process in `domain`.
+    fn markReadBits(self: *ModuleLint, idx: usize, lo: usize, hi: usize, mode: ReadMode, domain: u32) void {
+        const end = @min(hi, MaxBits);
+        var b = lo;
+        while (b < end) : (b += 1) {
+            switch (mode) {
+                .comb => self.comb[idx * MaxBits + b] = 1,
+                .edge => self.read[idx * MaxBits + b] |= domainBit(domain),
+            }
+        }
+    }
+
+    /// Marks every symbol and data bit captured by a direct `dst <= sym`
+    /// assignment inside a sequential process, the shape a two-flop
+    /// synchronizer's first stage has.
     fn noteDirectCaptures(self: *ModuleLint, stmts: []const ir.Stmt) void {
         for (stmts) |stmt| {
             switch (stmt) {
                 .assign => |a| {
-                    if (a.src.node == .ref) self.direct_capture[a.src.node.ref.idx] = true;
+                    if (a.src.node == .ref) {
+                        self.direct_capture[a.src.node.ref.idx] = true;
+                        self.markCapturedBits(a.src);
+                    } else {
+                        self.markCapturedBits(a.src);
+                    }
                 },
+                .slice_assign => |a| self.markCapturedBits(a.src),
                 .if_then => |it| {
                     self.noteDirectCaptures(it.then_stmts);
                     self.noteDirectCaptures(it.else_stmts);
@@ -408,6 +794,29 @@ const ModuleLint = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    /// Marks the data bits of the captured symbol, resolving constant bit and
+    /// slice selects so per-bit structural coverage can see them.
+    fn markCapturedBits(self: *ModuleLint, src: ir.AnyExpr) void {
+        switch (src.node) {
+            .ref => |r| self.captured[r.idx] |= widthMask(src.width),
+            .bit => |b| switch (b.base) {
+                .sym => |r| if (b.index < MaxBits) {
+                    self.captured[r.idx] |= @as(Mask, 1) << @intCast(b.index);
+                },
+                .expr => {},
+            },
+            .slice => |s| switch (s.base) {
+                .sym => |r| {
+                    const lo = @min(s.lo, MaxBits);
+                    const hi = @min(s.hi + 1, MaxBits);
+                    if (lo < hi) self.captured[r.idx] |= widthMask(hi) & ~widthMask(lo);
+                },
+                .expr => {},
+            },
+            else => {},
         }
     }
 
@@ -460,11 +869,19 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
         .comb_read = try allocator.alloc(bool, n),
         .read_masks = try allocator.alloc(Mask, n),
         .direct_capture = try allocator.alloc(bool, n),
+        .owned = try allocator.alloc(Mask, n * MaxBits),
+        .read = try allocator.alloc(Mask, n * MaxBits),
+        .comb = try allocator.alloc(Mask, n * MaxBits),
+        .captured = try allocator.alloc(Mask, n),
     };
     defer allocator.free(ctx.masks);
     defer allocator.free(ctx.comb_read);
     defer allocator.free(ctx.read_masks);
     defer allocator.free(ctx.direct_capture);
+    defer allocator.free(ctx.owned);
+    defer allocator.free(ctx.read);
+    defer allocator.free(ctx.comb);
+    defer allocator.free(ctx.captured);
     defer ctx.domains.deinit(allocator);
     defer if (ctx.coupled.len > 0) allocator.free(ctx.coupled);
     defer if (ctx.sync_exempt.len > 0) allocator.free(ctx.sync_exempt);
@@ -472,6 +889,10 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
     @memset(ctx.comb_read, false);
     @memset(ctx.read_masks, 0);
     @memset(ctx.direct_capture, false);
+    @memset(ctx.owned, 0);
+    @memset(ctx.read, 0);
+    @memset(ctx.comb, 0);
+    @memset(ctx.captured, 0);
 
     // Domains come from sequential processes and declared clock domains.
     for (module.processes) |proc| {
@@ -483,7 +904,7 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
     for (module.clocks) |clock| _ = ctx.domainId(clock.clk.ref);
     if (ctx.domains.items.len > 64) return error.TooManyClockDomains;
 
-    // Domain ownership: sequential processes own the symbols they assign.
+    // Domain ownership: sequential processes own the bits they assign.
     var assigned = std.ArrayList(ir.SymRef).empty;
     defer assigned.deinit(allocator);
     for (module.processes) |proc| {
@@ -491,14 +912,12 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
             .comb => {},
             .edge => |e| {
                 const bit = ModuleLint.domainBit(ctx.domainId(e.clk));
-                assigned.clearRetainingCapacity();
-                try ir.collectAssigned(allocator, proc.stmts, &assigned);
-                for (assigned.items) |r| ctx.masks[r.idx] |= bit;
+                ctx.markOwnedStmts(proc.stmts, bit);
             },
         }
     }
 
-    // Combinational domain propagation to a fixpoint.
+    // Combinational domain propagation to a fixpoint, whole-symbol and per bit.
     var changed = true;
     while (changed) {
         changed = false;
@@ -508,6 +927,7 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
                 ctx.masks[a.dst.idx] |= m;
                 changed = true;
             }
+            if (ctx.orDstBits(a.dst.idx, 0, a.dst.width(), exprBits(ctx.owned, a.src))) changed = true;
         }
         for (module.processes) |proc| {
             switch (proc.sensitivity) {
@@ -521,6 +941,7 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
                             changed = true;
                         }
                     }
+                    if (ctx.propagateStmts(proc.stmts)) changed = true;
                 },
                 .edge => {},
             }
@@ -1132,5 +1553,158 @@ test "CDC lint exempts an expression capture only when every bit is declared" {
     try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
     try std.testing.expectEqualStrings("b_part", crossings[0].destination);
     try std.testing.expectEqualStrings("a_bus", crossings[0].signal);
+    try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
+}
+
+test "CDC lint reports mixed-ownership vectors per data bit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_mixed_bits";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+            in: Signal(1),
+        };
+        pub const Outputs = struct { q: Signal(2) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.b_rst_n };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+            const bld = mb.exprs();
+
+            const a_q = try mb.reg("a_q", 1, 0);
+            try mb.seq(a, &.{bld.assign(a_q, ins.in.expr())});
+            const b_local = try mb.reg("b_local", 1, 0);
+            try mb.seq(b, &.{bld.assign(b_local, ins.in.expr())});
+
+            // Concatenation is MSB-first: bit 1 is local to b, bit 0 crosses.
+            const mix = try mb.wire("mix", 2);
+            try mb.assign(mix, bld.concat(.{ b_local.expr(), a_q.expr() }));
+            const b_cap = try mb.reg("b_cap", 2, 0);
+            try mb.seq(b, &.{bld.assign(b_cap, mix.expr())});
+            // Reading b_cap combinationally keeps it out of structural
+            // recognition; only the foreign bit is reported.
+            try mb.assign(outs.q, b_cap.expr());
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_cap", crossings[0].destination);
+    try std.testing.expectEqualStrings("mix", crossings[0].signal);
+    try std.testing.expectEqualStrings("a_clk", crossings[0].from_clock);
+    try std.testing.expectEqualStrings("b_clk", crossings[0].to_clock);
+    try std.testing.expectEqual(@as(?u8, 0), crossings[0].bit);
+}
+
+test "CDC lint infers structural first stages per data bit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_structural_bits";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+            bus_in: Signal(2),
+        };
+        pub const Outputs = struct { q: Signal(2), peek: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.b_rst_n };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+            const bld = mb.exprs();
+
+            const a_bus = try mb.reg("a_bus", 2, 0);
+            try mb.seq(a, &.{bld.assign(a_bus, ins.bus_in.expr())});
+
+            const b_d0 = try mb.reg("b_d0", 2, 0);
+            const b_d1 = try mb.reg("b_d1", 2, 0);
+            try mb.seq(b, &.{
+                bld.assign(b_d0, a_bus.expr()),
+                bld.assign(b_d1, b_d0.expr()),
+            });
+            // Bit 1 is also observed combinationally, so only bit 0 is a clean
+            // first-stage flop; the crossing of bit 1 stays a finding.
+            try mb.assign(outs.peek, b_d0.bit(1));
+            try mb.assign(outs.q, b_d1.expr());
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_d0", crossings[0].destination);
+    try std.testing.expectEqualStrings("a_bus", crossings[0].signal);
+    try std.testing.expectEqual(@as(?u8, 1), crossings[0].bit);
+}
+
+test "CDC lint keeps whole-signal rows when ownership is control-only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_control_only";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+        };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.b_rst_n };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+            const bld = mb.exprs();
+
+            const a_en = try mb.reg("a_en", 1, 0);
+            try mb.seq(a, &.{bld.assign(a_en, 1)});
+
+            // The register's value never depends on the foreign condition, but
+            // the whole-symbol propagation records the condition domain; the
+            // lint stays conservative and reports the signal as a whole.
+            const w = try mb.reg("w", 1, 0);
+            try mb.comb(&.{bld.when(a_en.expr(), &.{bld.assign(w, 1)}, &.{bld.assign(w, 0)})});
+
+            const b_cap = try mb.reg("b_cap", 1, 0);
+            try mb.seq(b, &.{bld.assign(b_cap, w.expr())});
+            try mb.assign(outs.q, b_cap.expr());
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_cap", crossings[0].destination);
+    try std.testing.expectEqualStrings("w", crossings[0].signal);
     try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
 }
