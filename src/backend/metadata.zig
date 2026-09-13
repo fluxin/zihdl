@@ -19,8 +19,9 @@ pub const Options = struct {
     /// when null the sidecar is byte-for-byte unchanged.
     provenance: ?*const provenance.Collector = null,
     /// Timing-intent schema version to emit. 1 (the default) is byte-stable
-    /// and product-facing; 2 adds input slew and output load declarations and
-    /// is opt-in until consumers pass it natively.
+    /// and product-facing; 2 adds input slew, output load/required
+    /// declarations and clock relationship/reset-release topology and is
+    /// opt-in until consumers pass it natively.
     timing_intent_version: u32 = 1,
 };
 
@@ -368,15 +369,31 @@ fn isPort(kind: ir.SymbolKind) bool {
 //     and wire capacitance. A null load means unknown.
 //
 // Cross-module resolution is consumer-side. When joining a parent port to the
-// child rows through the `instances` table: a parent output row overrides the
-// bound child's load, including an explicit null (unknown); an absent parent
-// row leaves the child's declaration in force. Parent and child input rows
-// merge field by field only when compatible (classification, clock/domain,
-// synchronizer shape); conflicting declarations for the same physical input
-// must be reported as errors, never silently resolved.
+// child rows through the `instances` table: a parent output row replaces the
+// bound child's whole output row (load and required together, explicit nulls
+// included); an absent parent row leaves the child's declaration in force.
+// Parent and child input rows merge field by field only when compatible
+// (classification, clock/domain, synchronizer shape); conflicting declarations
+// for the same physical input must be reported as errors, never silently
+// resolved.
 //
-// Still deferred: output required times, reset-release synchronization and
-// external clock relationships.
+// Further additive v2 fields (all optional, consumers that do not read them
+// keep the value unknown):
+//   * `outputs[].required`: `{ min, max }` arrival requirement relative to the
+//     destination clock's active edge, same explicit-time shape as `arrival`.
+//     The destination clock itself stays consumer-resolved.
+//   * `clocks[].reset.release_synchronizer`: `[{ module, signal, bit }]` reset
+//     release chain, first stage first; empty when none is declared.
+//   * `clocks[].relationship`: `{ relation, related_to, source_period, jitter }`
+//     where `relation` is `synchronous`, `asynchronous`, `mesochronous` or
+//     `plesiochronous`, `related_to` names a 1-bit input of the declaring
+//     module (null means an external reference) and the times are explicit.
+//
+// These fields are additive under `/2` because the live consumer skips unknown
+// JSON fields and the schema version gate promises capabilities, not byte
+// layout; `/1` omits every one of them and stays byte-stable. Per-bit
+// slew/load rows stay deferred: a row applies to every bit of its port and no
+// consumer can act on per-bit distinct values yet.
 
 pub const timing_schema = "js_asic.timing_intent/1";
 pub const timing_schema_v2 = "js_asic.timing_intent/2";
@@ -421,7 +438,41 @@ fn writeTimingIntent(j: *std.json.Stringify, design: *const ir.Design, version: 
             try j.write(@tagName(clock.reset.assertion));
             try j.objectField("release");
             try j.write(@tagName(clock.reset.release));
+            if (version >= 2) {
+                try j.objectField("release_synchronizer");
+                try j.beginArray();
+                for (clock.release_synchronizer) |stage| {
+                    try j.beginObject();
+                    try j.objectField("module");
+                    try j.write(module.name);
+                    try j.objectField("signal");
+                    try j.write(stage.signal.name());
+                    if (stage.bit) |bit| {
+                        try j.objectField("bit");
+                        try j.write(bit);
+                    }
+                    try j.endObject();
+                }
+                try j.endArray();
+            }
             try j.endObject();
+            if (version >= 2) {
+                try j.objectField("relationship");
+                if (clock.relationship) |rel| {
+                    try j.beginObject();
+                    try j.objectField("relation");
+                    try j.write(@tagName(rel.relation));
+                    try j.objectField("related_to");
+                    if (rel.related_to) |ref| try j.write(ref.name()) else try j.write(null);
+                    try j.objectField("source_period");
+                    try writeTimeValue(j, rel.source_period);
+                    try j.objectField("jitter");
+                    try writeTimeValue(j, rel.jitter);
+                    try j.endObject();
+                } else {
+                    try j.write(null);
+                }
+            }
             try j.endObject();
         }
         try j.endArray();
@@ -529,6 +580,17 @@ fn writeOutputTiming(j: *std.json.Stringify, intent: ir.OutputTiming) !void {
         try j.endObject();
     } else {
         try j.write(null);
+    }
+    try j.objectField("required");
+    if (intent.required_min == null and intent.required_max == null) {
+        try j.write(null);
+    } else {
+        try j.beginObject();
+        try j.objectField("min");
+        try writeTimeValue(j, intent.required_min);
+        try j.objectField("max");
+        try writeTimeValue(j, intent.required_max);
+        try j.endObject();
     }
     try j.endObject();
 }

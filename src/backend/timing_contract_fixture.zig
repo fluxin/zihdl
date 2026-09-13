@@ -3,16 +3,18 @@
 //! with a two-stage synchronizer, an asynchronous 2-bit bus with vector
 //! synchronizer stage identities (per-bit stage intent is unit-test covered;
 //! current consumers reject it), an intentionally unsynchronized asynchronous
-//! input, and a reset policy. The top instantiates the child twice through
-//! renamed connections so consumers can exercise hierarchical binding, and
-//! uses v2 parent rows to override child load defaults per instance (value,
-//! unit change and explicit null) and to author distinct slew windows. Child
-//! input rows and parent input rows stay compatible and merge field by field.
+//! input, an async-assert/sync-release reset chain, an asynchronous clock
+//! relationship to an external reference, and a reset policy. The top
+//! instantiates the child twice through renamed connections so consumers can
+//! exercise hierarchical binding, and uses v2 parent rows to override child
+//! output rows per instance (load value, unit change, explicit null and
+//! required windows) and to author distinct slew windows. Child input rows and
+//! parent input rows stay compatible and merge field by field.
 //!
 //! `emitStimulus` builds an independent `oasic.stimulus/1` program whose
 //! expectations come from the cycle model written here, never from emitted RTL.
-//! Arrival, slew and load values are fixture values that exercise the schema;
-//! they are not board requirements and must not be treated as such.
+//! Arrival, slew, load and required values are fixture values that exercise
+//! the schema; they are not board requirements and must not be treated as such.
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
@@ -34,6 +36,7 @@ pub const Child = struct {
     pub const Inputs = struct {
         clk: Signal(1),
         rst_n: Signal(1),
+        ref_clk: Signal(1),
         sync_in: Signal(8),
         async_in: Signal(1),
         async_bus: Signal(2),
@@ -50,7 +53,6 @@ pub const Child = struct {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
         const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
-        try mb.addClockDomain(domain);
         const b = mb.exprs();
 
         // Synchronous input with a declared arrival window. Slew stays
@@ -77,6 +79,29 @@ pub const Child = struct {
         try mb.assign(outs.raw_out, ins.raw_in);
 
         try mb.seq(domain, &.{b.assign(sync_q, ins.sync_in)});
+
+        // Real async-assert / sync-release reset chain whose stages are named
+        // by the clock-domain topology below (v2 release_synchronizer).
+        const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, domain);
+        try mb.addClockDomain(.{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .freq_hz = 120_000_000,
+            .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
+            .release_synchronizer = &.{
+                .{ .signal = rel.sync0.ref, .bit = 0 },
+                .{ .signal = rel.sync1.ref, .bit = 0 },
+            },
+            // v2 clock relationship: this domain is asynchronous to the
+            // external reference clock the top passes in.
+            .relationship = .{
+                .relation = .asynchronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 10.0, .unit = .ns },
+                .jitter = .{ .value = 50.0, .unit = .ps },
+            },
+        });
 
         try mb.addInputTiming(.{
             .signal = ins.sync_in.ref,
@@ -109,12 +134,28 @@ pub const Child = struct {
             .clock = ins.clk.ref,
         });
 
-        // v2 output loads: per-bit additional external load. `async_pulse`
-        // declares the row but leaves the load unknown (null); `raw_out` has
-        // no row at all; `async_bus_out` covers the vector-bit case.
-        try mb.addOutputTiming(.{ .signal = outs.sync_out.ref, .load = .{ .value = 4.0, .unit = .ff } });
-        try mb.addOutputTiming(.{ .signal = outs.async_pulse.ref, .load = null });
-        try mb.addOutputTiming(.{ .signal = outs.async_bus_out.ref, .load = .{ .value = 1.5, .unit = .pf } });
+        // v2 output loads and required windows: per-bit additional external
+        // load plus a required arrival window relative to the destination
+        // clock's active edge. `async_pulse` declares the row but leaves the
+        // load unknown (null) and declares a min-only required bound; `raw_out`
+        // has no row at all; `async_bus_out` covers the vector case.
+        try mb.addOutputTiming(.{
+            .signal = outs.sync_out.ref,
+            .load = .{ .value = 4.0, .unit = .ff },
+            .required_min = .{ .value = -0.4, .unit = .ns },
+            .required_max = .{ .value = 0.9, .unit = .ns },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.async_pulse.ref,
+            .load = null,
+            .required_min = .{ .value = -0.2, .unit = .ns },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.async_bus_out.ref,
+            .load = .{ .value = 1.5, .unit = .pf },
+            .required_min = .{ .value = 0.1, .unit = .ns },
+            .required_max = .{ .value = 0.8, .unit = .ns },
+        });
     }
 };
 
@@ -123,6 +164,7 @@ pub const Top = struct {
     pub const Inputs = struct {
         clk: Signal(1),
         rst_n: Signal(1),
+        ref_clk: Signal(1),
         fast_sync_in: Signal(8),
         slow_sync_in: Signal(8),
         fast_async_in: Signal(1),
@@ -146,14 +188,27 @@ pub const Top = struct {
     pub fn build(mb: *ModuleBuilder) !void {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
-        const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
-        try mb.addClockDomain(domain);
+        // v2 clock relationship authored at the parent boundary: the system
+        // clock is mesochronous to the external reference clock.
+        try mb.addClockDomain(.{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .freq_hz = 120_000_000,
+            .relationship = .{
+                .relation = .mesochronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 8.0, .unit = .ns },
+                .jitter = .{ .value = 40.0, .unit = .ps },
+            },
+        });
 
         // Same child definition, two instances, renamed parent-side ports:
         // consumers resolve the child's intent through the instance rows.
         _ = try mb.instantiate(Child, "u_fast", .{
             .clk = ins.clk,
             .rst_n = ins.rst_n,
+            .ref_clk = ins.ref_clk,
             .sync_in = ins.fast_sync_in,
             .async_in = ins.fast_async_in,
             .async_bus = ins.fast_async_bus,
@@ -167,6 +222,7 @@ pub const Top = struct {
         _ = try mb.instantiate(Child, "u_slow", .{
             .clk = ins.clk,
             .rst_n = ins.rst_n,
+            .ref_clk = ins.ref_clk,
             .sync_in = ins.slow_sync_in,
             .async_in = ins.slow_async_in,
             .async_bus = ins.slow_async_bus,
@@ -225,17 +281,31 @@ pub const Top = struct {
             },
         });
 
-        // Parent output rows override the child's load for the ports that
-        // carry each instance: `fast_sync_out`/`slow_sync_out` replace the
-        // child's 4 fF with distinct values and units, `fast_async_bus_out`
-        // replaces the child's 1.5 pF with an explicit null (unknown), and
-        // `slow_async_bus_out` deliberately has no row so the child default
-        // stays in force. `fast_raw_out` declares an unknown load over a child
-        // that declares none; `slow_raw_out` has no row.
-        try mb.addOutputTiming(.{ .signal = outs.fast_sync_out.ref, .load = .{ .value = 5.0, .unit = .ff } });
-        try mb.addOutputTiming(.{ .signal = outs.slow_sync_out.ref, .load = .{ .value = 2.5, .unit = .pf } });
+        // Parent output rows replace the child's whole output row for the
+        // ports that carry each instance: `fast_sync_out`/`slow_sync_out`
+        // replace the child's 4 fF with distinct values/units and their own
+        // required windows, `fast_async_bus_out` replaces the child's 1.5 pF
+        // and required window with explicit nulls (unknown), and
+        // `slow_async_bus_out` deliberately has no row so the child row stays
+        // in force. `fast_raw_out` declares an unknown load over a child that
+        // declares none; `slow_raw_out` has no row.
+        try mb.addOutputTiming(.{
+            .signal = outs.fast_sync_out.ref,
+            .load = .{ .value = 5.0, .unit = .ff },
+            .required_min = .{ .value = -0.35, .unit = .ns },
+            .required_max = .{ .value = 0.85, .unit = .ns },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.slow_sync_out.ref,
+            .load = .{ .value = 2.5, .unit = .pf },
+            .required_max = .{ .value = 1.2, .unit = .ns },
+        });
         try mb.addOutputTiming(.{ .signal = outs.fast_async_bus_out.ref, .load = null });
-        try mb.addOutputTiming(.{ .signal = outs.fast_raw_out.ref, .load = null });
+        try mb.addOutputTiming(.{
+            .signal = outs.fast_raw_out.ref,
+            .load = null,
+            .required_max = .{ .value = 300.0, .unit = .ps },
+        });
     }
 };
 
@@ -276,6 +346,7 @@ pub const input_names = [_][]const u8{
     "slow_async_bus[1]",
     "fast_raw_in",
     "slow_raw_in",
+    "ref_clk",
 };
 
 pub const output_names = [_][]const u8{
@@ -396,6 +467,9 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
         drive[22] = if ((row.slow_bus >> 1) & 1 == 1) '1' else '0';
         drive[23] = if (row.fast_raw == 1) '1' else '0';
         drive[24] = if (row.slow_raw == 1) '1' else '0';
+        // External reference clock: metadata-visible in the clock relationship
+        // declarations only; functionally idle at a constant level.
+        drive[25] = '1';
 
         var expect = [_]u8{'0'} ** output_names.len;
         for (0..8) |bit| expect[bit] = if ((fast.q >> @intCast(bit)) & 1 == 1) '1' else '0';
@@ -443,13 +517,44 @@ test "contract fixture elaborates with two renamed instances" {
     try std.testing.expectEqual(@as(usize, 3), top.timing.len);
     try std.testing.expectEqual(@as(usize, 4), top.output_timing.len);
 
-    // Parent rows override child load defaults, including explicit null.
+    // Parent rows override child load defaults and required windows, including
+    // explicit nulls; no parent row keeps the child row in force.
     for (top.output_timing) |intent| {
         if (std.mem.eql(u8, intent.signal.name(), "fast_async_bus_out")) {
             try std.testing.expect(intent.load == null);
+            try std.testing.expect(intent.required_min == null and intent.required_max == null);
         }
         if (std.mem.eql(u8, intent.signal.name(), "fast_sync_out")) {
             try std.testing.expectEqual(@as(f64, 5.0), intent.load.?.value);
+            try std.testing.expectEqual(@as(f64, -0.35), intent.required_min.?.value);
+            try std.testing.expectEqual(@as(f64, 0.85), intent.required_max.?.value);
+        }
+        if (std.mem.eql(u8, intent.signal.name(), "slow_sync_out")) {
+            try std.testing.expect(intent.required_min == null);
+            try std.testing.expectEqual(@as(f64, 1.2), intent.required_max.?.value);
+        }
+    }
+
+    // The clock domain names the real async-assert/sync-release chain and its
+    // relationship to the external reference clock.
+    try std.testing.expectEqual(@as(usize, 1), child.clocks.len);
+    const child_clock = child.clocks[0];
+    try std.testing.expectEqual(netlist.ResetRelease.synchronous, child_clock.reset.release);
+    try std.testing.expectEqual(@as(usize, 2), child_clock.release_synchronizer.len);
+    try std.testing.expectEqualStrings("rel_sync0", child_clock.release_synchronizer[0].signal.name());
+    try std.testing.expectEqualStrings("rel_sync1", child_clock.release_synchronizer[1].signal.name());
+    try std.testing.expectEqual(netlist.ClockRelation.asynchronous, child_clock.relationship.?.relation);
+    try std.testing.expectEqualStrings("ref_clk", child_clock.relationship.?.related_to.?.name());
+
+    // Child output rows carry the required windows; the no-parent-row port
+    // keeps them in force for consumers.
+    for (child.output_timing) |intent| {
+        if (std.mem.eql(u8, intent.signal.name(), "sync_out")) {
+            try std.testing.expectEqual(@as(f64, -0.4), intent.required_min.?.value);
+            try std.testing.expectEqual(@as(f64, 0.9), intent.required_max.?.value);
+        }
+        if (std.mem.eql(u8, intent.signal.name(), "async_pulse")) {
+            try std.testing.expect(intent.required_min != null and intent.required_max == null);
         }
     }
 

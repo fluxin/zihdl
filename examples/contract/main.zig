@@ -39,7 +39,8 @@ pub fn main(init: std.process.Init) !void {
     try cwd.writeFile(io, .{ .sub_path = "out/contract/timing_contract_manifest.txt", .data = manifest });
 
     std.debug.print("Emitted timing-intent contract fixture: out/contract/timing_contract.{{v,json,jsonl,manifest.txt}} + timing_contract_v1.json\n", .{});
-    std.debug.print("  replay: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract_v1.json -vcd-out /tmp/timing-contract.vcd\n", .{});
+    std.debug.print("  replay v2: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract.json -vcd-out /tmp/tc-v2.vcd\n", .{});
+    std.debug.print("  replay v1: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract_v1.json -vcd-out /tmp/tc-v1.vcd\n", .{});
 }
 
 fn sha256Hex(alloc: std.mem.Allocator, bytes: []const u8) ![]const u8 {
@@ -68,9 +69,14 @@ fn buildManifest(alloc: std.mem.Allocator, rtl: []const u8, json: []const u8, js
             "binding: two renamed instances u_fast/u_slow of {s}; resolve child intent through instance connections\n" ++
             "slew: inputs[].slew rise/fall bounds are measured between the explicit low_fraction and high_fraction of the transition; null bound = unknown, never zero\n" ++
             "load: outputs[].load is the additional external load per port bit (ff or pf, one unit per value), excluding internal cell-pin and wire capacitance; null load = unknown\n" ++
-            "resolution: parent output-load rows override the bound child load, explicit null included; no parent row keeps the child load; input rows merge only when compatible, conflicts are errors\n" ++
-            "v1: timing_contract_v1.json is the byte-stable /1 projection (slew and outputs omitted) for consumers without v2 support\n" ++
-            "replay: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract_v1.json -vcd-out /tmp/timing-contract.vcd\n",
+            "required: outputs[].required is the arrival window relative to the destination clock's active edge, same explicit-time shape as arrival; null bound = unknown, never zero; the destination clock stays consumer-resolved\n" ++
+            "reset: clocks[].reset.release_synchronizer names the reset-release chain as (module, signal, bit), first stage first; empty when none is declared\n" ++
+            "relationship: clocks[].relationship is {{ relation, related_to, source_period, jitter }}; relation is synchronous/asynchronous/mesochronous/plesiochronous, related_to is a 1-bit input of the declaring module (null = external reference), times are explicit\n" ++
+            "resolution: parent output rows replace the bound child row as a whole (load and required, explicit nulls included); no parent row keeps the child row; input rows merge only when compatible, conflicts are errors\n" ++
+            "per_bit: slew and load rows apply to every bit of their port; per-bit distinct values are deferred (no consumer analysis can act on them yet)\n" ++
+            "v1: timing_contract_v1.json is the byte-stable /1 projection (slew, outputs/required, release_synchronizer and relationship omitted) for consumers without v2 support\n" ++
+            "replay_v2: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract.json -vcd-out /tmp/tc-v2.vcd\n" ++
+            "replay_v1: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract_v1.json -vcd-out /tmp/tc-v1.vcd\n",
         .{ fixture.top_name, rtl.len, rtl_sha, json.len, json_sha, json_v1.len, json_v1_sha, stim.len, stim_sha, fixture.child_name },
     );
 }

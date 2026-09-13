@@ -67,6 +67,17 @@ fn findOutput(timing: std.json.Value, name: []const u8) ?std.json.Value {
     return null;
 }
 
+/// JSON numbers that happen to have an integral value are emitted as integers;
+/// compare numerically instead of assuming a `std.json.Value` tag.
+fn expectJsonNumber(value: std.json.Value, want: f64) !void {
+    const got = switch (value) {
+        .float => |f| f,
+        .integer => |i| @as(f64, @floatFromInt(i)),
+        else => return error.NotANumber,
+    };
+    try std.testing.expectApproxEqAbs(want, got, 1e-9);
+}
+
 const SinkV2 = struct {
     pub const name = "timing_sink_v2";
     pub const Inputs = struct {
@@ -624,4 +635,360 @@ test "declared vector synchronizer bits survive dead-code elimination" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "reg [1:0]  bus_d0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "reg [1:0]  bus_d1;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "bus_d1 <= bus_d0;") != null);
+}
+
+// ============================================================================
+// v2 additive fields: output required windows, clock relationships and
+// reset-release topology
+// ============================================================================
+
+const SinkFull = struct {
+    pub const name = "timing_sink_full";
+    pub const Inputs = struct {
+        clk: Signal(1),
+        rst_n: Signal(1),
+        ref_clk: Signal(1),
+        data: Signal(4),
+    };
+    pub const Outputs = struct {
+        q: Signal(4),
+        direct: Signal(1),
+    };
+
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        const base = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 100_000_000 };
+        const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, base);
+        const domain = ClockDomain{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .freq_hz = 100_000_000,
+            .reset = .{ .release = .synchronous },
+            .release_synchronizer = &.{
+                .{ .signal = rel.sync0.ref, .bit = 0 },
+                .{ .signal = rel.sync1.ref, .bit = 0 },
+            },
+            .relationship = .{
+                .relation = .asynchronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 10.0, .unit = .ns },
+                .jitter = .{ .value = 0.05, .unit = .ns },
+            },
+        };
+        try mb.addClockDomain(domain);
+        const b = mb.exprs();
+        const q = try mb.reg("q_reg", 4, 0);
+        try mb.assign(outs.q, q);
+        try mb.assign(outs.direct, ins.data.bit(0));
+        try mb.seq(domain, &.{b.assign(q, ins.data)});
+
+        try mb.addOutputTiming(.{
+            .signal = outs.q.ref,
+            .required_min = .{ .value = -0.3, .unit = .ns },
+            .required_max = .{ .value = 1.1, .unit = .ns },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.direct.ref,
+            .required_max = .{ .value = 250, .unit = .ps },
+        });
+    }
+};
+
+test "timing intent v2 exports required windows, clock relationship and release chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkFull);
+    const json = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const again = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    try std.testing.expectEqualStrings(again, json);
+
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const timing = root.object.get("timing_intent").?;
+    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+    const clock = timing.object.get("modules").?.array.items[0].object.get("clocks").?.array.items[0];
+
+    const reset = clock.object.get("reset").?;
+    try std.testing.expectEqualStrings("synchronous", reset.object.get("release").?.string);
+    const chain = reset.object.get("release_synchronizer").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), chain.len);
+    try std.testing.expectEqualStrings("timing_sink_full", chain[0].object.get("module").?.string);
+    try std.testing.expectEqualStrings("rel_sync0", chain[0].object.get("signal").?.string);
+    try std.testing.expectEqual(@as(i64, 0), chain[0].object.get("bit").?.integer);
+    try std.testing.expectEqualStrings("rel_sync1", chain[1].object.get("signal").?.string);
+    try std.testing.expectEqual(@as(i64, 0), chain[1].object.get("bit").?.integer);
+
+    const relationship = clock.object.get("relationship").?;
+    try std.testing.expectEqualStrings("asynchronous", relationship.object.get("relation").?.string);
+    try std.testing.expectEqualStrings("ref_clk", relationship.object.get("related_to").?.string);
+    const source_period = relationship.object.get("source_period").?;
+    try expectJsonNumber(source_period.object.get("value").?, 10.0);
+    try std.testing.expectEqualStrings("ns", source_period.object.get("unit").?.string);
+    const jitter = relationship.object.get("jitter").?;
+    try expectJsonNumber(jitter.object.get("value").?, 0.05);
+
+    const q = findOutput(timing, "q").?;
+    try std.testing.expectEqual(@as(i64, 4), q.object.get("width").?.integer);
+    const required = q.object.get("required").?;
+    try expectJsonNumber(required.object.get("min").?.object.get("value").?, -0.3);
+    try std.testing.expectEqualStrings("ns", required.object.get("min").?.object.get("unit").?.string);
+    try expectJsonNumber(required.object.get("max").?.object.get("value").?, 1.1);
+
+    // Partial window and absent window stay explicit nulls, never zero.
+    const direct = findOutput(timing, "direct").?;
+    const direct_required = direct.object.get("required").?;
+    try std.testing.expect(direct_required.object.get("min").? == .null);
+    try expectJsonNumber(direct_required.object.get("max").?.object.get("value").?, 250);
+}
+
+test "timing intent v1 omits required windows, relationships and release chains" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkFull);
+    const dflt = try metadata.emitDesignJson(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, dflt, "\"required\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dflt, "\"relationship\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dflt, "\"release_synchronizer\"") == null);
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, dflt, .{});
+    const clock = root.object.get("timing_intent").?.object.get("modules").?.array.items[0].object.get("clocks").?.array.items[0];
+    // Existing fields keep their meaning: the release policy itself is emitted.
+    try std.testing.expectEqualStrings("synchronous", clock.object.get("reset").?.object.get("release").?.string);
+}
+
+test "declared reset-release stages survive dead-code elimination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const DanglingRelease = struct {
+        pub const name = "dangling_release";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const base = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, base);
+            // The synchronized release deliberately drives nothing; the
+            // declared topology must still pin the chain into the artifact.
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .reset = .{ .release = .synchronous },
+                .release_synchronizer = &.{
+                    .{ .signal = rel.sync0.ref, .bit = 0 },
+                    .{ .signal = rel.sync1.ref, .bit = 0 },
+                },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(DanglingRelease);
+    const json = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const clock = root.object.get("timing_intent").?.object.get("modules").?.array.items[0].object.get("clocks").?.array.items[0];
+    try std.testing.expectEqual(@as(usize, 2), clock.object.get("reset").?.object.get("release_synchronizer").?.array.items.len);
+
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg         rel_sync0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "rel_sync1 <= rel_sync0;") != null);
+}
+
+test "timing intent validation rejects bad required windows and clock topology" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    const BadRequired = struct {
+        pub const name = "bad_required";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .required_min = .{ .value = 2, .unit = .ns },
+                .required_max = .{ .value = 1, .unit = .ns },
+            });
+        }
+    };
+
+    const NonFiniteRequired = struct {
+        pub const name = "bad_required_nan";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .required_max = .{ .value = std.math.inf(f64), .unit = .ns },
+            });
+        }
+    };
+
+    const ReleaseWithoutSyncPolicy = struct {
+        pub const name = "bad_release_policy";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const base = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, base);
+            // Sync chain declared without declaring synchronous release.
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .release_synchronizer = &.{.{ .signal = rel.sync0.ref, .bit = 0 }},
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const BadReleaseStage = struct {
+        pub const name = "bad_release_stage";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const wrong = try mb.reg("wrong", 2, 0);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .reset = .{ .release = .synchronous },
+                .release_synchronizer = &.{.{ .signal = wrong.ref, .bit = 0 }},
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const DuplicateReleaseStage = struct {
+        pub const name = "bad_release_duplicate";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const base = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            const rel = try lib.resetSyncStages(mb, "rel", ins.rst_n, base);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .reset = .{ .release = .synchronous },
+                .release_synchronizer = &.{
+                    .{ .signal = rel.sync0.ref, .bit = 0 },
+                    .{ .signal = rel.sync0.ref, .bit = 0 },
+                },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const SelfRelationship = struct {
+        pub const name = "bad_relationship_self";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{ .relation = .asynchronous, .related_to = ins.clk.ref },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const BadRelationshipTarget = struct {
+        pub const name = "bad_relationship_target";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .mesochronous,
+                    .related_to = outs.y.ref,
+                    .source_period = .{ .value = 8, .unit = .ns },
+                },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const BadJitter = struct {
+        pub const name = "bad_relationship_jitter";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), ref_clk: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .plesiochronous,
+                    .related_to = ins.ref_clk.ref,
+                    .source_period = .{ .value = 1, .unit = .ns },
+                    .jitter = .{ .value = 2, .unit = .ns },
+                },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    const NegativeSourcePeriod = struct {
+        pub const name = "bad_relationship_period";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .synchronous,
+                    .source_period = .{ .value = -8, .unit = .ns },
+                },
+            });
+            try mb.assign(outs.y, ins.a);
+        }
+    };
+
+    try expectIntentError(BadRequired);
+    try expectIntentError(NonFiniteRequired);
+    try expectIntentError(ReleaseWithoutSyncPolicy);
+    try expectIntentError(BadReleaseStage);
+    try expectIntentError(DuplicateReleaseStage);
+    try expectIntentError(SelfRelationship);
+    try expectIntentError(BadRelationshipTarget);
+    try expectIntentError(BadJitter);
+    try expectIntentError(NegativeSourcePeriod);
 }

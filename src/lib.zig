@@ -276,12 +276,24 @@ pub fn pulseSync(
     return b.bxor(q2.expr(), q3.expr());
 }
 
+/// Result of `resetSyncStages`: the synchronized release plus the two stage
+/// registers, so a domain can name the chain in its `release_synchronizer`
+/// timing metadata.
+pub const ResetSync = struct {
+    /// Synchronized release output; use as the reset of the released domain.
+    out: Signal(1),
+    /// First (asynchronously asserted) release stage.
+    sync0: Signal(1),
+    /// Final release stage; the same signal as `out`.
+    sync1: Signal(1),
+};
+
 /// Reset synchronizer: asynchronously asserts the active-low output while
 /// `raw_rst_n` is low, and releases it synchronously to `domain.clk` (classic
 /// async-assert / sync-release). The output releases two `domain` edges after
 /// `raw_rst_n` rises; use it as the `rst_n` of a domain whose reset policy has
 /// `release = .synchronous`.
-pub fn resetSync(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domain: ClockDomain) !Signal(1) {
+pub fn resetSyncStages(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domain: ClockDomain) !ResetSync {
     const b = mb.exprs();
     const s0 = try mb.reg(try memberName(mb, name, "sync0"), 1, 0);
     const s1 = try mb.reg(try memberName(mb, name, "sync1"), 1, 0);
@@ -289,7 +301,12 @@ pub fn resetSync(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domai
         b.assign(s0, 1),
         b.assign(s1, s0.expr()),
     });
-    return s1;
+    return .{ .out = s1, .sync0 = s0, .sync1 = s1 };
+}
+
+/// `resetSyncStages` returning only the synchronized release output.
+pub fn resetSync(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domain: ClockDomain) !Signal(1) {
+    return (try resetSyncStages(mb, name, raw_rst_n, domain)).out;
 }
 
 // ============================================================================

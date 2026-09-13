@@ -1255,6 +1255,14 @@ pub const ClockDomain = struct {
     power: PowerDomain = .{},
     freq_hz: u64 = 120_000_000,
     reset: ResetPolicy = .{},
+    /// Declared reset-release synchronizer chain (v2 timing metadata), first
+    /// stage first. Stages resolve against the declaring module's scope and
+    /// must be registers matching the reset width. Empty means no chain is
+    /// declared; it is descriptive only and never changes emitted RTL.
+    release_synchronizer: []const SyncStage = &.{},
+    /// Authored relationship to a reference clock (v2 timing metadata); null
+    /// keeps the relationship undeclared.
+    relationship: ?ClockRelationship = null,
 };
 
 /// Reset polarity and assertion/release policy for a clock domain. `polarity`
@@ -1335,12 +1343,18 @@ pub const LoadValue = struct {
     unit: LoadUnit = .ff,
 };
 
-/// Authored timing intent for one output port. Only declare a load when a
-/// real design requirement exists; absence keeps the load unknown.
+/// Authored timing intent for one output port. Only declare a load or a
+/// required window when a real design requirement exists; absence keeps the
+/// value unknown.
 pub const OutputTiming = struct {
     signal: SymRef,
     /// Additional external load per port bit; null keeps it unknown.
     load: ?LoadValue = null,
+    /// Required arrival window relative to the destination clock's active
+    /// edge (the consumer resolves which clock); null keeps each bound
+    /// unknown. Bounds may be negative (before the edge) or positive (after).
+    required_min: ?TimeValue = null,
+    required_max: ?TimeValue = null,
 };
 
 /// Authored timing intent for one input port. Arrival windows are only legal
@@ -1369,6 +1383,24 @@ pub fn timeValueInPs(value: TimeValue) f64 {
         .ms => value.value * 1_000_000_000.0,
     };
 }
+
+/// Relation of one clock domain to a reference/source clock. `mesochronous`
+/// shares a frequency with an unknown phase; `plesiochronous` has close but
+/// independent frequencies.
+pub const ClockRelation = enum { synchronous, asynchronous, mesochronous, plesiochronous };
+
+/// Authored relationship of one clock domain to a reference clock (v2 timing
+/// metadata). Every field except the relation itself may stay unknown.
+pub const ClockRelationship = struct {
+    relation: ClockRelation,
+    /// Related clock port in the declaring module; null means an external
+    /// reference that is not a port of this module.
+    related_to: ?SymRef = null,
+    /// Period of the referenced source clock; null keeps it unknown.
+    source_period: ?TimeValue = null,
+    /// Jitter allowance of the relationship; null keeps it unknown.
+    jitter: ?TimeValue = null,
+};
 
 // ============================================================================
 // Target-neutral design metadata
@@ -2184,9 +2216,12 @@ pub const ModuleBuilder = struct {
         try self.addEnumGroup(name, @max(1, @bitSizeOf(E)), &entries, null);
     }
 
-    /// Records a clock domain for timing metadata (SDC export).
+    /// Records a clock domain for timing metadata (SDC export). The declared
+    /// reset-release chain is copied so the caller's slice may be temporary.
     pub fn addClockDomain(self: *ModuleBuilder, domain: ClockDomain) !void {
-        try self.clocks.append(self.allocator, domain);
+        var row = domain;
+        row.release_synchronizer = try self.allocator.dupe(SyncStage, domain.release_synchronizer);
+        try self.clocks.append(self.allocator, row);
     }
 
     pub fn mem(self: *ModuleBuilder, comptime W: usize, name: []const u8, depth: usize, opts: MemOpts) !Mem(W) {
@@ -2847,9 +2882,12 @@ pub const ModuleBuilder = struct {
     /// module, input rows must reference input ports, output rows must
     /// reference output ports, synchronizer stages must be registers of the
     /// input's width, arrival windows must be synchronous and ordered, slew
-    /// windows ordered with explicit fractions, and loads finite and
-    /// non-negative. Missing fields are left unknown rather than inferred.
+    /// windows ordered with explicit fractions, loads finite and
+    /// non-negative, output required windows ordered, and declared clock
+    /// release chains/relationships well-formed. Missing fields are left
+    /// unknown rather than inferred.
     fn validateTimingIntent(self: *ModuleBuilder) !void {
+        try self.validateClockTiming();
         for (self.timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .input) {
                 std.log.warn("js_asic: timing intent for '{s}' in module '{s}' must reference an input port of this module", .{ intent.signal.name(), self.name });
@@ -2929,6 +2967,89 @@ pub const ModuleBuilder = struct {
                     return error.InvalidTimingIntent;
                 }
             }
+            if (intent.required_min != null or intent.required_max != null) {
+                inline for (.{ intent.required_min, intent.required_max }) |bound| {
+                    if (bound) |value| {
+                        if (!std.math.isFinite(value.value)) {
+                            std.log.warn("js_asic: output timing required time for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
+                            return error.InvalidTimingIntent;
+                        }
+                    }
+                }
+                if (intent.required_min != null and intent.required_max != null and
+                    timeValueInPs(intent.required_min.?) > timeValueInPs(intent.required_max.?))
+                {
+                    std.log.warn("js_asic: output timing required window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+        }
+    }
+
+    /// Validates declared clock-domain timing intent: the reset-release
+    /// synchronizer names registers of this module whose width matches the
+    /// reset, the release policy is synchronous when a chain is declared, and
+    /// clock relationships reference a 1-bit input of this module with finite,
+    /// non-negative periods and jitter no larger than the source period.
+    fn validateClockTiming(self: *ModuleBuilder) !void {
+        for (self.clocks.items) |clock| {
+            if (clock.release_synchronizer.len > 0) {
+                if (clock.reset.release != .synchronous) {
+                    std.log.warn("js_asic: clock domain '{s}' in module '{s}' declares a reset-release synchronizer but its release policy is not synchronous", .{ clock.name, self.name });
+                    return error.InvalidTimingIntent;
+                }
+                const reset_width = clock.rst_n.ref.width();
+                for (clock.release_synchronizer, 0..) |stage, si| {
+                    if (stage.signal.scope != self.scope) {
+                        std.log.warn("js_asic: reset-release stage {d} for clock domain '{s}' in module '{s}' is not in this module", .{ si, clock.name, self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                    const sym = stage.signal.symbol();
+                    const is_reg = sym.kind == .reg or (sym.kind == .output and sym.is_reg);
+                    if (!is_reg or sym.width != reset_width) {
+                        std.log.warn("js_asic: reset-release stage '{s}' for clock domain '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), clock.name, self.name, reset_width });
+                        return error.InvalidTimingIntent;
+                    }
+                    if (stage.bit) |bit| {
+                        if (bit >= sym.width) {
+                            std.log.warn("js_asic: reset-release stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
+                            return error.InvalidTimingIntent;
+                        }
+                    }
+                    for (clock.release_synchronizer[0..si]) |other| {
+                        if (other.signal.scope == stage.signal.scope and other.signal.idx == stage.signal.idx and other.bit == stage.bit) {
+                            std.log.warn("js_asic: duplicate reset-release stage '{s}' for clock domain '{s}' in module '{s}'", .{ stage.signal.name(), clock.name, self.name });
+                            return error.InvalidTimingIntent;
+                        }
+                    }
+                }
+            }
+            if (clock.relationship) |rel| {
+                if (rel.related_to) |ref| {
+                    if (ref.scope != self.scope or ref.kind() != .input or ref.width() != 1) {
+                        std.log.warn("js_asic: clock relationship target for domain '{s}' in module '{s}' must be a 1-bit input of this module", .{ clock.name, self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                    if (ref.scope == clock.clk.ref.scope and ref.idx == clock.clk.ref.idx) {
+                        std.log.warn("js_asic: clock domain '{s}' in module '{s}' relates to itself", .{ clock.name, self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+                inline for (.{ rel.source_period, rel.jitter }) |bound| {
+                    if (bound) |value| {
+                        if (!std.math.isFinite(value.value) or value.value < 0) {
+                            std.log.warn("js_asic: clock relationship for domain '{s}' in module '{s}' must use finite, non-negative times", .{ clock.name, self.name });
+                            return error.InvalidTimingIntent;
+                        }
+                    }
+                }
+                if (rel.source_period != null and rel.jitter != null and
+                    timeValueInPs(rel.jitter.?) > timeValueInPs(rel.source_period.?))
+                {
+                    std.log.warn("js_asic: clock relationship for domain '{s}' in module '{s}' declares jitter larger than the source period", .{ clock.name, self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
         }
     }
 
@@ -2994,6 +3115,11 @@ pub const ModuleBuilder = struct {
         // references; inputs (clocks/resets) are live by construction.
         for (self.timing.items) |intent| {
             for (intent.stages) |stage| {
+                if (stage.signal.scope == self.scope) live[stage.signal.idx] = true;
+            }
+        }
+        for (self.clocks.items) |clock| {
+            for (clock.release_synchronizer) |stage| {
                 if (stage.signal.scope == self.scope) live[stage.signal.idx] = true;
             }
         }

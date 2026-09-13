@@ -39,6 +39,7 @@ Everything else hangs off that. The public surface is exported through
 | `MemOpts`, `ReadKind`, `WriteMode` | memory modes |
 | `EnumGroup`, `EnumEntry`, `FsmInfo`, `Bundle`, `BundleMember` | metadata shapes |
 | `InputTiming`, `OutputTiming`, `SlewTiming`, `LoadValue`, `SyncStage` | timing intent |
+| `ClockRelation`, `ClockRelationship` | clock-domain relationship intent |
 | `ForeignSource`, `BlackBox` | verbatim foreign modules with typed ports |
 | `FoldEvent`, `GroupTag` | provenance inputs |
 
@@ -77,9 +78,9 @@ Everything else hangs off that. The public surface is exported through
 `regNext`, `regEnable`, `muxLookup`, `rotl`, `rotr`, `past`, `rose`, `fell`,
 `stable`, `changed`; `Stream(W)` with `streamSource`/`streamSink`/
 `streamWire`/`connectStream`/`regStream`; `sync2`, `syncInput`, `pulseSync`,
-`resetSync`; `decode`, `priorityEncode`, `isOneHot`; `stateWidth`,
-`StateEncoding`, `StateMachine` (`create`, `current`, `param`, `goto`, `arm`,
-`case_`, `run`).
+`resetSync`, `resetSyncStages`; `decode`, `priorityEncode`, `isOneHot`;
+`stateWidth`, `StateEncoding`, `StateMachine` (`create`, `current`, `param`,
+`goto`, `arm`, `case_`, `run`).
 
 ### blocks
 
@@ -92,7 +93,7 @@ Everything else hangs off that. The public surface is exported through
 |---|---|
 | `verilog.emitModule` / `emitModuleInto` / `emitDesign` | Verilog-2001 (portable default) |
 | `systemverilog.emitModule` / `emitDesign` | SystemVerilog (`logic`, `always_*`, enums, packed struct bundles) |
-| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default, v2 opt-in), provenance |
+| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, output load/required and clock relationship/reset-release topology), provenance |
 | `sdc.emitDesignSdc` | `create_clock`, uncertainty, reset false paths |
 | `provenance.Collector` | operation rows, authored groups, byte-exact RTL spans, artifact hash binding |
 | `timing_contract` fixture | the consumer contract fixture (RTL, v2 JSON, v1 projection, stimulus, manifest) |
@@ -109,7 +110,8 @@ Everything else hangs off that. The public surface is exported through
    before any backend runs.
 4. **Metadata is additive and versioned.** Provenance, timing intent and enum
    groups never change RTL bytes. Products emit `js_asic.timing_intent/1`;
-   `/2` (slew/load) is opt-in and fixture-only until consumers pass it.
+   `/2` (slew/load/required, clock relationships, reset-release topology) is
+   opt-in and adds fields without changing `/1` or existing `/2` field bytes.
 5. **DCE preserves declared identity.** Anything named by sidecar metadata
    stays live (e.g. declared synchronizer stages).
 
@@ -172,9 +174,10 @@ rather than the authoring half of this specific project.
 
 **Timing and constraints**
 - Timing intent covers input classification, synchronizer stages, arrival
-  windows, reset policy and (v2) slew/load. Still deferred: output required
-  times, reset-release synchronization chains, external clock
-  relationships/jitter, per-bit slew/load, and clock/domain on outputs.
+  windows, reset policy, slew/load, output required windows, clock
+  relationships and reset-release topology. Still deferred: per-bit slew/load
+  (rows apply to every bit), destination-clock identity on outputs,
+  deeper-than-immediate-child resolution, and clock/domain on outputs.
 - SDC emits clocks, uncertainty and reset false paths; no IO delays, generated
   clocks or multicycle paths.
 
@@ -213,9 +216,9 @@ rather than the authoring half of this specific project.
 3. **Parameter propagation**: a way for a parent parameter to specialize a
    child's structural widths/depths, so generated suites do not need comptime
    duplication.
-4. **Finish the timing-intent v2 backlog** once `oasic` accepts `/2`: output
-   required times, clock relationships, reset-release synchronizer identity,
-   per-bit slew/load.
+4. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
+   rows, a destination-clock identity on outputs, deeper-than-immediate-child
+   resolution, and /3 only for incompatible schema changes.
 5. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.
@@ -229,6 +232,8 @@ rather than the authoring half of this specific project.
 - The artifact schemas carry their own version strings and are the actual
   compatibility contract: `js_asic.design/1`, `js_asic.timing_intent/1` and
   `js_asic.provenance/1` are byte-stable, and `/2` timing intent is opt-in.
+  Optional fields added under `/2` are ignored by consumers that do not read
+  them, so `/3` is reserved for incompatible changes.
 - `oasic.stimulus/1` is the fixture/consumer stimulus contract; it lives in
   `src/backend/timing_contract_fixture.zig` and is built by an independent
   cycle model, never from emitted RTL.

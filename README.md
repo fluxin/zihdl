@@ -57,16 +57,23 @@ hierarchical binding tests.
 ### Timing intent v2 (opt-in)
 
 `Options.timing_intent_version = 2` emits `js_asic.timing_intent/2`: the v1
-section plus input slew and output load declarations. The default stays v1 and
-v1 output is byte-for-byte unchanged, so products and existing consumers never
-see a new schema unless a runner asks for one. The fixture passes v2; product
-runners stay v1.
+section plus input slew, output load/required declarations and clock
+relationship/reset-release topology. The default stays v1 and v1 output is
+byte-for-byte unchanged, so products and existing consumers never see a new
+schema unless a runner asks for one. The fixture passes v2; product runners
+stay v1. New fields are additive under `/2` because consumers skip unknown
+JSON fields and the version gate promises capabilities, not byte layout; a
+consumer that does not read a field keeps it unknown. `/3` is reserved for
+incompatible schema changes.
 
 | Field | Meaning |
 |---|---|
 | `inputs[].slew.threshold.low_fraction` / `high_fraction` | Explicit fractions of the transition's low/high levels (for example `0.1` and `0.9` for a 10 %–90 % measurement). Always authored: the library never defaults a measurement basis. |
 | `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
 | `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
+| `outputs[].required.min` / `.max` | Required arrival window relative to the destination clock's active edge, same explicit-time shape as `arrival`. A null bound is unknown, never zero; the destination clock stays consumer-resolved. |
+| `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first. Empty when none is declared; stages must be registers matching the reset width. |
+| `clocks[].relationship.relation` / `.related_to` / `.source_period` / `.jitter` | Relation to a reference clock (`synchronous`, `asynchronous`, `mesochronous`, `plesiochronous`), the related 1-bit input in the declaring module (`null` means an external reference), and explicit source period / jitter times. |
 
 #### Hierarchy resolution
 
@@ -74,10 +81,10 @@ Rows are authored per module definition and may be refined at the instantiating
 port. Consumers resolve them when joining parent ports to child rows through
 the `instances` connection table:
 
-- **Output loads:** a parent output row overrides the child module's load for
-  that physical port, including an explicit `load: null` (unknown), which masks
-  the child's value. With no parent row, the child's declaration stays in
-  force.
+- **Output rows:** a parent output row replaces the child module's whole output
+  row for that physical port — load and required together, including explicit
+  `null`s (unknown), which mask the child's value. With no parent row, the
+  child's declaration stays in force.
 - **Input timing:** parent and child rows merge field by field only when
   compatible (same classification, clock/domain and synchronizer shape);
   fields declared on one side fill in the other. Conflicting declarations for
@@ -89,14 +96,19 @@ The fixture's canonical artifact is `out/contract/timing_contract.json` (v2);
 consumers that do not parse v2 yet. Both bind the same RTL and stimulus. It
 covers both arrival bounds, a 2-bit vector synchronizer (per-bit vector stage
 identities are unit-test covered; current consumers reject them), an
-intentionally unsynchronized input, reset policy, declared-but-unknown (null)
-slew/load values, both load units, child load defaults with per-instance
-parent overrides (value, unit change and explicit null) and no-parent-row
-fallback, plus compatible parent/child input merges (parent slew, child
+intentionally unsynchronized input, reset policy with a declared
+async-assert/sync-release chain, an asynchronous parent and child clock
+relationship to an external reference, declared-but-unknown (null)
+slew/load/required values, both load units, output required windows, child
+output defaults with per-instance parent row overrides (value, unit change,
+explicit null and required replacement) and no-parent-row fallback, plus
+compatible parent/child input merges (parent slew, child
 classification/synchronizer/arrival).
 
-Still deferred to a later version: output required times, reset-release
-synchronization and external clock relationships.
+Per-bit slew/load stays whole-port: one row applies to every bit of its port
+and per-bit distinct values remain deferred until a consumer analysis can act
+on them. Deeper-than-immediate-child resolution and a destination-clock
+identity on outputs remain open as well.
 
 ## Quick Start
 
@@ -137,7 +149,7 @@ holes matter for general-purpose use; the detailed review is in
 | Parameterization | Widths/depths are comptime type arguments; value parameters are 64-bit and cannot size ports or memories, so a parent cannot specialize a child's shape |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
 | Clocking / CDC / IP | Async FIFO and pulse/reset synchronizers landed; remaining: request/ack bridge, mailboxes, CDC structural lint, and Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers); `ResetPolicy.release` itself still does not lower a synchronizer |
-| Timing / constraints | Output required times, external clock relationships, reset-release synchronization and per-bit slew/load remain deferred; SDC has no IO delays, multicycle or generated clocks |
+| Timing / constraints | Output required times, clock relationships and reset-release topology are authored (v2); per-bit slew/load, destination-clock identity on outputs and deeper-than-immediate-child resolution remain deferred; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
 | Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
 
