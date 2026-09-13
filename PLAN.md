@@ -184,7 +184,8 @@ oasic-side development required for this:
 9. **Clock/reset semantics (done).** `Reset` with async/sync × active-low/high
    kinds (`seqReset`, `seqResetEnable`), clock enables (`seqEnable`), multiple
    clock domains (already per-process), and `sync2` two-flop synchronizer for
-   CDC. An async FIFO is deferred to the Phase 3 IP library.
+   CDC. The async FIFO landed as `blocks.AsyncFifoBlock`, with the
+   `blocks.FifoMailboxBlock` ready/valid wrapper above it.
 10. **Assertions (partial).** `assert_` / `assume_` / `cover_` are emitted as
     immediate SVA guarded by `` `ifdef JS_ASIC_ASSERT `` (opt-in, so the
     portable Verilog-2001 baseline and lint stay clean), and exported as text in
