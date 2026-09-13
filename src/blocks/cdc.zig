@@ -1,7 +1,9 @@
 //! Clock-domain-crossing blocks: a four-phase request/acknowledge handshake
-//! bridge and a single-slot mailbox, both built from explicit two-flop
-//! synchronizers on the request and acknowledge levels. Data crosses as stable
-//! bundled data held by the source while the handshake is in flight.
+//! bridge, a quasi-static bundled-data crossing, a single-slot mailbox, a
+//! depth-parameterized FIFO mailbox and a reset synchronizer. The bridge and
+//! bundled-data blocks each cross a request/acknowledge level through
+//! two-flop synchronizers; data crosses as stable bundled data held by the
+//! source while the handshake is in flight.
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
@@ -94,6 +96,91 @@ pub fn ReqAckBridgeBlock(comptime data_width: usize) type {
                     b.assign(dst_valid_r, 0),
                     b.assign(ack_r, 0),
                 }, &.{}),
+            });
+        }
+    };
+}
+
+/// Quasi-static bundled-data crossing: the source holds `src_data` stable
+/// while its request level crosses into the destination, the destination
+/// samples `dst_data` directly while `dst_valid` is high and answers with
+/// `dst_ack`, and only then may the source change the data. Unlike
+/// `ReqAckBridgeBlock` there is no destination capture register, so wide buses
+/// cross without a second data register and the destination may consume the
+/// held word over several cycles.
+pub fn BundledDataBlock(comptime data_width: usize) type {
+    comptime {
+        if (data_width < 1) @compileError("BundledDataBlock requires data_width >= 1");
+    }
+    return struct {
+        pub const name = std.fmt.comptimePrint("bundled_data_{d}", .{data_width});
+        pub const width_val = data_width;
+
+        pub const Inputs = struct {
+            src_clk: Signal(1),
+            src_rst_n: Signal(1),
+            src_valid: Signal(1),
+            src_data: Signal(data_width),
+            dst_clk: Signal(1),
+            dst_rst_n: Signal(1),
+            dst_ack: Signal(1),
+        };
+
+        pub const Outputs = struct {
+            src_ready: Signal(1),
+            dst_valid: Signal(1),
+            dst_data: Signal(data_width),
+        };
+
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            const src = ClockDomain{ .name = "src", .clk = ins.src_clk, .rst_n = ins.src_rst_n };
+            const dst = ClockDomain{ .name = "dst", .clk = ins.dst_clk, .rst_n = ins.dst_rst_n };
+            try mb.addClockDomain(src);
+            try mb.addClockDomain(dst);
+
+            // Source domain: the held data register, the request level and a
+            // busy flag that clears only after the acknowledge has returned
+            // low, so the data cannot change before the destination consumed
+            // it.
+            const data_r = try mb.reg("data_r", data_width, 0);
+            const req_r = try mb.reg("req_r", 1, 0);
+            const busy_r = try mb.reg("busy_r", 1, 0);
+            const ack_d0 = try mb.reg("ack_d0", 1, 0);
+            const ack_d1 = try mb.reg("ack_d1", 1, 0);
+
+            // Destination domain: request synchronizer and the acknowledge
+            // level the consumer drives with `dst_ack`.
+            const req_d0 = try mb.reg("req_d0", 1, 0);
+            const req_d1 = try mb.reg("req_d1", 1, 0);
+            const ack_r = try mb.reg("ack_r", 1, 0);
+
+            try mb.assign(outs.src_ready, b.not(busy_r.expr()));
+            try mb.assign(outs.dst_valid, req_d1.expr());
+            try mb.assign(outs.dst_data, data_r.expr());
+
+            try mb.seq(src, &.{
+                b.when(b.and_(ins.src_valid.expr(), b.not(busy_r.expr())), &.{
+                    b.assign(data_r, ins.src_data.expr()),
+                    b.assign(req_r, 1),
+                    b.assign(busy_r, 1),
+                }, &.{}),
+                b.when(ack_d1.expr(), &.{b.assign(req_r, 0)}, &.{}),
+                b.when(b.and_(b.not(ack_d1.expr()), b.and_(busy_r.expr(), b.not(req_r.expr()))), &.{
+                    b.assign(busy_r, 0),
+                }, &.{}),
+                b.assign(ack_d0, ack_r.expr()),
+                b.assign(ack_d1, ack_d0.expr()),
+            });
+
+            try mb.seq(dst, &.{
+                b.assign(req_d0, req_r.expr()),
+                b.assign(req_d1, req_d0.expr()),
+                b.when(b.and_(req_d1.expr(), ins.dst_ack.expr()), &.{b.assign(ack_r, 1)}, &.{}),
+                b.when(b.not(req_d1.expr()), &.{b.assign(ack_r, 0)}, &.{}),
             });
         }
     };
@@ -319,6 +406,30 @@ test "request/acknowledge bridge elaborates with dual-clock synchronizers" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "dst_valid_r <= 1'b1;") != null);
 }
 
+test "bundled-data crossing holds the source word until the acknowledge returns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = netlist.Design.init(alloc);
+    _ = try design.elaborate(BundledDataBlock(8));
+    const mod = design.findModule("bundled_data_8").?;
+    try std.testing.expectEqual(@as(usize, 2), mod.clocks.len);
+
+    const rtl = try @import("../backend/verilog.zig").emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "module bundled_data_8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign dst_valid = req_d1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign dst_data = data_r;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign src_ready = tmp0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "req_d0 <= req_r;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "ack_d0 <= ack_r;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "if ((req_d1 && dst_ack)) begin") != null);
+
+    const crossings = try @import("../cdc.zig").lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 0), crossings.len);
+}
+
 test "mailbox keeps the slot until the read consumes it" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -385,7 +496,7 @@ test "reset synchronizer declares its release chain and releases through it" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign rst_n_sync = sync1;") != null);
 }
 
-test "CDC lint is clean on the async FIFO, handshake bridge, mailbox and FIFO mailbox" {
+test "CDC lint is clean on the async FIFO, handshake bridge, bundled data, mailboxes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -401,6 +512,12 @@ test "CDC lint is clean on the async FIFO, handshake bridge, mailbox and FIFO ma
     const bridge_crossings = try @import("../cdc.zig").lint(alloc, &bridge_design);
     defer alloc.free(bridge_crossings);
     try std.testing.expectEqual(@as(usize, 0), bridge_crossings.len);
+
+    var bundled_design = netlist.Design.init(alloc);
+    _ = try bundled_design.elaborate(BundledDataBlock(8));
+    const bundled_crossings = try @import("../cdc.zig").lint(alloc, &bundled_design);
+    defer alloc.free(bundled_crossings);
+    try std.testing.expectEqual(@as(usize, 0), bundled_crossings.len);
 
     var mailbox_design = netlist.Design.init(alloc);
     _ = try mailbox_design.elaborate(MailboxBlock(4));

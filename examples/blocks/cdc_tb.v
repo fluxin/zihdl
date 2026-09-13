@@ -1,10 +1,11 @@
 // Behavioral replay for the js_asic CDC witness: a four-phase request/
-// acknowledge bridge, a single-slot mailbox and a FIFO-backed mailbox, each
-// crossing a 10 ns source clock and a 6.2 ns destination clock. The bridge
-// sends eight words and checks capture ordering; the single-slot mailbox proves
-// a pending word survives until the reader consumes it and that the writer
-// cannot overwrite it; the FIFO mailbox buffers four words and returns them in
-// order.
+// acknowledge bridge, a quasi-static bundled-data crossing, a single-slot
+// mailbox and a FIFO-backed mailbox, each crossing a 10 ns source clock and a
+// 6.2 ns destination clock. The bridge sends eight words and checks capture
+// ordering; the bundled-data block holds each word stable at the destination
+// until the consumer acknowledges; the single-slot mailbox proves a pending
+// word survives until the reader consumes it and that the writer cannot
+// overwrite it; the FIFO mailbox buffers four words and returns them in order.
 `timescale 1ns/1ps
 
 module cdc_tb;
@@ -15,6 +16,13 @@ module cdc_tb;
     wire src_ready;
     wire dst_valid;
     wire [7:0] dst_data;
+
+    reg bd_src_valid;
+    reg [7:0] bd_src_data;
+    reg bd_dst_ack;
+    wire bd_src_ready;
+    wire bd_dst_valid;
+    wire [7:0] bd_dst_data;
 
     reg wr_clk, rd_clk;
     reg wr_rst_n, rd_rst_n;
@@ -46,6 +54,19 @@ module cdc_tb;
         .src_ready(src_ready),
         .dst_valid(dst_valid),
         .dst_data(dst_data)
+    );
+
+    bundled_data_8 bundled (
+        .src_clk(src_clk),
+        .src_rst_n(src_rst_n),
+        .src_valid(bd_src_valid),
+        .src_data(bd_src_data),
+        .dst_clk(dst_clk),
+        .dst_rst_n(dst_rst_n),
+        .dst_ack(bd_dst_ack),
+        .src_ready(bd_src_ready),
+        .dst_valid(bd_dst_valid),
+        .dst_data(bd_dst_data)
     );
 
     mailbox_8 mailbox (
@@ -119,6 +140,9 @@ module cdc_tb;
         fmb_wr_en = 0;
         fmb_wdata = 0;
         fmb_rd_en = 0;
+        bd_src_valid = 0;
+        bd_src_data = 0;
+        bd_dst_ack = 0;
 
         repeat (4) @(posedge src_clk);
         src_rst_n = 1;
@@ -142,6 +166,32 @@ module cdc_tb;
             end
             @(negedge src_clk);
             while (!src_ready) @(negedge src_clk);
+        end
+
+        // Bundled data: the destination reads the held word directly and the
+        // source may only change it after the acknowledge has crossed back.
+        for (i = 0; i < 4; i = i + 1) begin
+            expect = 8'h60 + i;
+            @(negedge src_clk);
+            while (!bd_src_ready) @(negedge src_clk);
+            bd_src_data = expect;
+            bd_src_valid = 1;
+            @(negedge src_clk);
+            bd_src_valid = 0;
+            @(negedge dst_clk);
+            while (!bd_dst_valid) @(negedge dst_clk);
+            if (bd_dst_data !== expect) begin
+                $display("FAIL: bundled[%0d]=%02x expected %02x", i, bd_dst_data, expect);
+                errors = errors + 1;
+            end
+            repeat (2) @(posedge dst_clk);
+            if (bd_dst_data !== expect) begin
+                $display("FAIL: bundled[%0d] changed while valid: %02x", i, bd_dst_data);
+                errors = errors + 1;
+            end
+            bd_dst_ack = 1;
+            @(negedge dst_clk);
+            bd_dst_ack = 0;
         end
 
         // Mailbox: a written word stays pending until read, and wr_ready
@@ -197,7 +247,7 @@ module cdc_tb;
         end
 
         if (errors == 0) begin
-            $display("PASS: request/acknowledge bridge and mailbox/FIFO-mailbox handshakes verified");
+            $display("PASS: bridge, bundled-data and mailbox/FIFO-mailbox handshakes verified");
             $finish;
         end else begin
             $display("FAIL: CDC witness reported %0d errors", errors);

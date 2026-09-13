@@ -90,8 +90,8 @@ declaration, so their outputs stay signed); `Stream(W)` and
 ### blocks
 
 `SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
-`ReqAckBridgeBlock`, `MailboxBlock`, `FifoMailboxBlock`, `ResetSyncBlock`,
-`ShiftRegisterBlock`, `EdgeDetectorBlock`, `CounterBlock`.
+`ReqAckBridgeBlock`, `BundledDataBlock`, `MailboxBlock`, `FifoMailboxBlock`,
+`ResetSyncBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`, `CounterBlock`.
 
 ### cdc
 
@@ -216,12 +216,12 @@ rather than the authoring half of this specific project.
   to drive the released domain's reset. The policy field itself still does not
   generate the chain.
 - `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock`,
-  `MailboxBlock` and `FifoMailboxBlock` cover level, edge, gray-pointer and
-  bundled-data handshake crossings, and `cdc.lint` audits elaborated designs
-  structurally. The lint is heuristic: it cannot see metastability risk beyond
-  structure, it tracks ownership and structural first flops per data bit but
-  falls back to whole-signal reporting for shapes or widths it cannot map
-  precisely, and a formal crossing proof is future work.
+  `BundledDataBlock`, `MailboxBlock` and `FifoMailboxBlock` cover level, edge,
+  gray-pointer and bundled-data handshake crossings, and `cdc.lint` audits
+  elaborated designs structurally. The lint is heuristic: it cannot see
+  metastability risk beyond structure, it tracks ownership and structural first
+  flops per data bit but falls back to whole-signal reporting for shapes or
+  widths it cannot map precisely, and a formal crossing proof is future work.
 - No clock divider/PLL/gating primitives; PLLs are foreign macros.
 - No multi-clock-domain structural check beyond per-process reset coverage and
   the opt-in `cdc.lint` pass.
@@ -260,10 +260,11 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **CDC depth.** The bridge, mailbox, FIFO mailbox, async FIFO and structural
-   lint, now with per-bit ownership, per-bit declared/structural coverage and
-   hierarchy-resolved asynchronous-input coverage, landed; next are wider
-   bundled-data handshake shapes. A formal crossing proof stays consumer-side.
+1. **CDC depth (authoring side done).** The handshake block family (four-phase
+   bridge, quasi-static bundled data, single-slot and FIFO mailboxes, async
+   FIFO) and the structural lint, with per-bit ownership, per-bit
+   declared/structural coverage and hierarchy-resolved asynchronous-input
+   coverage, landed. A formal crossing proof stays consumer-side.
 2. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape

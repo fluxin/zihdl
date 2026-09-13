@@ -15,6 +15,7 @@ pub const TtSramBlock = sram.TtSramBlock;
 pub const FifoBlock = fifo.FifoBlock;
 pub const AsyncFifoBlock = async_fifo.AsyncFifoBlock;
 pub const ReqAckBridgeBlock = cdc.ReqAckBridgeBlock;
+pub const BundledDataBlock = cdc.BundledDataBlock;
 pub const MailboxBlock = cdc.MailboxBlock;
 pub const FifoMailboxBlock = cdc.FifoMailboxBlock;
 pub const ResetSyncBlock = cdc.ResetSyncBlock;
