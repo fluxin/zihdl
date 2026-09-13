@@ -69,6 +69,24 @@ builds dependencies on first use, keyed by the comptime-mangled `name`, so a
 definition is emitted exactly once no matter how many instances use it or how
 they are parameterized.
 
+A **block family** replaces `Inputs`/`Outputs` with a `Shape` schema plus
+`specialize(comptime shape: Shape) type`:
+
+```zig
+pub const FifoFamily = struct {
+    pub const Shape = struct { DEPTH: usize = 16, WIDTH: usize = 8 };
+    pub fn specialize(comptime shape: Shape) type { return struct { ... }; }
+};
+```
+
+`instantiateShape(FifoFamily, ..., .{ .DEPTH = 32 }, ...)` merges the override
+with the schema defaults at comptime, builds the concrete block type and checks
+the instance bindings against its ports. A parent can forward its own comptime
+value (often a field of its own `Shape`) into the child, which is how
+structural parameters propagate through hierarchy; each distinct shape is its
+own emitted module. Runtime `Param(W)` overrides still apply to the concrete
+module's `Params` schema and never change port widths.
+
 Handles (`Signal(W)`, `Param(W)`, `Mem(W)`) are nameless and width-typed; the
 `Scope` owns names. Two instances can never collide by name because names are
 resolved at emission.

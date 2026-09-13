@@ -203,9 +203,14 @@ oasic-side development required for this:
   (...)`. Structure checks reject unknown parameters, widths over 64 bits and
   out-of-range values; elaborated blocks verify the schema against their
   `mb.parameter` declarations. Structural parameters (widths, port counts,
-  memory depth, FSM encodings) stay comptime/type-level as they are today; this
-  targets value parameters and external parameterized modules (the TT SRAM
-  macro, PLL/IO wrappers, vendor IP) that cannot be specialized by elaboration.
+  memory depth, FSM encodings) are comptime by construction and now propagate
+  through a family `Shape` schema: `instantiateShape(Family, ..., .{ .DEPTH =
+  parent_depth }, ...)` merges defaults, builds the specialized child and
+  checks its ports, so a parent's comptime value sizes a child's shape without
+  duplicating the definition. Runtime `Param(W)` overrides stay 64-bit Verilog
+  parameters and cannot size structure; this targets value parameters and
+  external parameterized modules (the TT SRAM macro, PLL/IO wrappers, vendor
+  IP) that cannot be specialized by elaboration.
   `BlackBox` gains a parameter list.
 - **Bundle ports and bulk connect (done).** Recursive
   `declareInputs`/`declareOutputs` over nested structs of `Signal(W)`,

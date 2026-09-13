@@ -32,6 +32,7 @@ Everything else hangs off that. The public surface is exported through
 | `Signal(W)`, `Param(W)`, `Mem(W)` | nameless, width-typed handles; names live in the `Scope` |
 | `Expr(W)` / `AnyExpr` | width-carrying expressions; `AnyExpr` is the erased form |
 | `ParamSpec(W)` | a value-parameter field type for `Params` schemas |
+| `specializeShape(Family, overrides)` | resolves a family `Shape` schema (with defaults) to a concrete block type |
 | `Design` | module registry; `elaborate`, `ensureModule`, `findModule` |
 | `ModuleBuilder` | elaborates exactly one module definition |
 | `ExprBuilder` (`mb.exprs()`) | canonicalizing expression/statement factory |
@@ -53,7 +54,7 @@ Everything else hangs off that. The public surface is exported through
 | Assignment | `assign`, `assignExpr` |
 | Processes | `seq`, `seqNoReset`, `seqReset`, `seqEnable`, `seqResetEnable`, `comb` |
 | Memory ports | `syncRead`, `readWritePort` |
-| Hierarchy | `instantiate` (typed `Inputs`/`Outputs` binding + `Params` overrides) |
+| Hierarchy | `instantiate` (typed `Inputs`/`Outputs` binding + `Params` overrides), `instantiateShape` (comptime `Shape` specialization forwarded to a child) |
 | Clocking | `addClockDomain`, `createClockDomain` |
 | Metadata | `addEnumGroup`, `addEnumType`, `tagGroup`, `addInputTiming`, `addOutputTiming` |
 | Lifecycle | `init`, `deinit`, `exprs`, `intern`, `finish` |
@@ -159,13 +160,18 @@ rather than the authoring half of this specific project.
 
 **Elaboration and parameterization**
 - Structural parameters (widths, depths, port counts) are comptime type
-  arguments; value parameters (`ParamSpec`) are 64-bit and cannot size ports or
-  memories. A parent cannot parameterize a child's structural shape.
+  arguments. Block families declare a `Shape` schema of elaboration-time
+  values and `specialize(shape) type`; `instantiateShape` merges instance-site
+  overrides with the defaults and forwards a parent's comptime value into the
+  child, producing a distinct checked module per shape. Runtime `ParamSpec`
+  values remain 64-bit Verilog overrides and still cannot size ports or
+  memories.
 - No IR-level generate/loop construct: elaboration loops are Zig `inline for`.
   Intentional, but it means no reproducible "same source, runtime parameter
   set" flow.
-- No parameter propagation or symbol visibility guarantees across hierarchy
-  beyond explicit `ParamOverride`.
+- Runtime parameters flow only through explicit `ParamOverride`; there is no
+  automatic propagation or symbol visibility guarantee across hierarchy.
+  Structural `Shape` values are explicit at each instantiation.
 
 **Memory**
 - One read port plus one write path per memory (`syncRead`, `readWritePort`);
@@ -229,9 +235,10 @@ rather than the authoring half of this specific project.
    next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
    per-bit synchronizer intent in the lint, and a formal crossing proof rather
    than a heuristic audit.
-3. **Parameter propagation**: a way for a parent parameter to specialize a
-   child's structural widths/depths, so generated suites do not need comptime
-   duplication.
+3. **Parameter propagation**: structural `Shape` specialization from a
+   parent's comptime values landed with `instantiateShape`. Remaining: runtime
+   parameter propagation (constrained by comptime widths), richer shape
+   constraint errors, and recording resolved shape values in `design.json`.
 4. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
    rows, a destination-clock identity on outputs, deeper-than-immediate-child
    resolution, and /3 only for incompatible schema changes.

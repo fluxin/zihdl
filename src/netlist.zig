@@ -2004,6 +2004,37 @@ fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
     }
 }
 
+/// Resolves a block family's `Shape` schema with instance-site overrides:
+/// unknown fields, missing defaults, non-struct schemas and non-comptime
+/// values are compile errors. The merged shape value is handed to
+/// `Family.specialize`, which returns the concrete block type.
+pub fn specializeShape(comptime Family: type, comptime overrides: anytype) type {
+    comptime {
+        if (!@hasDecl(Family, "Shape")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub const Shape`");
+        if (!@hasDecl(Family, "specialize")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub fn specialize`");
+        if (@typeInfo(Family.Shape) != .@"struct") @compileError(@typeName(Family) ++ ".Shape must be a struct");
+        if (@typeInfo(@TypeOf(overrides)) != .@"struct") @compileError("instantiateShape overrides must be a struct");
+        for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
+            if (!@hasField(Family.Shape, field.name)) {
+                @compileError("unknown structural parameter '" ++ field.name ++ "' for family " ++ @typeName(Family));
+            }
+        }
+        for (@typeInfo(Family.Shape).@"struct".fields) |field| {
+            if (field.default_value_ptr == null) {
+                @compileError("structural parameter '" ++ field.name ++ "' of " ++ @typeName(Family) ++ " needs a default");
+            }
+        }
+    }
+    const merged = comptime blk: {
+        var m: Family.Shape = .{};
+        for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
+            @field(m, field.name) = @field(overrides, field.name);
+        }
+        break :blk m;
+    };
+    return Family.specialize(merged);
+}
+
 pub const Design = struct {
     allocator: std.mem.Allocator,
     modules: std.ArrayList(*Module),
@@ -2537,6 +2568,17 @@ pub const ModuleBuilder = struct {
         outputs_binding: anytype,
         params: anytype,
     ) !BlockType.Outputs {
+        return self.instantiateChecked(BlockType, instance_name, inputs, outputs_binding, params);
+    }
+
+    fn instantiateChecked(
+        self: *ModuleBuilder,
+        comptime BlockType: type,
+        instance_name: []const u8,
+        inputs: anytype,
+        outputs_binding: anytype,
+        params: anytype,
+    ) !BlockType.Outputs {
         try self.design.ensureModule(BlockType);
         const param_list = try self.collectParams(BlockType, params);
 
@@ -2568,8 +2610,36 @@ pub const ModuleBuilder = struct {
             .connections = conns,
             .params = param_list,
         });
-
         return result;
+    }
+
+    /// Instantiates a structurally specialized block family. `Family` declares
+    /// a `Shape` schema of elaboration-time values (a struct with defaults,
+    /// for example `pub const Shape = struct { WIDTH: usize = 8, DEPTH:
+    /// usize = 16 };`) and `specialize(comptime shape: Shape) type`, which
+    /// returns a concrete block type whose ports and internals are sized from
+    /// the merged shape. `shape` overrides individual schema fields at the
+    /// instance site; values must be elaboration-time known, because widths
+    /// and depths are type-level. Distinct merged shapes build distinct
+    /// emitted modules (the family names them), and each instance is checked
+    /// against the specialized port widths. Runtime `params` overrides still
+    /// apply to the concrete module's `Params` schema and are emitted as
+    /// Verilog `#(.NAME(value))` at the instance site.
+    ///
+    /// This is how a parent's structural parameter specializes a child's
+    /// shape: a parent can forward its own comptime value (for example a field
+    /// of its own `Shape`) without duplicating the child definition.
+    pub fn instantiateShape(
+        self: *ModuleBuilder,
+        comptime Family: type,
+        instance_name: []const u8,
+        comptime shape: anytype,
+        inputs: anytype,
+        outputs_binding: anytype,
+        params: anytype,
+    ) !specializeShape(Family, shape).Outputs {
+        const Concrete = comptime specializeShape(Family, shape);
+        return self.instantiateChecked(Concrete, instance_name, inputs, outputs_binding, params);
     }
 
     fn addInputConnections(
@@ -3294,6 +3364,138 @@ test "constants and module parameters are distinct IR symbols" {
     try std.testing.expectEqual(@as(usize, 8), width.width());
     try std.testing.expectEqual(SymbolKind.constant, mode.kind());
     try std.testing.expectEqual(@as(u64, 3), mode.symbol().init_val);
+}
+
+test "block families specialize child shape from parent parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const MemFamily = struct {
+        pub const Shape = struct { WIDTH: usize = 8, DEPTH: usize = 4 };
+        pub fn specialize(comptime shape: Shape) type {
+            const AW = std.math.log2_int_ceil(usize, shape.DEPTH);
+            return struct {
+                pub const name = std.fmt.comptimePrint("shaped_mem_{d}x{d}", .{ shape.DEPTH, shape.WIDTH });
+                pub const Inputs = struct {
+                    clk: Signal(1),
+                    rst_n: Signal(1),
+                    we: Signal(1),
+                    addr: Signal(AW),
+                    wdata: Signal(shape.WIDTH),
+                };
+                pub const Outputs = struct { rdata: Signal(shape.WIDTH) };
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const outs = try mb.declareOutputs(Outputs);
+                    const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+                    try mb.addClockDomain(domain);
+                    const mem = try mb.mem(shape.WIDTH, "mem", shape.DEPTH, .{});
+                    const rdata = try mb.readWritePort(mem, domain, 1, ins.addr, ins.we, ins.addr, ins.wdata);
+                    try mb.assign(outs.rdata, rdata);
+                }
+            };
+        }
+    };
+
+    // A parent family forwards its own structural parameter into the child,
+    // so a parent shape specializes the child without repeating the values.
+    const ParentFamily = struct {
+        pub const Shape = struct { WIDTH: usize = 8, DEPTH: usize = 4 };
+        pub fn specialize(comptime shape: Shape) type {
+            const AW = std.math.log2_int_ceil(usize, shape.DEPTH);
+            return struct {
+                pub const name = std.fmt.comptimePrint("shape_parent_{d}x{d}", .{ shape.DEPTH, shape.WIDTH });
+                pub const Inputs = struct {
+                    clk: Signal(1),
+                    rst_n: Signal(1),
+                    we: Signal(1),
+                    addr: Signal(AW),
+                    wdata: Signal(shape.WIDTH),
+                };
+                pub const Outputs = struct { rdata: Signal(shape.WIDTH) };
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const outs = try mb.declareOutputs(Outputs);
+                    _ = try mb.instantiateShape(MemFamily, "u_mem", .{
+                        .WIDTH = shape.WIDTH,
+                        .DEPTH = shape.DEPTH,
+                    }, .{
+                        .clk = ins.clk,
+                        .rst_n = ins.rst_n,
+                        .we = ins.we,
+                        .addr = ins.addr,
+                        .wdata = ins.wdata,
+                    }, .{
+                        .rdata = outs.rdata,
+                    }, .{});
+                }
+            };
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const clk = try top.input("clk", 1);
+    const rst = try top.input("rst_n", 1);
+    const we = try top.input("we", 1);
+    const addr4 = try top.input("addr4", 2);
+    const addr8 = try top.input("addr8", 3);
+    const d8 = try top.input("d8", 8);
+    const d16 = try top.input("d16", 16);
+    const q8a = try top.wire("q8a", 8);
+    const q8b = try top.wire("q8b", 8);
+    const q16 = try top.wire("q16", 16);
+    const qp = try top.wire("qp", 8);
+
+    _ = try top.instantiateShape(MemFamily, "u_dflt", .{}, .{
+        .clk = clk,
+        .rst_n = rst,
+        .we = we,
+        .addr = addr4,
+        .wdata = d8,
+    }, .{ .rdata = q8a }, .{});
+    _ = try top.instantiateShape(MemFamily, "u_deep", .{ .DEPTH = 8 }, .{
+        .clk = clk,
+        .rst_n = rst,
+        .we = we,
+        .addr = addr8,
+        .wdata = d8,
+    }, .{ .rdata = q8b }, .{});
+    _ = try top.instantiateShape(MemFamily, "u_wide", .{ .WIDTH = 16 }, .{
+        .clk = clk,
+        .rst_n = rst,
+        .we = we,
+        .addr = addr4,
+        .wdata = d16,
+    }, .{ .rdata = q16 }, .{});
+    _ = try top.instantiateShape(ParentFamily, "u_parent", .{ .WIDTH = 8, .DEPTH = 4 }, .{
+        .clk = clk,
+        .rst_n = rst,
+        .we = we,
+        .addr = addr4,
+        .wdata = d8,
+    }, .{ .rdata = qp }, .{});
+    _ = try top.finish();
+
+    // Distinct shapes emitted as distinct, correctly sized definitions.
+    try std.testing.expect(design.findModule("shaped_mem_4x8") != null);
+    try std.testing.expect(design.findModule("shaped_mem_8x8") != null);
+    try std.testing.expect(design.findModule("shaped_mem_4x16") != null);
+    try std.testing.expect(design.findModule("shape_parent_4x8") != null);
+
+    const wide = design.findModule("shaped_mem_4x16").?;
+    try std.testing.expectEqual(@as(usize, 16), wide.scope.find("wdata").?.width());
+    try std.testing.expectEqual(@as(usize, 16), wide.scope.find("rdata").?.width());
+    try std.testing.expectEqual(@as(usize, 4), wide.scope.find("mem").?.symbol().depth);
+
+    const deep = design.findModule("shaped_mem_8x8").?;
+    try std.testing.expectEqual(@as(usize, 8), deep.scope.find("mem").?.symbol().depth);
+    try std.testing.expectEqual(@as(usize, 3), deep.scope.find("addr").?.width());
+
+    // The parent's child instance resolved to the same specialized shape.
+    const parent = design.findModule("shape_parent_4x8").?;
+    try std.testing.expectEqualStrings("shaped_mem_4x8", parent.instances[0].module_name);
 }
 
 test "sink-side bundle declarations flip directions in the scope" {
