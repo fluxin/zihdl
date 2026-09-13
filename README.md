@@ -37,6 +37,37 @@ policy, and synchronous arrival windows with explicit units only where a real
 requirement exists. Anything not declared stays unknown. Schema and emitted
 example: `src/backend/metadata.zig`.
 
+Arrival windows are always author declarations relative to the destination
+clock's active (rising) edge: `min` is the earliest arrival and `max` the
+latest, either may be absent, negative values arrive before the edge and
+positive values after it, and every bound carries an explicit unit (`ps`,
+`ns`, `us`, `ms`). The library never invents a window, so consumers apply
+their own documented defaults when it is `null`.
+
+`zig build contract` emits the timing-intent contract fixture under
+`out/contract/`: matching RTL, `design.json`, an independent
+`oasic.stimulus/1` program and a manifest with SHA-256 hashes. It covers both
+arrival bounds, a two-stage synchronizer, an intentionally unsynchronized
+input, reset policy and two renamed instances of one child definition for
+hierarchical binding tests.
+
+### Deferred timing intent (v2 proposal, not emitted)
+
+Responsibilities v1 does not express. This additive schema is a proposal that
+needs coordination with consumers before it is emitted; v1 consumers must keep
+treating these as unknown:
+
+| Responsibility | Proposed additive field |
+|---|---|
+| Input slew (rise/fall transition window) | `inputs[].slew: { min, max }` using time values |
+| Output load | `outputs[]: { signal, width, clock, domain, load: { value, unit: "ff"\|"pf" } }` |
+| Output required times | `outputs[].required: { min, max }` referenced to the destination clock edge |
+| Reset-release synchronization | `clocks[].reset.release_synchronizer: [ { module, signal, bit } ]` |
+| External clock relationships | `clocks[].relationship: "external"\|"internal"`, `related_to`, `relation: "same"\|"integer_ratio"\|"asynchronous"`, `source_period`, `jitter` |
+
+All fields are optional; absent stays unknown, and the schema version is bumped
+only when consumer constraint translation can use them.
+
 ## Quick Start
 
 ```bash

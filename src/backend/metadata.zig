@@ -333,10 +333,26 @@ fn isPort(kind: ir.SymbolKind) bool {
 //
 // Optional, versioned export of authored input timing intent. Module rows are
 // emitted when a module declares clock domains (which carry reset policy) or
-// per-input intent; everything not declared stays unknown. Identity for
-// synchronizer stages is hierarchical RTL `(module, register, bit)`. Arrival
-// windows carry explicit units and are only emitted for synchronous inputs
-// whose author declared a real requirement. The section never changes RTL.
+// per-input intent; everything not declared stays unknown.
+//
+// Arrival windows describe a synchronous input relative to the active (rising)
+// edge of its declared destination clock:
+//   * `min` is the earliest arrival and `max` the latest; either may be null,
+//     and `arrival` itself is null when no window is declared.
+//   * negative values arrive before the edge, positive values after it. Units
+//     are explicit per bound (`ps`, `ns`, `us`, `ms`) and never defaulted.
+//   * these are always author declarations: the library never invents or
+//     defaults a window, so consumers (for example oasic STA) apply their own
+//     documented defaults when the window is unknown.
+//
+// Synchronizer stages carry hierarchical RTL identity `(module, register,
+// bit)`; cross-instance intent is resolved by joining the `instances`
+// connection table to the child module's declared rows. The section never
+// changes RTL.
+//
+// Not in v1 (proposed for v2, coordinate before emitting): input slew, output
+// load, output required times, reset-release synchronization and external
+// clock relationships. See README.md for the draft additive schema.
 
 pub const timing_schema = "js_asic.timing_intent/1";
 

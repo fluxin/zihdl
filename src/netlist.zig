@@ -2773,6 +2773,14 @@ pub const ModuleBuilder = struct {
                 std.log.warn("js_asic: timing intent for '{s}' in module '{s}' declares arrival times but is not synchronous", .{ intent.signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
+            inline for (.{ intent.arrival_min, intent.arrival_max }) |bound| {
+                if (bound) |value| {
+                    if (!std.math.isFinite(value.value)) {
+                        std.log.warn("js_asic: timing intent arrival for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+            }
             if (intent.arrival_min != null and intent.arrival_max != null) {
                 if (timeValueInPs(intent.arrival_min.?) > timeValueInPs(intent.arrival_max.?)) {
                     std.log.warn("js_asic: timing intent arrival window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
@@ -2801,6 +2809,14 @@ pub const ModuleBuilder = struct {
         }
         for (self.instances.items) |inst| {
             for (inst.connections) |conn| live[conn.signal.idx] = true;
+        }
+        // Authored timing intent pins its declared synchronizer stages so the
+        // emitted artifact always contains the register identities the sidecar
+        // references; inputs (clocks/resets) are live by construction.
+        for (self.timing.items) |intent| {
+            for (intent.stages) |stage| {
+                if (stage.signal.scope == self.scope) live[stage.signal.idx] = true;
+            }
         }
 
         var assigned = std.ArrayList(SymRef).empty;

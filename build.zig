@@ -189,6 +189,23 @@ pub fn build(b: *std.Build) void {
     tb_step.dependOn(&eth_tb_gen.step);
     tb_step.dependOn(&zio_wit_gen.step);
 
+    // Timing-intent artifact contract fixture for consumers: RTL, design.json
+    // (timing intent + provenance), model-derived stimulus and a hash manifest.
+    const contract_exe = b.addExecutable(.{
+        .name = "js_asic_contract",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/contract/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const contract_gen = b.addRunArtifact(contract_exe);
+    const contract_step = b.step("contract", "Emit the timing-intent contract fixture (RTL, design.json, stimulus, manifest)");
+    contract_step.dependOn(&contract_gen.step);
+
     // Lint the generated Verilog with Verilator. Depends on the run step, which
     // writes out/asic_core.v.
     const lint_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/asic_core.v" });
@@ -295,6 +312,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(zio_step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
+    verify_step.dependOn(&contract_gen.step);
     verify_step.dependOn(&lint_cmd.step);
     verify_step.dependOn(&lint_sv_cmd.step);
     verify_step.dependOn(&split_lint_cmd.step);

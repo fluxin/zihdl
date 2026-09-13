@@ -7,6 +7,7 @@ const netlist = @import("../netlist.zig");
 const ir = netlist;
 const lib = @import("../lib.zig");
 const metadata = @import("metadata.zig");
+const verilog = @import("verilog.zig");
 
 const Signal = ir.Signal;
 const Design = ir.Design;
@@ -206,8 +207,83 @@ test "timing intent validation rejects bad references and windows" {
         }
     };
 
+    const NonFiniteArrival = struct {
+        pub const name = "bad_non_finite";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{
+                .signal = ins.b.ref,
+                .classification = .synchronous,
+                .arrival_min = .{ .value = std.math.nan(f64), .unit = .ns },
+                .arrival_max = .{ .value = 1, .unit = .ns },
+            });
+        }
+    };
+
+    const DuplicateIntent = struct {
+        pub const name = "bad_duplicate";
+        pub const Inputs = struct { a: Signal(1), b: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addInputTiming(.{ .signal = ins.b.ref, .classification = .unknown });
+            try mb.addInputTiming(.{ .signal = ins.b.ref, .classification = .synchronous });
+        }
+    };
+
     try expectIntentError(AsyncArrival);
     try expectIntentError(InvertedWindow);
     try expectIntentError(BadStage);
     try expectIntentError(NotInput);
+    try expectIntentError(NonFiniteArrival);
+    try expectIntentError(DuplicateIntent);
+}
+
+test "declared synchronizer stages survive dead-code elimination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Dangling = struct {
+        pub const name = "dangling_sync";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            const sync = try lib.syncInput(mb, "dangle", ins.async_in, domain, 1);
+            // The synchronizer output deliberately drives nothing; the declared
+            // intent must still pin the chain into the emitted artifact.
+            try mb.assign(outs.y, 0);
+            try mb.addInputTiming(.{
+                .signal = ins.async_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = sync.d0.ref, .bit = 0 },
+                    .{ .signal = sync.value.ref, .bit = 0 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Dangling);
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const timing = root.object.get("timing_intent").?;
+    const stages = findInput(timing, "async_in").?.object.get("synchronizer").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), stages.len);
+
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg         dangle_d0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "dangle_d1 <= dangle_d0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "dangle_prev <= dangle_d1;") != null);
 }

@@ -9,6 +9,7 @@ pub const verilog = @import("backend/verilog.zig");
 pub const systemverilog = @import("backend/systemverilog.zig");
 pub const metadata = @import("backend/metadata.zig");
 pub const provenance = @import("backend/provenance.zig");
+pub const timing_contract = @import("backend/timing_contract_fixture.zig");
 pub const sdc = @import("backend/sdc.zig");
 
 /// HDL target selected through the generic `emitDesign` / `emitModule` hub.
@@ -78,5 +79,6 @@ test {
     _ = systemverilog;
     _ = metadata;
     _ = provenance;
+    _ = timing_contract;
     _ = sdc;
 }

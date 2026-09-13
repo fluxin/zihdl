@@ -13,6 +13,7 @@ test {
     _ = @import("backend/metadata_test.zig");
     _ = @import("backend/provenance_test.zig");
     _ = @import("backend/timing_test.zig");
+    _ = @import("backend/timing_contract_fixture.zig");
     _ = @import("backend/sdc_test.zig");
     _ = @import("backend/golden_test.zig");
 }
