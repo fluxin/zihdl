@@ -90,8 +90,8 @@ declaration, so their outputs stay signed); `Stream(W)` and
 ### blocks
 
 `SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
-`ReqAckBridgeBlock`, `MailboxBlock`, `ResetSyncBlock`, `ShiftRegisterBlock`,
-`EdgeDetectorBlock`, `CounterBlock`.
+`ReqAckBridgeBlock`, `MailboxBlock`, `FifoMailboxBlock`, `ResetSyncBlock`,
+`ShiftRegisterBlock`, `EdgeDetectorBlock`, `CounterBlock`.
 
 ### cdc
 
@@ -214,13 +214,13 @@ rather than the authoring half of this specific project.
   chain as a flat module that declares its `release_synchronizer` and is meant
   to drive the released domain's reset. The policy field itself still does not
   generate the chain.
-- `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock` and
-  `MailboxBlock` cover level, edge, gray-pointer and bundled-data handshake
-  crossings, and `cdc.lint` audits elaborated designs structurally. The lint is
-  heuristic: it cannot see metastability risk beyond structure, it tracks
-  ownership and structural first flops per data bit but falls back to
-  whole-signal reporting for shapes or widths it cannot map precisely, and a
-  formal crossing proof is future work.
+- `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock`,
+  `MailboxBlock` and `FifoMailboxBlock` cover level, edge, gray-pointer and
+  bundled-data handshake crossings, and `cdc.lint` audits elaborated designs
+  structurally. The lint is heuristic: it cannot see metastability risk beyond
+  structure, it tracks ownership and structural first flops per data bit but
+  falls back to whole-signal reporting for shapes or widths it cannot map
+  precisely, and a formal crossing proof is future work.
 - No clock divider/PLL/gating primitives; PLLs are foreign macros.
 - No multi-clock-domain structural check beyond per-process reset coverage and
   the opt-in `cdc.lint` pass.
@@ -259,10 +259,10 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **CDC depth.** The bridge, mailbox, async FIFO and structural lint, now with
-   per-bit ownership and per-bit declared/structural coverage, landed; next are
-   wider handshake shapes (FIFO-backed mailboxes, bundled-data buses) and a
-   formal crossing proof rather than a heuristic audit.
+1. **CDC depth.** The bridge, mailbox, FIFO mailbox, async FIFO and structural
+   lint, now with per-bit ownership and per-bit declared/structural coverage,
+   landed; next are wider bundled-data handshake shapes and a formal crossing
+   proof rather than a heuristic audit.
 2. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape

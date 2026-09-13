@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
+const async_fifo = @import("async_fifo.zig");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 const ClockDomain = netlist.ClockDomain;
@@ -190,6 +191,57 @@ pub fn MailboxBlock(comptime data_width: usize) type {
     };
 }
 
+/// Depth-parameterized dual-clock mailbox backed by the gray-pointer async
+/// FIFO. It keeps the `MailboxBlock` ready/valid contract (a write is accepted
+/// while `wr_ready` is high, a read consumes while `rd_valid` is high) but
+/// buffers up to `depth` words so the writer can run ahead of the reader.
+/// `depth` must be a power of two, matching `AsyncFifoBlock`.
+pub fn FifoMailboxBlock(comptime depth: usize, comptime data_width: usize) type {
+    comptime {
+        if (depth < 2) @compileError("FifoMailboxBlock requires depth >= 2");
+        if (data_width < 1) @compileError("FifoMailboxBlock requires data_width >= 1");
+    }
+    return struct {
+        pub const name = std.fmt.comptimePrint("fifo_mailbox_{d}x{d}", .{ depth, data_width });
+        pub const depth_val = depth;
+        pub const width_val = data_width;
+
+        pub const Inputs = struct {
+            wr_clk: Signal(1),
+            wr_rst_n: Signal(1),
+            wr_en: Signal(1),
+            wdata: Signal(data_width),
+            rd_clk: Signal(1),
+            rd_rst_n: Signal(1),
+            rd_en: Signal(1),
+        };
+
+        pub const Outputs = struct {
+            wr_ready: Signal(1),
+            rd_valid: Signal(1),
+            rdata: Signal(data_width),
+        };
+
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const fifo = try mb.instantiate(async_fifo.AsyncFifoBlock(depth, data_width), "u_fifo", .{
+                .wr_clk = ins.wr_clk,
+                .wr_rst_n = ins.wr_rst_n,
+                .wr_en = ins.wr_en,
+                .wdata = ins.wdata,
+                .rd_clk = ins.rd_clk,
+                .rd_rst_n = ins.rd_rst_n,
+                .rd_en = ins.rd_en,
+            }, .{}, .{});
+            try mb.assignExpr(outs.wr_ready, b.not(fifo.full));
+            try mb.assignExpr(outs.rd_valid, b.not(fifo.empty));
+            try mb.assignExpr(outs.rdata, fifo.rdata);
+        }
+    };
+}
+
 /// Reset synchronizer with a declared release chain. The module asynchronously
 /// asserts its active-low output while `rst_n` is low and releases it
 /// `stage_count` clock edges later (classic async-assert / sync-release). It
@@ -286,6 +338,30 @@ test "mailbox keeps the slot until the read consumes it" {
     try std.testing.expectEqual(@as(usize, 2), mod.clocks.len);
 }
 
+test "FIFO-backed mailbox layers ready/valid over the async FIFO" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = netlist.Design.init(alloc);
+    _ = try design.elaborate(FifoMailboxBlock(4, 8));
+    const mod = design.findModule("fifo_mailbox_4x8").?;
+    try std.testing.expectEqual(@as(usize, 1), mod.instances.len);
+    try std.testing.expectEqualStrings("async_fifo_4x8", mod.instances[0].module_name);
+    try std.testing.expectEqualStrings("u_fifo", mod.instances[0].instance_name);
+
+    const rtl = try @import("../backend/verilog.zig").emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "module fifo_mailbox_4x8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "async_fifo_4x8 u_fifo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign wr_ready =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign rd_valid =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign rdata =") != null);
+
+    const crossings = try @import("../cdc.zig").lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 0), crossings.len);
+}
+
 test "reset synchronizer declares its release chain and releases through it" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -309,12 +385,11 @@ test "reset synchronizer declares its release chain and releases through it" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign rst_n_sync = sync1;") != null);
 }
 
-test "CDC lint is clean on the async FIFO, handshake bridge and mailbox" {
+test "CDC lint is clean on the async FIFO, handshake bridge, mailbox and FIFO mailbox" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const async_fifo = @import("async_fifo.zig");
     var fifo_design = netlist.Design.init(alloc);
     _ = try fifo_design.elaborate(async_fifo.AsyncFifoBlock(4, 4));
     const fifo_crossings = try @import("../cdc.zig").lint(alloc, &fifo_design);
@@ -332,6 +407,12 @@ test "CDC lint is clean on the async FIFO, handshake bridge and mailbox" {
     const mailbox_crossings = try @import("../cdc.zig").lint(alloc, &mailbox_design);
     defer alloc.free(mailbox_crossings);
     try std.testing.expectEqual(@as(usize, 0), mailbox_crossings.len);
+
+    var fifo_mailbox_design = netlist.Design.init(alloc);
+    _ = try fifo_mailbox_design.elaborate(FifoMailboxBlock(4, 4));
+    const fifo_mailbox_crossings = try @import("../cdc.zig").lint(alloc, &fifo_mailbox_design);
+    defer alloc.free(fifo_mailbox_crossings);
+    try std.testing.expectEqual(@as(usize, 0), fifo_mailbox_crossings.len);
 
     var reset_design = netlist.Design.init(alloc);
     _ = try reset_design.elaborate(ResetSyncBlock(2));

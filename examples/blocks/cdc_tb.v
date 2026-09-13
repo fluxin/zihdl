@@ -1,8 +1,10 @@
 // Behavioral replay for the js_asic CDC witness: a four-phase request/
-// acknowledge bridge and a single-slot mailbox, each crossing a 10 ns source
-// clock and a 6.2 ns destination clock. The bridge sends eight words and
-// checks capture ordering; the mailbox proves a pending word survives until
-// the reader consumes it and that the writer cannot overwrite it.
+// acknowledge bridge, a single-slot mailbox and a FIFO-backed mailbox, each
+// crossing a 10 ns source clock and a 6.2 ns destination clock. The bridge
+// sends eight words and checks capture ordering; the single-slot mailbox proves
+// a pending word survives until the reader consumes it and that the writer
+// cannot overwrite it; the FIFO mailbox buffers four words and returns them in
+// order.
 `timescale 1ns/1ps
 
 module cdc_tb;
@@ -22,6 +24,13 @@ module cdc_tb;
     reg rd_en;
     wire rd_valid;
     wire [7:0] rdata;
+
+    reg fmb_wr_en;
+    reg [7:0] fmb_wdata;
+    reg fmb_rd_en;
+    wire fmb_wr_ready;
+    wire fmb_rd_valid;
+    wire [7:0] fmb_rdata;
 
     integer i;
     integer errors;
@@ -50,6 +59,19 @@ module cdc_tb;
         .wr_ready(wr_ready),
         .rd_valid(rd_valid),
         .rdata(rdata)
+    );
+
+    fifo_mailbox_4x8 fifo_mailbox (
+        .wr_clk(wr_clk),
+        .wr_rst_n(wr_rst_n),
+        .wr_en(fmb_wr_en),
+        .wdata(fmb_wdata),
+        .rd_clk(rd_clk),
+        .rd_rst_n(rd_rst_n),
+        .rd_en(fmb_rd_en),
+        .wr_ready(fmb_wr_ready),
+        .rd_valid(fmb_rd_valid),
+        .rdata(fmb_rdata)
     );
 
     initial src_clk = 0;
@@ -94,6 +116,9 @@ module cdc_tb;
         wr_en = 0;
         wdata = 0;
         rd_en = 0;
+        fmb_wr_en = 0;
+        fmb_wdata = 0;
+        fmb_rd_en = 0;
 
         repeat (4) @(posedge src_clk);
         src_rst_n = 1;
@@ -143,8 +168,36 @@ module cdc_tb;
         while (!wr_ready) @(posedge wr_clk);
         while (rd_valid) @(posedge rd_clk);
 
+        // FIFO mailbox: four words buffered back to back, then drained in
+        // order. The writer never waits after the first word; the registered
+        // empty flag crosses back before each read.
+        for (i = 0; i < 4; i = i + 1) begin
+            @(negedge wr_clk);
+            while (!fmb_wr_ready) @(negedge wr_clk);
+            fmb_wdata = 8'h10 + i;
+            fmb_wr_en = 1;
+            @(negedge wr_clk);
+            fmb_wr_en = 0;
+        end
+        for (i = 0; i < 4; i = i + 1) begin
+            @(negedge rd_clk);
+            while (!fmb_rd_valid) @(negedge rd_clk);
+            if (fmb_rdata !== (8'h10 + i)) begin
+                $display("FAIL: fifo_mailbox[%0d]=%02x expected %02x", i, fmb_rdata, 8'h10 + i);
+                errors = errors + 1;
+            end
+            fmb_rd_en = 1;
+            @(negedge rd_clk);
+            fmb_rd_en = 0;
+        end
+        repeat (4) @(posedge rd_clk);
+        if (fmb_rd_valid) begin
+            $display("FAIL: fifo_mailbox still valid after draining four words");
+            errors = errors + 1;
+        end
+
         if (errors == 0) begin
-            $display("PASS: request/acknowledge bridge and mailbox handshakes verified");
+            $display("PASS: request/acknowledge bridge and mailbox/FIFO-mailbox handshakes verified");
             $finish;
         end else begin
             $display("FAIL: CDC witness reported %0d errors", errors);

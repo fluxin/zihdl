@@ -1,5 +1,5 @@
-//! Emits the request/acknowledge bridge and mailbox RTL replayed by
-//! `examples/blocks/cdc_tb.v` with Icarus Verilog.
+//! Emits the request/acknowledge bridge, single-slot mailbox and FIFO-backed
+//! mailbox RTL replayed by `examples/blocks/cdc_tb.v` with Icarus Verilog.
 
 const std = @import("std");
 const js_asic = @import("js_asic");
@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
     var design = netlist.Design.init(alloc);
     try design.ensureModule(js_asic.blocks.ReqAckBridgeBlock(8));
     _ = try design.elaborate(js_asic.blocks.MailboxBlock(8));
+    _ = try design.elaborate(js_asic.blocks.FifoMailboxBlock(4, 8));
     const rtl = try verilog.emitDesign(alloc, &design, .{});
 
     const cwd = std.Io.Dir.cwd();
