@@ -68,6 +68,7 @@ fn buildManifest(alloc: std.mem.Allocator, rtl: []const u8, json: []const u8, js
             "binding: two renamed instances u_fast/u_slow of {s}; resolve child intent through instance connections\n" ++
             "slew: inputs[].slew rise/fall bounds are measured between the explicit low_fraction and high_fraction of the transition; null bound = unknown, never zero\n" ++
             "load: outputs[].load is the additional external load per port bit (ff or pf, one unit per value), excluding internal cell-pin and wire capacitance; null load = unknown\n" ++
+            "resolution: parent output-load rows override the bound child load, explicit null included; no parent row keeps the child load; input rows merge only when compatible, conflicts are errors\n" ++
             "v1: timing_contract_v1.json is the byte-stable /1 projection (slew and outputs omitted); oasic 95d30f4f accepts only /1\n" ++
             "replay: ../oasic/oasic -sim-verilog out/contract/timing_contract.v -stimulus out/contract/timing_contract.jsonl -design-json out/contract/timing_contract_v1.json -vcd-out /tmp/timing-contract.vcd\n",
         .{ fixture.top_name, rtl.len, rtl_sha, json.len, json_sha, json_v1.len, json_v1_sha, stim.len, stim_sha, fixture.child_name },

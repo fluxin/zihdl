@@ -367,6 +367,14 @@ fn isPort(kind: ir.SymbolKind) bool {
 //     external load per port bit (`ff` or `pf`), excluding internal cell-pin
 //     and wire capacitance. A null load means unknown.
 //
+// Cross-module resolution is consumer-side. When joining a parent port to the
+// child rows through the `instances` table: a parent output row overrides the
+// bound child's load, including an explicit null (unknown); an absent parent
+// row leaves the child's declaration in force. Parent and child input rows
+// merge field by field only when compatible (classification, clock/domain,
+// synchronizer shape); conflicting declarations for the same physical input
+// must be reported as errors, never silently resolved.
+//
 // Still deferred: output required times, reset-release synchronization and
 // external clock relationships.
 

@@ -6,6 +6,9 @@ A pure Zig (0.16.0) hardware construction library and synthesizable ASIC generat
 - **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the 120 MHz I2C/SPI-programmable ISA core with iverilog testbenches), shared example design blocks in `blocks/`, and the `z80/` scaffold for the FOSSi Z80 port (Track D).
 
 See [PLAN.md](PLAN.md) for full architecture details, roadmap, and next phases.
+See [docs/](docs/README.md) for [code structure](docs/code-structure.md),
+[migration guides](docs/migration.md), [competitor comparisons](docs/competitors.md)
+and the [API review](docs/api.md).
 
 ## Artifacts
 
@@ -65,14 +68,32 @@ runners stay v1.
 | `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
 | `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
 
+#### Hierarchy resolution
+
+Rows are authored per module definition and may be refined at the instantiating
+port. Consumers resolve them when joining parent ports to child rows through
+the `instances` connection table:
+
+- **Output loads:** a parent output row overrides the child module's load for
+  that physical port, including an explicit `load: null` (unknown), which masks
+  the child's value. With no parent row, the child's declaration stays in
+  force.
+- **Input timing:** parent and child rows merge field by field only when
+  compatible (same classification, clock/domain and synchronizer shape);
+  fields declared on one side fill in the other. Conflicting declarations for
+  the same physical input are errors: consumers must report them rather than
+  silently choosing one.
+
 The fixture's canonical artifact is `out/contract/timing_contract.json` (v2);
 `out/contract/timing_contract_v1.json` is the byte-stable `/1` projection for
 consumers that do not parse v2 yet. Both bind the same RTL and stimulus. It
-covers both arrival bounds, distinct per-instance slew and load declarations
-for two renamed child instances, a 2-bit vector synchronizer (per-bit vector
-stage identities are unit-test covered; current consumers reject them), an
+covers both arrival bounds, a 2-bit vector synchronizer (per-bit vector stage
+identities are unit-test covered; current consumers reject them), an
 intentionally unsynchronized input, reset policy, declared-but-unknown (null)
-slew/load values, and both load units.
+slew/load values, both load units, child load defaults with per-instance
+parent overrides (value, unit change and explicit null) and no-parent-row
+fallback, plus compatible parent/child input merges (parent slew, child
+classification/synchronizer/arrival).
 
 Still deferred to a later version: output required times, reset-release
 synchronization and external clock relationships.
@@ -96,3 +117,21 @@ zig build sim
 # Lint and simulate every emitted artifact
 zig build verify
 ```
+
+## Known gaps
+
+The authoring API is closed for what this repository actually builds (the
+protocol emulator, the elemental blocks, the contract fixture). The remaining
+holes matter for general-purpose use; the detailed review is in
+[docs/api.md](docs/api.md#gaps-by-category).
+
+| Area | Gap |
+|---|---|
+| Expressions | No integer division/modulo or rotate; `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
+| Parameterization | Widths/depths are comptime type arguments; value parameters are 64-bit and cannot size ports or memories, so a parent cannot specialize a child's shape |
+| Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
+| Clocking / CDC / IP | No async FIFO, pulse synchronizer or reset-synchronizer lowering; Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers) is not built |
+| Timing / constraints | Output required times, external clock relationships, reset-release synchronization and per-bit slew/load remain deferred; SDC has no IO delays, multicycle or generated clocks |
+| Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
+| Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
+

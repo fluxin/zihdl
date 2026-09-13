@@ -5,7 +5,9 @@
 //! current consumers reject it), an intentionally unsynchronized asynchronous
 //! input, and a reset policy. The top instantiates the child twice through
 //! renamed connections so consumers can exercise hierarchical binding, and
-//! declares distinct v2 slew/load rows per instance.
+//! uses v2 parent rows to override child load defaults per instance (value,
+//! unit change and explicit null) and to author distinct slew windows. Child
+//! input rows and parent input rows stay compatible and merge field by field.
 //!
 //! `emitStimulus` builds an independent `oasic.stimulus/1` program whose
 //! expectations come from the cycle model written here, never from emitted RTL.
@@ -223,10 +225,16 @@ pub const Top = struct {
             },
         });
 
-        // Distinct per-instance v2 loads; `fast_raw_out` declares the row but
-        // leaves the load unknown (null), `slow_raw_out` has no row.
+        // Parent output rows override the child's load for the ports that
+        // carry each instance: `fast_sync_out`/`slow_sync_out` replace the
+        // child's 4 fF with distinct values and units, `fast_async_bus_out`
+        // replaces the child's 1.5 pF with an explicit null (unknown), and
+        // `slow_async_bus_out` deliberately has no row so the child default
+        // stays in force. `fast_raw_out` declares an unknown load over a child
+        // that declares none; `slow_raw_out` has no row.
         try mb.addOutputTiming(.{ .signal = outs.fast_sync_out.ref, .load = .{ .value = 5.0, .unit = .ff } });
         try mb.addOutputTiming(.{ .signal = outs.slow_sync_out.ref, .load = .{ .value = 2.5, .unit = .pf } });
+        try mb.addOutputTiming(.{ .signal = outs.fast_async_bus_out.ref, .load = null });
         try mb.addOutputTiming(.{ .signal = outs.fast_raw_out.ref, .load = null });
     }
 };
@@ -433,7 +441,17 @@ test "contract fixture elaborates with two renamed instances" {
     try std.testing.expectEqual(@as(usize, 4), child.timing.len);
     try std.testing.expectEqual(@as(usize, 3), child.output_timing.len);
     try std.testing.expectEqual(@as(usize, 3), top.timing.len);
-    try std.testing.expectEqual(@as(usize, 3), top.output_timing.len);
+    try std.testing.expectEqual(@as(usize, 4), top.output_timing.len);
+
+    // Parent rows override child load defaults, including explicit null.
+    for (top.output_timing) |intent| {
+        if (std.mem.eql(u8, intent.signal.name(), "fast_async_bus_out")) {
+            try std.testing.expect(intent.load == null);
+        }
+        if (std.mem.eql(u8, intent.signal.name(), "fast_sync_out")) {
+            try std.testing.expectEqual(@as(f64, 5.0), intent.load.?.value);
+        }
+    }
 
     // The 2-bit bus declares whole-vector identities for both stages; the
     // scalar input above exercises the per-bit identity form.
