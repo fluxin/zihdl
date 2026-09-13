@@ -118,10 +118,15 @@ change, explicit null and required replacement) and no-parent-row fallback,
 plus compatible parent/child input merges (parent slew, child
 classification/synchronizer/arrival).
 
-Per-bit slew/load stays whole-port: one row applies to every bit of its port
-and per-bit distinct values remain deferred until a consumer analysis can act
-on them. Required windows always name their reference clock (js_asic rejects a
-window without one); deeper-than-immediate-child resolution remains open.
+Per-bit slew/load is authored as optional overrides next to the whole-port row
+(`inputs[].per_bit_slew` / `outputs[].per_bit_load`, emitted only when
+declared): a bit without an override keeps the whole-port value, and no live
+consumer acts on per-bit values yet. Required windows always name their
+reference clock (js_asic rejects a window without one). Hierarchy validation
+joins rows through every instance level it can map back to a module signal and
+rejects contradictions between a descendant and its ancestor or between
+siblings sharing a net; consumers still perform the actual constraint
+resolution.
 
 ## Quick Start
 
@@ -165,7 +170,7 @@ holes matter for general-purpose use; the detailed review is in
 | Parameterization | Widths/depths are comptime type arguments: block families declare a `Shape` schema and `instantiateShape` merges instance-site overrides, so a parent's comptime value parameter forwards into a child's shape (each distinct shape is its own checked module); runtime `Param(W)` values stay 64-bit Verilog overrides and cannot size ports or memories |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
 | Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a single-slot mailbox and a structural CDC lint landed; remaining: Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers) and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
-| Timing / constraints | Output required times (with explicit clock and edge), clock relationships and reset-release topology are authored (v2); per-bit slew/load and deeper-than-immediate-child resolution remain deferred; SDC has no IO delays, multicycle or generated clocks |
+| Timing / constraints | Output required times (with explicit clock and edge), clock relationships, reset-release topology and per-bit slew/load overrides are authored (v2), and hierarchy contradictions are rejected transitively through silent levels and siblings; per-bit values still have no consumer analysis and constraint resolution stays consumer-side; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
 | Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
 

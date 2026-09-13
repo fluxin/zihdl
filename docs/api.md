@@ -110,7 +110,7 @@ lint never changes RTL.
 |---|---|
 | `verilog.emitModule` / `emitModuleInto` / `emitDesign` | Verilog-2001 (portable default) |
 | `systemverilog.emitModule` / `emitDesign` | SystemVerilog (`logic`, `always_*`, enums, packed struct bundles) |
-| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, output load/required and clock relationship/reset-release topology), provenance |
+| `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, per-bit slew/load, output load/required and clock relationship/reset-release topology), provenance |
 | `sdc.emitDesignSdc` | `create_clock`, uncertainty, reset false paths |
 | `provenance.Collector` | operation rows, authored groups, byte-exact RTL spans, artifact hash binding |
 | `timing_contract` fixture | the consumer contract fixture (RTL, v2 JSON, v1 projection, stimulus, manifest) |
@@ -126,8 +126,9 @@ lint never changes RTL.
    bounds, reset legality, parameter schema and timing references are rejected
    before any backend runs. `elaborate()` additionally validates cross-instance
    timing compatibility (`validateTimingHierarchy`): conflicting parent/child
-   input rows or clock relationships fail the build instead of reaching the
-   consumer.
+   input rows or clock relationships fail the build, and the subtree pass
+   rejects rows that resolve to the same module signal through silent levels or
+   sibling branches, instead of reaching the consumer.
 4. **Metadata is additive and versioned.** Provenance, timing intent and enum
    groups never change RTL bytes. Products emit `js_asic.timing_intent/1`;
    `/2` (slew/load/required, clock relationships, reset-release topology) is
@@ -214,10 +215,12 @@ rather than the authoring half of this specific project.
 
 **Timing and constraints**
 - Timing intent covers input classification, synchronizer stages, arrival
-  windows, reset policy, slew/load, output required windows (each with an
-  explicit reference clock and edge), clock relationships and reset-release
-  topology. Still deferred: per-bit slew/load (rows apply to every bit) and
-  deeper-than-immediate-child resolution.
+  windows, reset policy, slew/load (whole-port plus per-bit overrides), output
+  required windows (each with an explicit reference clock and edge), clock
+  relationships and reset-release topology. Hierarchy contradictions are
+  rejected transitively through silent levels and siblings, but constraint
+  resolution stays consumer-side and no consumer analysis reads per-bit values
+  yet.
 - SDC emits clocks, uncertainty and reset false paths; no IO delays, generated
   clocks or multicycle paths.
 
@@ -252,10 +255,11 @@ rather than the authoring half of this specific project.
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape
    constraint errors, and recording resolved shape values in `design.json`.
-3. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
-   rows, deeper-than-immediate-child resolution, and /3 only for incompatible
-   schema changes. Required windows already carry an explicit clock and edge;
-   a consumer must reject one without a clock rather than guess.
+3. **Consume the per-bit timing rows**: declaration, validation and additive
+   `/2` export for per-bit slew/load landed, and hierarchy contradictions are
+   rejected transitively through silent levels and siblings. The live consumer
+   still reads whole-port rows only and constraint resolution stays
+   consumer-side; `/3` remains reserved for incompatible schema changes.
 4. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.

@@ -1406,6 +1406,18 @@ pub const LoadValue = struct {
 /// Active edge of a destination clock for a required window.
 pub const ClockEdge = enum { rising, falling };
 
+/// One per-bit output load: overrides `OutputTiming.load` for `bit` only.
+pub const LoadBit = struct {
+    bit: u8,
+    load: LoadValue,
+};
+
+/// One per-bit input slew: overrides `InputTiming.slew` for `bit` only.
+pub const SlewBit = struct {
+    bit: u8,
+    slew: SlewTiming,
+};
+
 /// Authored timing intent for one output port. Only declare a load or a
 /// required window when a real design requirement exists; absence keeps the
 /// value unknown.
@@ -1413,6 +1425,9 @@ pub const OutputTiming = struct {
     signal: SymRef,
     /// Additional external load per port bit; null keeps it unknown.
     load: ?LoadValue = null,
+    /// Per-bit load overrides; empty keeps every bit on `load`. Entries must
+    /// name distinct bits of the port and are additive metadata only.
+    per_bit_load: []const LoadBit = &.{},
     /// Destination clock the required window is measured against. Required
     /// whenever a required bound is declared: with more than one clock in a
     /// design there is no unambiguous default, so the library never emits an
@@ -1442,6 +1457,9 @@ pub const InputTiming = struct {
     /// Rise/fall slew declaration; null keeps the whole transition behavior
     /// unknown.
     slew: ?SlewTiming = null,
+    /// Per-bit slew overrides; empty keeps every bit on `slew`. Entries must
+    /// name distinct bits of the port and are additive metadata only.
+    per_bit_slew: []const SlewBit = &.{},
 };
 
 /// Converts an authored time to picoseconds, used only for ordering checks.
@@ -2189,12 +2207,20 @@ pub const Design = struct {
     /// contradictions the author wrote into one design so they fail at
     /// elaboration instead of at artifact consumption. Errors name the parent
     /// module, instance, child module and signal.
+    ///
+    /// Immediate pairs are checked directly; the subtree pass then joins every
+    /// row that resolves to the same signal of one module, so contradictions
+    /// through several levels (or between sibling branches that share a net)
+    /// fail too.
     pub fn validateTimingHierarchy(self: *const Design) !void {
         for (self.modules.items) |parent| {
             for (parent.instances) |inst| {
                 const child = self.findModule(inst.module_name) orelse continue;
                 try validateInstanceTiming(parent, child, inst);
             }
+        }
+        for (self.modules.items) |root| {
+            try validateTimingTree(self, root);
         }
     }
 };
@@ -2256,16 +2282,15 @@ fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Ins
         if (child_row.slew != null and parent_row.slew != null) {
             const cs = child_row.slew.?;
             const ps = parent_row.slew.?;
-            if (!std.meta.eql(cs.threshold, ps.threshold)) {
-                return hierarchyConflict(parent, inst, child, child_row.signal.name(), "slew thresholds");
+            if (slewMismatch(cs, ps)) {
+                return hierarchyConflict(parent, inst, child, child_row.signal.name(), "slew");
             }
-            inline for (.{ .{ cs.rise, ps.rise, "slew rise" }, .{ cs.fall, ps.fall, "slew fall" } }) |pair| {
-                inline for (.{ 0, 1 }) |bound_index| {
-                    const cb = if (bound_index == 0) pair[0].min else pair[0].max;
-                    const pb = if (bound_index == 0) pair[1].min else pair[1].max;
-                    if (cb != null and pb != null and !hierarchyTimeEqual(cb.?, pb.?)) {
-                        return hierarchyConflict(parent, inst, child, child_row.signal.name(), pair[2]);
-                    }
+        }
+        for (child_row.per_bit_slew) |child_entry| {
+            for (parent_row.per_bit_slew) |parent_entry| {
+                if (child_entry.bit != parent_entry.bit) continue;
+                if (slewMismatch(child_entry.slew, parent_entry.slew)) {
+                    return hierarchyConflict(parent, inst, child, child_row.signal.name(), "per-bit slew");
                 }
             }
         }
@@ -2300,6 +2325,206 @@ fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Ins
             {
                 std.log.warn("js_asic: conflicting clock jitter for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
                     parent_clock.name, parent.name, child.name, inst.instance_name,
+                });
+                return error.InvalidTimingIntent;
+            }
+        }
+    }
+}
+
+/// True when two declarations of the same slew disagree on a known field;
+/// unknown (null) fields merge and never conflict.
+fn slewMismatch(a: SlewTiming, b: SlewTiming) bool {
+    if (!std.meta.eql(a.threshold, b.threshold)) return true;
+    inline for (.{ .{ a.rise, b.rise }, .{ a.fall, b.fall } }) |pair| {
+        inline for (.{ 0, 1 }) |bound_index| {
+            const ab = if (bound_index == 0) pair[0].min else pair[0].max;
+            const bb = if (bound_index == 0) pair[1].min else pair[1].max;
+            if (ab != null and bb != null and !hierarchyTimeEqual(ab.?, bb.?)) return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================================
+// Transitive hierarchy validation
+//
+// `validateInstanceTiming` only joins immediate parent/child pairs. A row can
+// also resolve through several levels, or through two sibling branches that
+// share a net; `validateTimingTree` walks each module's subtree, maps every
+// descendant row back to the root signal it drives and rejects contradictions
+// between any two rows that resolve to the same signal. Resolution output
+// stays consumer-side.
+// ============================================================================
+
+/// One input row collected during a subtree walk, keyed by the root-module
+/// signal its port maps to (or null when the path leaves the root's ports).
+const CollectedInput = struct {
+    row: InputTiming,
+    /// Module that authored the row (for error messages).
+    module_name: []const u8,
+    signal: SymRef,
+    /// Root-module signal the row's destination clock maps to, if known.
+    clock: ?SymRef,
+};
+
+/// One clock relationship collected during a subtree walk, keyed by the root
+/// clock pair it resolves to.
+const CollectedRelation = struct {
+    module_name: []const u8,
+    clock_name: []const u8,
+    rel: ClockRelationship,
+    clk: SymRef,
+    related: SymRef,
+};
+
+fn moduleInPath(path: []const []const u8, name: []const u8) bool {
+    for (path) |entry| {
+        if (std.mem.eql(u8, entry, name)) return true;
+    }
+    return false;
+}
+
+/// Maps one signal of `module` to the root signal it resolves to: identity
+/// for the root itself, otherwise the accumulated port map. Internal signals
+/// on the path resolve to null and stop a transitive join.
+fn mapToRoot(is_root: bool, map: []const ?SymRef, signal: SymRef) ?SymRef {
+    if (is_root) return signal;
+    if (signal.idx >= map.len) return null;
+    return map[signal.idx];
+}
+
+fn collectDescendantTiming(
+    design: *const Design,
+    root: *const Module,
+    module: *const Module,
+    sym_map: []const ?SymRef,
+    path: *std.ArrayList([]const u8),
+    inputs: *std.ArrayList(CollectedInput),
+    relations: *std.ArrayList(CollectedRelation),
+) error{OutOfMemory}!void {
+    const alloc = design.allocator;
+    for (module.instances) |inst| {
+        const child = design.findModule(inst.module_name) orelse continue;
+        if (moduleInPath(path.items, child.name)) continue;
+        const child_map = try alloc.alloc(?SymRef, child.scope.symbols.items.len);
+        defer alloc.free(child_map);
+        @memset(child_map, null);
+        for (inst.connections) |conn| {
+            const child_sym = child.scope.find(conn.port_name) orelse continue;
+            child_map[child_sym.idx] = mapToRoot(module == root, sym_map, conn.signal);
+        }
+        for (child.timing) |row| {
+            const mapped = child_map[row.signal.idx] orelse continue;
+            try inputs.append(alloc, .{
+                .row = row,
+                .module_name = child.name,
+                .signal = mapped,
+                .clock = if (row.clock) |clock| child_map[clock.idx] else null,
+            });
+        }
+        for (child.clocks) |clock| {
+            const rel = clock.relationship orelse continue;
+            const related = rel.related_to orelse continue;
+            const mapped_clock = child_map[clock.clk.ref.idx] orelse continue;
+            const mapped_related = child_map[related.idx] orelse continue;
+            try relations.append(alloc, .{
+                .module_name = child.name,
+                .clock_name = clock.name,
+                .rel = rel,
+                .clk = mapped_clock,
+                .related = mapped_related,
+            });
+        }
+        try path.append(alloc, child.name);
+        defer _ = path.pop();
+        try collectDescendantTiming(design, root, child, child_map, path, inputs, relations);
+    }
+}
+
+/// Field-by-field conflict check for two input rows that resolve to the same
+/// root signal; both may still leave fields unknown.
+fn inputRowsConflict(a: CollectedInput, b: CollectedInput) ?[]const u8 {
+    if (a.row.classification != .unknown and b.row.classification != .unknown and
+        a.row.classification != b.row.classification) return "classification";
+    if (a.clock != null and b.clock != null and !hierarchySymEqual(a.clock.?, b.clock.?)) {
+        return "destination clock";
+    }
+    if (a.row.arrival_min != null and b.row.arrival_min != null and
+        !hierarchyTimeEqual(a.row.arrival_min.?, b.row.arrival_min.?)) return "arrival min";
+    if (a.row.arrival_max != null and b.row.arrival_max != null and
+        !hierarchyTimeEqual(a.row.arrival_max.?, b.row.arrival_max.?)) return "arrival max";
+    if (a.row.slew != null and b.row.slew != null and slewMismatch(a.row.slew.?, b.row.slew.?)) return "slew";
+    for (a.row.per_bit_slew) |ea| {
+        for (b.row.per_bit_slew) |eb| {
+            if (ea.bit != eb.bit) continue;
+            if (slewMismatch(ea.slew, eb.slew)) return "per-bit slew";
+        }
+    }
+    return null;
+}
+
+fn relationshipConflict(a: CollectedRelation, b: CollectedRelation) ?[]const u8 {
+    if (a.rel.relation != b.rel.relation) return "clock relationship kind";
+    if (a.rel.source_period != null and b.rel.source_period != null and
+        !hierarchyTimeEqual(a.rel.source_period.?, b.rel.source_period.?)) return "clock source period";
+    if (a.rel.jitter != null and b.rel.jitter != null and
+        !hierarchyTimeEqual(a.rel.jitter.?, b.rel.jitter.?)) return "clock jitter";
+    return null;
+}
+
+fn validateTimingTree(design: *const Design, root: *const Module) !void {
+    const alloc = design.allocator;
+    var inputs = std.ArrayList(CollectedInput).empty;
+    defer inputs.deinit(alloc);
+    var relations = std.ArrayList(CollectedRelation).empty;
+    defer relations.deinit(alloc);
+
+    for (root.timing) |row| {
+        try inputs.append(alloc, .{
+            .row = row,
+            .module_name = root.name,
+            .signal = row.signal,
+            .clock = row.clock,
+        });
+    }
+    for (root.clocks) |clock| {
+        const rel = clock.relationship orelse continue;
+        const related = rel.related_to orelse continue;
+        try relations.append(alloc, .{
+            .module_name = root.name,
+            .clock_name = clock.name,
+            .rel = rel,
+            .clk = clock.clk.ref,
+            .related = related,
+        });
+    }
+
+    const identity = try alloc.alloc(?SymRef, root.scope.symbols.items.len);
+    defer alloc.free(identity);
+    for (identity, 0..) |*slot, i| slot.* = SymRef{ .scope = root.scope, .idx = @intCast(i) };
+    var path = std.ArrayList([]const u8).empty;
+    defer path.deinit(alloc);
+    try path.append(alloc, root.name);
+    try collectDescendantTiming(design, root, root, identity, &path, &inputs, &relations);
+
+    for (inputs.items, 0..) |a, i| {
+        for (inputs.items[i + 1 ..]) |b| {
+            if (!hierarchySymEqual(a.signal, b.signal)) continue;
+            if (inputRowsConflict(a, b)) |what| {
+                std.log.warn("js_asic: conflicting {s} for input '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
+                    what, a.signal.name(), root.name, a.module_name, b.module_name,
+                });
+                return error.InvalidTimingIntent;
+            }
+        }
+    }
+    for (relations.items, 0..) |a, i| {
+        for (relations.items[i + 1 ..]) |b| {
+            if (!hierarchySymEqual(a.clk, b.clk) or !hierarchySymEqual(a.related, b.related)) continue;
+            if (relationshipConflict(a, b)) |what| {
+                std.log.warn("js_asic: conflicting {s} for clock '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
+                    what, a.clock_name, root.name, a.module_name, b.module_name,
                 });
                 return error.InvalidTimingIntent;
             }
@@ -2376,6 +2601,7 @@ pub const ModuleBuilder = struct {
     pub fn addInputTiming(self: *ModuleBuilder, timing: InputTiming) !void {
         var row = timing;
         row.stages = try self.allocator.dupe(SyncStage, timing.stages);
+        row.per_bit_slew = try self.allocator.dupe(SlewBit, timing.per_bit_slew);
         try self.timing.append(self.allocator, row);
     }
 
@@ -2384,7 +2610,9 @@ pub const ModuleBuilder = struct {
     /// References are validated by `finish()`; anything not declared stays
     /// unknown.
     pub fn addOutputTiming(self: *ModuleBuilder, timing: OutputTiming) !void {
-        try self.output_timing.append(self.allocator, timing);
+        var row = timing;
+        row.per_bit_load = try self.allocator.dupe(LoadBit, timing.per_bit_load);
+        try self.output_timing.append(self.allocator, row);
     }
 
     /// Canonicalizes and constant-folds an expression root into this module's
@@ -3260,6 +3488,19 @@ pub const ModuleBuilder = struct {
                 }
             }
             if (intent.slew) |slew| try self.validateSlew(intent.signal, slew);
+            for (intent.per_bit_slew, 0..) |entry, bi| {
+                if (entry.bit >= width) {
+                    std.log.warn("js_asic: per-bit slew bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
+                for (intent.per_bit_slew[0..bi]) |other| {
+                    if (other.bit == entry.bit) {
+                        std.log.warn("js_asic: duplicate per-bit slew for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+                try self.validateSlew(intent.signal, entry.slew);
+            }
         }
         for (self.output_timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .output) {
@@ -3272,11 +3513,19 @@ pub const ModuleBuilder = struct {
                     return error.InvalidTimingIntent;
                 }
             }
-            if (intent.load) |load| {
-                if (!std.math.isFinite(load.value) or load.value < 0) {
-                    std.log.warn("js_asic: output timing load for '{s}' in module '{s}' must be finite and non-negative", .{ intent.signal.name(), self.name });
+            if (intent.load) |load| try self.validateLoad(intent.signal, load);
+            for (intent.per_bit_load, 0..) |entry, bi| {
+                if (entry.bit >= intent.signal.width()) {
+                    std.log.warn("js_asic: per-bit load bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
+                for (intent.per_bit_load[0..bi]) |other| {
+                    if (other.bit == entry.bit) {
+                        std.log.warn("js_asic: duplicate per-bit load for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                }
+                try self.validateLoad(intent.signal, entry.load);
             }
             if (intent.required_min != null or intent.required_max != null) {
                 // A required window without a reference clock is ambiguous as
@@ -3375,6 +3624,15 @@ pub const ModuleBuilder = struct {
                     return error.InvalidTimingIntent;
                 }
             }
+        }
+    }
+
+    /// Validates one authored output load: finite and non-negative, whether it
+    /// is the whole-port or a per-bit override.
+    fn validateLoad(self: *ModuleBuilder, signal: SymRef, load: LoadValue) !void {
+        if (!std.math.isFinite(load.value) or load.value < 0) {
+            std.log.warn("js_asic: output timing load for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
+            return error.InvalidTimingIntent;
         }
     }
 

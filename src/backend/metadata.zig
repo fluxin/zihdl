@@ -413,12 +413,16 @@ fn isPort(kind: ir.SymbolKind) bool {
 //     where `relation` is `synchronous`, `asynchronous`, `mesochronous` or
 //     `plesiochronous`, `related_to` names a 1-bit input of the declaring
 //     module (null means an external reference) and the times are explicit.
+//   * `inputs[].per_bit_slew`: `[{ bit, threshold, rise, fall }]` overrides the
+//     whole-port `slew` for the named bits only; emitted only when declared.
+//   * `outputs[].per_bit_load`: `[{ bit, value, unit }]` overrides the
+//     whole-port `load` for the named bits only; emitted only when declared.
 //
 // These fields are additive under `/2` because the live consumer skips unknown
 // JSON fields and the schema version gate promises capabilities, not byte
-// layout; `/1` omits every one of them and stays byte-stable. Per-bit
-// slew/load rows stay deferred: a row applies to every bit of its port and no
-// consumer can act on per-bit distinct values yet.
+// layout; `/1` omits every one of them and stays byte-stable. Per-bit rows are
+// data-ready only: the live consumer does not act on distinct per-bit values
+// yet, and a bit without an override keeps the whole-port declaration.
 
 pub const timing_schema = "js_asic.timing_intent/1";
 pub const timing_schema_v2 = "js_asic.timing_intent/2";
@@ -549,6 +553,18 @@ fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir
     if (version >= 2) {
         try j.objectField("slew");
         if (intent.slew) |slew| try writeSlewTiming(j, slew) else try j.write(null);
+        if (intent.per_bit_slew.len > 0) {
+            try j.objectField("per_bit_slew");
+            try j.beginArray();
+            for (intent.per_bit_slew) |entry| {
+                try j.beginObject();
+                try j.objectField("bit");
+                try j.write(entry.bit);
+                try writeSlewFields(j, entry.slew);
+                try j.endObject();
+            }
+            try j.endArray();
+        }
     }
     try j.objectField("arrival");
     if (intent.arrival_min == null and intent.arrival_max == null) {
@@ -566,6 +582,11 @@ fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir
 
 fn writeSlewTiming(j: *std.json.Stringify, slew: ir.SlewTiming) !void {
     try j.beginObject();
+    try writeSlewFields(j, slew);
+    try j.endObject();
+}
+
+fn writeSlewFields(j: *std.json.Stringify, slew: ir.SlewTiming) !void {
     try j.objectField("threshold");
     try j.beginObject();
     try j.objectField("low_fraction");
@@ -577,7 +598,6 @@ fn writeSlewTiming(j: *std.json.Stringify, slew: ir.SlewTiming) !void {
     try writeSlewWindow(j, slew.rise);
     try j.objectField("fall");
     try writeSlewWindow(j, slew.fall);
-    try j.endObject();
 }
 
 fn writeSlewWindow(j: *std.json.Stringify, window: ir.SlewWindow) !void {
@@ -589,6 +609,15 @@ fn writeSlewWindow(j: *std.json.Stringify, window: ir.SlewWindow) !void {
     try j.endObject();
 }
 
+/// `{ value, unit }` fields without the enclosing object; callers wrap it so a
+/// per-bit load row can put `bit` next to the value.
+fn writeLoadValue(j: *std.json.Stringify, load: ir.LoadValue) !void {
+    try j.objectField("value");
+    try j.write(load.value);
+    try j.objectField("unit");
+    try j.write(@tagName(load.unit));
+}
+
 fn writeOutputTiming(j: *std.json.Stringify, intent: ir.OutputTiming) !void {
     try j.beginObject();
     try j.objectField("signal");
@@ -598,13 +627,22 @@ fn writeOutputTiming(j: *std.json.Stringify, intent: ir.OutputTiming) !void {
     try j.objectField("load");
     if (intent.load) |load| {
         try j.beginObject();
-        try j.objectField("value");
-        try j.write(load.value);
-        try j.objectField("unit");
-        try j.write(@tagName(load.unit));
+        try writeLoadValue(j, load);
         try j.endObject();
     } else {
         try j.write(null);
+    }
+    if (intent.per_bit_load.len > 0) {
+        try j.objectField("per_bit_load");
+        try j.beginArray();
+        for (intent.per_bit_load) |entry| {
+            try j.beginObject();
+            try j.objectField("bit");
+            try j.write(entry.bit);
+            try writeLoadValue(j, entry.load);
+            try j.endObject();
+        }
+        try j.endArray();
     }
     try j.objectField("required");
     if (intent.required_min == null and intent.required_max == null) {

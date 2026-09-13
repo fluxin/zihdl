@@ -1225,3 +1225,462 @@ test "hierarchy timing validation rejects conflicting parent/child input rows" {
     var design = Design.init(alloc);
     try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(SyncParent));
 }
+
+const SinkBits = struct {
+    pub const name = "timing_sink_bits";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), data: Signal(4) };
+    pub const Outputs = struct { q: Signal(4), pulse: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+        try mb.addClockDomain(domain);
+        const q = try mb.reg("q_reg", 4, 0);
+        try mb.assign(outs.q, q);
+        try mb.assign(outs.pulse, ins.data.bit(0));
+        const b = mb.exprs();
+        try mb.seq(domain, &.{b.assign(q, ins.data)});
+
+        try mb.addInputTiming(.{
+            .signal = ins.data.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+            .slew = .{
+                .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                .rise = .{ .max = .{ .value = 0.4, .unit = .ns } },
+            },
+            .per_bit_slew = &.{
+                .{ .bit = 0, .slew = .{
+                    .threshold = .{ .low_fraction = 0.2, .high_fraction = 0.8 },
+                    .rise = .{
+                        .min = .{ .value = 0.1, .unit = .ns },
+                        .max = .{ .value = 0.2, .unit = .ns },
+                    },
+                } },
+                .{ .bit = 3, .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .fall = .{ .max = .{ .value = 150, .unit = .ps } },
+                } },
+            },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.q.ref,
+            .load = .{ .value = 10, .unit = .ff },
+            .per_bit_load = &.{
+                .{ .bit = 1, .load = .{ .value = 2.5, .unit = .pf } },
+            },
+        });
+        try mb.addOutputTiming(.{
+            .signal = outs.pulse.ref,
+            .per_bit_load = &.{
+                .{ .bit = 0, .load = .{ .value = 0.5, .unit = .ff } },
+            },
+        });
+    }
+};
+
+test "timing intent v2 exports per-bit slew and load additively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SinkBits);
+    const json = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    const again = try metadata.emitDesignJson(alloc, &design, .{ .timing_intent_version = 2 });
+    try std.testing.expectEqualStrings(again, json);
+
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const timing = root.object.get("timing_intent").?;
+    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+
+    const input = findInput(timing, "data").?;
+    try std.testing.expect(input.object.get("slew") != null and input.object.get("slew").? != .null);
+    const per_bit_slew = input.object.get("per_bit_slew").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), per_bit_slew.len);
+    try std.testing.expectEqual(@as(i64, 0), per_bit_slew[0].object.get("bit").?.integer);
+    try expectJsonNumber(per_bit_slew[0].object.get("threshold").?.object.get("low_fraction").?, 0.2);
+    try expectJsonNumber(per_bit_slew[0].object.get("rise").?.object.get("max").?.object.get("value").?, 0.2);
+    try std.testing.expectEqualStrings("ns", per_bit_slew[0].object.get("rise").?.object.get("max").?.object.get("unit").?.string);
+    try std.testing.expectEqual(@as(i64, 3), per_bit_slew[1].object.get("bit").?.integer);
+    try expectJsonNumber(per_bit_slew[1].object.get("fall").?.object.get("max").?.object.get("value").?, 150);
+
+    const q = findOutput(timing, "q").?;
+    const per_bit_load = q.object.get("per_bit_load").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), per_bit_load.len);
+    try std.testing.expectEqual(@as(i64, 1), per_bit_load[0].object.get("bit").?.integer);
+    try expectJsonNumber(per_bit_load[0].object.get("value").?, 2.5);
+    try std.testing.expectEqualStrings("pf", per_bit_load[0].object.get("unit").?.string);
+    const pulse = findOutput(timing, "pulse").?;
+    try std.testing.expectEqual(@as(usize, 1), pulse.object.get("per_bit_load").?.array.items.len);
+    try std.testing.expect(pulse.object.get("load").? == .null);
+
+    // v1 is byte-stable and omits the per-bit fields entirely.
+    const json_v1 = try metadata.emitDesignJson(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, json_v1, "per_bit_slew") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json_v1, "per_bit_load") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"per_bit_slew\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"per_bit_load\"") != null);
+}
+
+test "timing intent validation rejects bad per-bit slew and load" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    const SlewBitOutOfRange = struct {
+        pub const name = "bad_slew_bit_range";
+        pub const Inputs = struct { clk: Signal(1), data: Signal(4) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.data.bit(0));
+            try mb.addInputTiming(.{
+                .signal = ins.data.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+                .per_bit_slew = &.{.{ .bit = 4, .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .rise = .{ .max = .{ .value = 1, .unit = .ns } },
+                } }},
+            });
+        }
+    };
+
+    const DuplicateSlewBit = struct {
+        pub const name = "bad_slew_bit_dup";
+        pub const Inputs = struct { clk: Signal(1), data: Signal(2) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.data.bit(0));
+            const slew = ir.SlewTiming{
+                .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                .rise = .{ .max = .{ .value = 1, .unit = .ns } },
+            };
+            try mb.addInputTiming(.{
+                .signal = ins.data.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+                .per_bit_slew = &.{ .{ .bit = 1, .slew = slew }, .{ .bit = 1, .slew = slew } },
+            });
+        }
+    };
+
+    const BadPerBitLoad = struct {
+        pub const name = "bad_per_bit_load";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(2) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            try mb.assign(outs.y, b.concat(.{ ins.a, ins.a }));
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .per_bit_load = &.{
+                    .{ .bit = 0, .load = .{ .value = -1, .unit = .ff } },
+                    .{ .bit = 5, .load = .{ .value = 1, .unit = .ff } },
+                },
+            });
+        }
+    };
+
+    try expectIntentError(SlewBitOutOfRange);
+    try expectIntentError(DuplicateSlewBit);
+    try expectIntentError(BadPerBitLoad);
+}
+
+const DeepChild = struct {
+    pub const name = "deep_child";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        try mb.assign(outs.y, ins.a);
+        try mb.addInputTiming(.{
+            .signal = ins.a.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+        });
+    }
+};
+
+const DeepMid = struct {
+    pub const name = "deep_mid";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        _ = try mb.instantiate(DeepChild, "u_leaf", .{
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .a = ins.a,
+        }, .{ .y = outs.y }, .{});
+    }
+};
+
+test "hierarchy timing validation accepts matching rows through a silent level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const DeepMatchTop = struct {
+        pub const name = "deep_match_top";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(DeepMid, "u_mid", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.a.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(DeepMatchTop);
+}
+
+test "hierarchy timing validation rejects rows that conflict through a silent level" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const DeepConflictTop = struct {
+        pub const name = "deep_conflict_top";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(DeepMid, "u_mid", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.a.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(DeepConflictTop));
+}
+
+const SibAsync = struct {
+    pub const name = "sib_async";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        try mb.assign(outs.y, ins.a);
+        try mb.addInputTiming(.{
+            .signal = ins.a.ref,
+            .classification = .asynchronous,
+            .clock = ins.clk.ref,
+        });
+    }
+};
+
+const SibSync = struct {
+    pub const name = "sib_sync";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        try mb.assign(outs.y, ins.a);
+        try mb.addInputTiming(.{
+            .signal = ins.a.ref,
+            .classification = .synchronous,
+            .clock = ins.clk.ref,
+        });
+    }
+};
+
+test "hierarchy timing validation rejects sibling rows that share a net" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const SiblingTop = struct {
+        pub const name = "sibling_top";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1), z: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(SibAsync, "u_async", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+            _ = try mb.instantiate(SibSync, "u_sync", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .a = ins.a,
+            }, .{ .y = outs.z }, .{});
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(SiblingTop));
+}
+
+const DeepRelChild = struct {
+    pub const name = "deep_rel_child";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), ref_clk: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        try mb.addClockDomain(.{
+            .name = "sys",
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .relationship = .{
+                .relation = .asynchronous,
+                .related_to = ins.ref_clk.ref,
+                .source_period = .{ .value = 10, .unit = .ns },
+                .jitter = .{ .value = 50, .unit = .ps },
+            },
+        });
+        try mb.assign(outs.y, ins.a);
+    }
+};
+
+const DeepRelMid = struct {
+    pub const name = "deep_rel_mid";
+    pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), ref_clk: Signal(1), a: Signal(1) };
+    pub const Outputs = struct { y: Signal(1) };
+    pub fn build(mb: *ModuleBuilder) !void {
+        const ins = try mb.declareInputs(Inputs);
+        const outs = try mb.declareOutputs(Outputs);
+        _ = try mb.instantiate(DeepRelChild, "u_rel_leaf", .{
+            .clk = ins.clk,
+            .rst_n = ins.rst_n,
+            .ref_clk = ins.ref_clk,
+            .a = ins.a,
+        }, .{ .y = outs.y }, .{});
+    }
+};
+
+test "hierarchy timing validation rejects relationships that conflict through a silent level" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const DeepRelConflictTop = struct {
+        pub const name = "deep_rel_conflict_top";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), ref_clk: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(DeepRelMid, "u_mid", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .ref_clk = ins.ref_clk,
+                .a = ins.a,
+            }, .{ .y = outs.y }, .{});
+            try mb.addClockDomain(.{
+                .name = "sys",
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+                .relationship = .{
+                    .relation = .asynchronous,
+                    .related_to = ins.ref_clk.ref,
+                    .source_period = .{ .value = 8, .unit = .ns },
+                    .jitter = .{ .value = 50, .unit = .ps },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(DeepRelConflictTop));
+}
+
+test "hierarchy timing validation rejects per-bit slew conflicts" {
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const BitChild = struct {
+        pub const name = "bit_slew_child";
+        pub const Inputs = struct { clk: Signal(1), data: Signal(2) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.data.bit(0));
+            try mb.addInputTiming(.{
+                .signal = ins.data.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+                .per_bit_slew = &.{.{ .bit = 1, .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .rise = .{ .max = .{ .value = 100, .unit = .ps } },
+                } }},
+            });
+        }
+    };
+
+    const BitTop = struct {
+        pub const name = "bit_slew_top";
+        pub const Inputs = struct { clk: Signal(1), data: Signal(2) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            _ = try mb.instantiate(BitChild, "u_bit", .{
+                .clk = ins.clk,
+                .data = ins.data,
+            }, .{ .y = outs.y }, .{});
+            try mb.addInputTiming(.{
+                .signal = ins.data.ref,
+                .classification = .synchronous,
+                .clock = ins.clk.ref,
+                .per_bit_slew = &.{.{ .bit = 1, .slew = .{
+                    .threshold = .{ .low_fraction = 0.1, .high_fraction = 0.9 },
+                    .rise = .{ .max = .{ .value = 200, .unit = .ps } },
+                } }},
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    try std.testing.expectError(error.InvalidTimingIntent, design.elaborate(BitTop));
+}
