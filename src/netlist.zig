@@ -923,17 +923,26 @@ pub const ExprBuilder = struct {
 
     fn cmp(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(1) {
         const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
-        const ae = self.coerce(a, W);
-        const be = self.coerce(b, W);
+        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
+        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
+        // Unsigned comparison when either operand is unsigned (Verilog rule).
+        // A narrower operand is extended explicitly so the emitted comparison
+        // is self-determined; equal-width operands are left untouched.
+        const signed_op = a_signed and b_signed;
+        const aw = if (@TypeOf(a) == comptime_int) W else asAny(a).width;
+        const bw = if (@TypeOf(b) == comptime_int) W else asAny(b).width;
+        const ae = if (aw < W) self.normOperand(a, W, signed_op).e else self.coerce(a, W);
+        const be = if (bw < W) self.normOperand(b, W, signed_op).e else self.coerce(b, W);
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
     fn scmp(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(1) {
         const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
-        var ae = self.coerce(a, W);
-        var be = self.coerce(b, W);
-        ae.is_signed = true;
-        be.is_signed = true;
+        // Signed comparisons extend both operands explicitly, target-width
+        // first, so the emitted `$signed` comparison never leans on the
+        // operator context.
+        const ae = self.normOperand(a, W, true).e;
+        const be = self.normOperand(b, W, true).e;
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
     }
 
@@ -3880,4 +3889,11 @@ test "unequal-width operands fold exactly like explicit extension" {
     try std.testing.expectEqual(@as(?u64, 0x00), b.intern(b.band(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
     try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.bor(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
     try std.testing.expectEqual(@as(?u64, 0xFF), b.intern(b.bxor(b.lit(8, 0xF0), b.lit(4, 0x0F))).known);
+
+    // Comparisons follow the same extension rule: zero-extend when either
+    // operand is unsigned, sign-extend only when both are signed.
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.eq(b.lit(8, 0xFF), b.lit(4, 0x0F))).known);
+    try std.testing.expectEqual(@as(?u64, 1), b.intern(b.lt(b.lit(4, 0xF), b.lit(8, 0x10))).known);
+    try std.testing.expectEqual(@as(?u64, 0), b.intern(b.eq(b.asSigned(b.lit(4, 0xF)), b.lit(8, 0xFF))).known);
+    try std.testing.expectEqual(@as(?u64, 1), b.intern(b.slt(b.asSigned(b.lit(4, 0xF)), b.asSigned(b.lit(8, 0)))).known);
 }

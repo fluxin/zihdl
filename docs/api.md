@@ -138,13 +138,15 @@ rather than the authoring half of this specific project.
 ### Gaps by category
 
 **Expression language**
-- Binary arithmetic (`+`, `-`, `*`, `/`, `%`) and bitwise (`&`, `|`, `^`)
+- Binary arithmetic (`+`, `-`, `*`, `/`, `%`), bitwise (`&`, `|`, `^`) and
+  comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, signed variants) operators
   normalize unequal-width operands to the operation width with explicit
   zero/sign extension (signed only when both operands are signed), so the
-  emitted RTL is self-determined and constant folds match simulation. Division
-  by zero stays unfolded: Icarus yields `x` and `oasic` reports an explicit
-  unknown-value failure. Comparisons still lean on Verilog operator context for
-  unequal widths.
+  emitted RTL is self-determined and constant folds match simulation; the
+  `both signed` rule matches iverilog. Division by zero stays unfolded: Icarus
+  yields `x` and `oasic` reports an explicit unknown-value failure. Shifts are
+  width-typed by the left operand and assignments force explicit extension, so
+  the shift amount never inherits operator context.
 - Rotate has no operator: constant rotate is `lib.rotl`/`rotr` (slice
   concatenation); dynamic rotate is built from shifts/ors.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
@@ -229,11 +231,9 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Context-free normalization for the remaining operators.** Arithmetic
-   (`+`, `-`, `*`, `/`, `%`) and bitwise operators extend unequal-width
-   operands explicitly, so folded and signal-driven values agree. Comparisons
-   and the right operand of shifts still rely on Verilog operator context;
-   apply the same normalization there.
+1. **Signed declarations.** Expression-level `asSigned` is now the only place
+   signedness is stated; let ports, registers and memories declare it so every
+   consumer does not have to re-apply the cast.
 2. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
    next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
    per-bit synchronizer intent in the lint, and a formal crossing proof rather

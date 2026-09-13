@@ -257,6 +257,53 @@ test "division and remainder emit target operators with Verilog widths" {
     try std.testing.expect(std.mem.indexOf(u8, v, "assign swq = $signed(($signed(w) / $signed({{4{d[7]}}, d})));") != null);
 }
 
+test "comparisons extend unequal-width operands explicitly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const C = struct {
+        pub const Inputs = struct {
+            a: Signal(8),
+            b: Signal(4),
+            c: Signal(4),
+            d: Signal(3),
+        };
+        pub const Outputs = struct {
+            ueq: Signal(1),
+            ult: Signal(1),
+            seq: Signal(1),
+            slt: Signal(1),
+        };
+        pub const name = "cmp_ops";
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+
+            try mb.assign(outs.ueq, b.eq(ins.a, ins.b));
+            try mb.assign(outs.ult, b.lt(ins.c, ins.a));
+            try mb.assign(outs.seq, b.eq(b.asSigned(ins.a), b.asSigned(ins.b)));
+            try mb.assign(outs.slt, b.slt(ins.a, ins.d));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.input("a", 8);
+    const b4 = try top.input("b", 4);
+    const c4 = try top.input("c", 4);
+    const d3 = try top.input("d", 3);
+    _ = try top.instantiate(C, "u_c", .{ .a = a, .b = b4, .c = c4, .d = d3 }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign ueq = (a == {{4{1'b0}}, b});") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign ult = ({{4{1'b0}}, c} < a);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign seq = ($signed(a) == $signed({{4{b[3]}}, b}));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign slt = ($signed(a) < $signed({{5{d[2]}}, d}));") != null);
+}
+
 test "localparam symbols are usable in expressions and case labels" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
