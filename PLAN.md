@@ -196,7 +196,7 @@ oasic-side development required for this:
     sequence/property SVA remains an optional future target; the open front end
     for it (Yosys Property IR, Verific-free) is still landing through 2026.
 
-### Phase 1.5 — parameterization, bundles, and elaboration passes (next)
+### Phase 1.5 — parameterization, bundles, and elaboration passes (done)
 
 - **Verilog parameter emission and instance-site overrides (done).** A comptime
   `Params` schema (`ParamSpec(W)` fields) on blocks and black boxes, with
@@ -259,7 +259,7 @@ oasic-side development required for this:
     emission shape. `zig build sim` / `verify` are repointed at oasic's
     simulator and F1 flow once its Verilog front end lands.
 
-### Phase 3 — IP library
+### Phase 3 — IP library (in progress)
 
 15. **Protocol blocks**: AXI4-Lite, UART, SPI master/target, I2C target, async
     FIFO, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers. First
