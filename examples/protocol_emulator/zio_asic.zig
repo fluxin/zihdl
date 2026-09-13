@@ -60,6 +60,7 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
             tx_empty: Signal(1),
             underrun: Signal(1),
             op_fault: Signal(1),
+            pc_oob: Signal(1),
         };
 
         pub fn build(mb: *ModuleBuilder) !void {
@@ -128,7 +129,7 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
             const core_fault = try mb.wire("core_fault", 1);
             const core_fetch = try mb.wire("core_fetch", 1);
             const prog_reject = try mb.wire("prog_reject", 1);
-            const pc_oob = try mb.wire("pc_oob", 1);
+            const part_pc_oob = try mb.wire("part_pc_oob", 1);
             const capture_seq = try mb.wire("capture_seq", 16);
             const capture_lost = try mb.wire("capture_lost", 16);
             const part_host_ack = try mb.wire("part_host_ack", 1);
@@ -185,7 +186,7 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
                     .host_rvalid = host_rvalid,
                     .host_rdata = host_rdata,
                     .prog_reject = prog_reject,
-                    .pc_oob = pc_oob,
+                    .pc_oob = part_pc_oob,
                     .capture_seq = capture_seq,
                     .capture_lost = capture_lost,
                     .sram_csb0 = sram_csb0,
@@ -213,14 +214,17 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
             }, .{ .dout0 = sram_dout0, .dout1 = sram_dout1 }, .{});
 
             // Generic ZIO core. Instructions come from the registered SRAM
-            // output, not the partition's combinational OOB mux: the ZIO fetch
-            // address is itself combinational from the executing instruction,
-            // and routing `pc -> inst_word -> inst -> pc` would close a
-            // combinational loop. `pc_oob` is registered, so the hold
-            // instruction still parks an out-of-range fetch with no loop.
+            // output. The OOB hold instruction is built from a *registered*
+            // copy of the fetch address aligned with that SRAM response (the
+            // partition raises pc_oob one cycle after the OOB address), so
+            // `core_inst` depends only on registers: routing a combinational
+            // core_pc through the hold data path would close the loop
+            // `core_pc -> core_inst -> inst -> core_pc` regardless of the mux
+            // select.
             const core_inst = try mb.wire("core_inst", 32);
-            const hold_inst = b.concat(.{ b.lit(4, 0), b.lit(4, 0), core_pc, b.lit(16, 0) });
-            try mb.assign(core_inst, b.ternary(pc_oob.expr(), hold_inst, sram_dout1.expr()));
+            const pc_fetch_r = try js_asic.lib.regNext(mb, "pc_fetch_r", core_pc, domain);
+            const hold_inst = b.concat(.{ b.lit(4, 0), b.lit(4, 0), pc_fetch_r.expr(), b.lit(16, 0) });
+            try mb.assign(core_inst, b.ternary(part_pc_oob.expr(), hold_inst, sram_dout1.expr()));
 
             _ = try mb.instantiate(zio.ZioTimingUnitBlock, "u_core", .{
                 .clk = domain.clk,
@@ -249,6 +253,7 @@ pub fn ZioAsicBlock(comptime i2c_addr: u7, comptime program_words: usize) type {
             try mb.assign(outs.tx_empty, tx_empty_w);
             try mb.assign(outs.underrun, underrun_w);
             try mb.assign(outs.op_fault, core_fault);
+            try mb.assign(outs.pc_oob, part_pc_oob);
         }
     };
 }
@@ -271,4 +276,9 @@ test "zio asic elaborates with the macro, partition and FIFO routing" {
     const sram_instances = std.mem.count(u8, v, "sky130_sram_1kbyte_1rw1r_32x256_8 u_");
     try std.testing.expectEqual(@as(usize, 1), sram_instances);
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [7:0] TX_FIFO_HOST_ADDR = 8'd248;") != null);
+    // OOB hold is built from the registered fetch address, never from the
+    // combinational core_pc, so `core_inst` depends only on registers.
+    try std.testing.expect(std.mem.indexOf(u8, v, "pc_fetch_r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign core_inst = (part_pc_oob ? {4'd0, 4'd0, pc_fetch_r, 16'd0} : sram_dout1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "output wire        pc_oob") != null);
 }

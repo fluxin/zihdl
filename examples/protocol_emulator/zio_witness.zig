@@ -312,17 +312,20 @@ pub fn buildBundle(alloc: std.mem.Allocator, clk_hz: u64) !Bundle {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(zio_asic.ZioAsicI2c42);
     var sdc_text = try sdc.emitDesignSdc(alloc, &design, .{});
+    var json_text = try metadata.emitDesignJson(alloc, &design, .{});
     if (clk_hz == 60_000_000) {
         // The ZIO top annotates the product 120 MHz clock; the 60 MHz witness
-        // runs the same netlist at half rate, so its constraint is doubled.
-        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "-period 8.333", "-period 16.667");
-        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "{0.000 4.167}", "{0.000 8.333}");
+        // runs the same netlist at half rate, so its period doubles and the
+        // falling edge moves to ~8.333 ns.
+        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "-period 8.333", "-period 16.666");
+        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "{0.000 4.166}", "{0.000 8.333}");
+        json_text = try std.mem.replaceOwned(u8, alloc, json_text, "\"freq_hz\": 120000000", "\"freq_hz\": 60000000");
     }
     return .{
         .clk_hz = clk_hz,
         .half_cycles = half,
         .rtl = try verilog.emitDesign(alloc, &design, .{}),
-        .json = try metadata.emitDesignJson(alloc, &design, .{}),
+        .json = json_text,
         .sdc = sdc_text,
         .program = frame.program,
         .payload = frame.stream,
@@ -341,121 +344,195 @@ fn hexWords(alloc: std.mem.Allocator, words: []const u32) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, prog_used: usize, payload_used: usize) ![]u8 {
+const host_w = 7; // [3:0] gpio_in, [4] scl, [5] sda_drive, [6] sda_oe
+
+/// Zig-generated I2C host stimulus: one ROM row per clock, so the Verilog
+/// harness stays a physical layer (clock, reset, open-drain combine, edge
+/// dump) with no protocol logic.
+pub const HostStim = struct {
+    alloc: std.mem.Allocator,
+    list: std.ArrayList(u8),
+    quarter: usize,
+
+    fn add(self: *HostStim, scl: u1, sda_drive: u1, sda_oe: u1, cycles: usize) !void {
+        const v: u8 = (@as(u8, scl) << 4) | (@as(u8, sda_drive) << 5) | (@as(u8, sda_oe) << 6);
+        var i: usize = 0;
+        while (i < cycles) : (i += 1) try self.list.append(self.alloc, v);
+    }
+
+    fn idle(self: *HostStim, cycles: usize) !void {
+        try self.add(1, 1, 0, cycles);
+    }
+
+    fn bit(self: *HostStim, value: u1) !void {
+        try self.add(0, value, 1, self.quarter);
+        try self.add(1, value, 1, self.quarter * 2);
+        try self.add(0, value, 1, self.quarter);
+    }
+
+    fn byte(self: *HostStim, value: u8) !void {
+        var i: i32 = 7;
+        while (i >= 0) : (i -= 1) try self.bit(@intCast((value >> @intCast(i)) & 1));
+        // ACK slot: release SDA; the loader pulls it low.
+        try self.add(0, 1, 0, self.quarter);
+        try self.add(1, 1, 0, self.quarter);
+        try self.add(0, 1, 0, self.quarter);
+    }
+
+    fn word(self: *HostStim, value: u32) !void {
+        try self.byte(@truncate(value >> 24));
+        try self.byte(@truncate(value >> 16));
+        try self.byte(@truncate(value >> 8));
+        try self.byte(@truncate(value));
+    }
+
+    fn start(self: *HostStim) !void {
+        try self.add(1, 1, 1, self.quarter);
+        try self.add(1, 0, 1, self.quarter);
+        try self.add(0, 0, 1, self.quarter);
+    }
+
+    fn stop(self: *HostStim) !void {
+        try self.add(0, 0, 1, self.quarter);
+        try self.add(1, 0, 1, self.quarter);
+        try self.add(1, 0, 0, self.quarter);
+    }
+};
+
+pub const HostImage = struct {
+    bytes: []u8,
+    cycles: usize,
+};
+
+/// Build the complete witness host schedule: program load, payload load, one
+/// frame, stop, empty restart (underrun), then an out-of-range jump program
+/// and a final stop.
+pub fn buildHostImage(alloc: std.mem.Allocator, clk_hz: u64, program: []const u32, payload: []const u32) !HostImage {
+    const quarter: usize = @intCast(@max(1, clk_hz / 4_000_000));
+    var gen = HostStim{ .alloc = alloc, .list = .empty, .quarter = quarter };
+    errdefer gen.list.deinit(alloc);
+    const ns = struct {
+        fn cycles(clk: u64, nanoseconds: u64) usize {
+            return @intCast((nanoseconds * clk) / 1_000_000_000);
+        }
+    }.cycles;
+
+    try gen.idle(40);
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0x00);
+    for (program) |w| try gen.word(w);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 2_000));
+
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF8);
+    for (payload) |w| try gen.word(w);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 2_000));
+
+    // Start and let the full frame plus two NLP pulses play out.
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x01);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 60_000));
+
+    // Stop, restart with an empty FIFO: the first pull underruns.
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x02);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 2_000));
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x01);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 6_000));
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x02);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 2_000));
+
+    // Out-of-range fetch: JMP ALWAYS 0xFF must park on the OOB hold.
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0x00);
+    try gen.word(0x00FF_0000);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 2_000));
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x01);
+    try gen.stop();
+    try gen.idle(ns(clk_hz, 4_000));
+    try gen.start();
+    try gen.byte(0x84);
+    try gen.byte(0xF0);
+    try gen.byte(0x02);
+    try gen.stop();
+    try gen.idle(20);
+
+    const bytes = try gen.list.toOwnedSlice(alloc);
+    return .{ .bytes = bytes, .cycles = bytes.len };
+}
+
+fn hexBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    for (bytes) |byte| {
+        const line = try std.fmt.allocPrint(alloc, "{x:0>2}\n", .{byte});
+        defer alloc.free(line);
+        try out.appendSlice(alloc, line);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, cycles: usize) ![]u8 {
+    const addr_w = std.math.log2_int_ceil(usize, @max(2, cycles));
     const template =
         \\`timescale 1ns / 1ps
         \\`default_nettype none
         \\module zio_witness_tb;
         \\    reg clk = 0;
         \\    reg rst_n = 0;
-        \\    reg scl = 1;
-        \\    reg sda_drive = 1;
-        \\    reg sda_oe = 0;
-        \\    reg [3:0] gpio_in = 0;
+        \\    reg [@AW@-1:0] addr = 0;
+        \\    reg [6:0] stim [0:@CYCLES@-1];
+        \\    wire [3:0] gpio_in = stim[addr][3:0];
+        \\    wire scl = stim[addr][4];
+        \\    wire sda_drive = stim[addr][5];
+        \\    wire sda_oe = stim[addr][6];
         \\    wire sda_in, sda_out, sda_out_oe;
         \\    wire [3:0] gpio_out, gpio_oe;
-        \\    wire core_running, tx_full, tx_empty, underrun, op_fault;
+        \\    wire core_running, tx_full, tx_empty, underrun, op_fault, pc_oob;
         \\    wire sda_bus = (sda_oe && !sda_drive) ? 1'b0 : (sda_out_oe && !sda_out) ? 1'b0 : 1'b1;
         \\    assign sda_in = sda_bus;
+        \\    always #@HALF@ clk = ~clk;
+        \\    initial $readmemh("out/zio_asic_@TAG@_host.hex", stim);
+        \\    initial begin rst_n = 0; #50; rst_n = 1; end
         \\    programmable_asic_zio_42 u_dut (
         \\        .clk(clk), .rst_n(rst_n), .i2c_scl(scl), .i2c_sda_in(sda_in), .gpio_in(gpio_in),
         \\        .i2c_sda_out(sda_out), .i2c_sda_oe(sda_out_oe), .gpio_out(gpio_out), .gpio_oe(gpio_oe),
         \\        .core_running(core_running), .tx_full(tx_full), .tx_empty(tx_empty),
-        \\        .underrun(underrun), .op_fault(op_fault)
+        \\        .underrun(underrun), .op_fault(op_fault), .pc_oob(pc_oob)
         \\    );
-        \\    always #@HALF@ clk = ~clk;
-        \\
-        \\    reg [31:0] prog [0:@PROG_DEPTH@-1];
-        \\    reg [31:0] payload [0:@PAYLOAD_DEPTH@-1];
-        \\    integer prog_used = @PROG_USED@;
-        \\    integer payload_used = @PAYLOAD_USED@;
-        \\    initial begin
-        \\        $readmemh("out/zio_asic_@TAG@_prog.hex", prog);
-        \\        $readmemh("out/zio_asic_@TAG@_payload.hex", payload);
-        \\    end
-        \\
-        \\    task i2c_delay; begin #250; end endtask
-        \\    task i2c_start;
-        \\        begin
-        \\            sda_drive = 1'b1; sda_oe = 1'b1; scl = 1'b1; i2c_delay;
-        \\            sda_drive = 1'b0; i2c_delay; scl = 1'b0; i2c_delay;
-        \\        end
-        \\    endtask
-        \\    task i2c_stop;
-        \\        begin
-        \\            sda_drive = 1'b0; sda_oe = 1'b1; i2c_delay; scl = 1'b1; i2c_delay;
-        \\            sda_oe = 1'b0; i2c_delay;
-        \\        end
-        \\    endtask
-        \\    task i2c_write_byte;
-        \\        input [7:0] b; integer i;
-        \\        begin
-        \\            for (i = 7; i >= 0; i = i - 1) begin
-        \\                sda_drive = b[i]; sda_oe = 1'b1; i2c_delay;
-        \\                scl = 1'b1; i2c_delay; i2c_delay; scl = 1'b0; i2c_delay;
-        \\            end
-        \\            sda_oe = 1'b0; i2c_delay; scl = 1'b1; i2c_delay;
-        \\            if (sda_bus != 1'b0) begin $display("ERROR: NACK"); $fatal(1); end
-        \\            i2c_delay; scl = 1'b0; i2c_delay;
-        \\        end
-        \\    endtask
-        \\    task i2c_write_word;
-        \\        input [31:0] w;
-        \\        begin
-        \\            i2c_write_byte(w[31:24]); i2c_write_byte(w[23:16]);
-        \\            i2c_write_byte(w[15:8]); i2c_write_byte(w[7:0]);
-        \\        end
-        \\    endtask
-        \\    integer idx;
-        \\    task load_program;
-        \\        begin
-        \\            i2c_start; i2c_write_byte(8'h84); i2c_write_byte(8'h00);
-        \\            for (idx = 0; idx < prog_used; idx = idx + 1) i2c_write_word(prog[idx]);
-        \\            i2c_stop;
-        \\        end
-        \\    endtask
-        \\    task load_payload;
-        \\        begin
-        \\            i2c_start; i2c_write_byte(8'h84); i2c_write_byte(8'hF8);
-        \\            for (idx = 0; idx < payload_used; idx = idx + 1) i2c_write_word(payload[idx]);
-        \\            i2c_stop;
-        \\        end
-        \\    endtask
-        \\    task start_core;
-        \\        begin
-        \\            i2c_start; i2c_write_byte(8'h84); i2c_write_byte(8'hF0);
-        \\            i2c_write_byte(8'h01); i2c_stop;
-        \\        end
-        \\    endtask
-        \\    task stop_core;
-        \\        begin
-        \\            i2c_start; i2c_write_byte(8'h84); i2c_write_byte(8'hF0);
-        \\            i2c_write_byte(8'h02); i2c_stop;
-        \\        end
-        \\    endtask
-        \\
         \\    integer ef;
         \\    initial ef = $fopen("out/zio_asic_@TAG@_edges.txt", "w");
         \\    always @(posedge clk) begin
         \\        $fwrite(ef, "%02h ", {rst_n, scl, sda_in, gpio_in});
         \\        #0.001;
-        \\        $fwrite(ef, "%04h\n", {op_fault, underrun, tx_empty, tx_full, gpio_out, gpio_oe, core_running, sda_out, sda_out_oe});
+        \\        $fwrite(ef, "%04h\n", {pc_oob, op_fault, underrun, tx_empty, tx_full, gpio_out, gpio_oe, core_running, sda_out, sda_out_oe});
         \\    end
-        \\
-        \\    initial begin
-        \\        clk = 0; rst_n = 0; scl = 1; sda_drive = 1; sda_oe = 0; gpio_in = 0;
-        \\        #50; rst_n = 1; #100;
-        \\        load_program;
-        \\        load_payload;
-        \\        start_core;
-        \\        #60000;
-        \\        stop_core;
-        \\        #2000;
-        \\        start_core;
-        \\        #6000;
-        \\        stop_core;
-        \\        $display("ZIO WITNESS HARNESS DONE");
-        \\        $finish;
+        \\    always @(posedge clk) begin
+        \\        if (addr < @CYCLES@ - 1) addr <= addr + 1;
+        \\        else begin #1; $display("ZIO WITNESS HARNESS DONE"); $finish; end
         \\    end
         \\endmodule
     ;
@@ -463,19 +540,11 @@ fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, p
     const pairs = [_][2][]const u8{
         .{ "@HALF@", half_ns },
         .{ "@TAG@", tag },
-        .{ "@PROG_USED@", try std.fmt.allocPrint(alloc, "{d}", .{prog_used}) },
-        .{ "@PAYLOAD_USED@", try std.fmt.allocPrint(alloc, "{d}", .{payload_used}) },
-        .{ "@PROG_DEPTH@", try std.fmt.allocPrint(alloc, "{d}", .{try depthFor(prog_used)}) },
-        .{ "@PAYLOAD_DEPTH@", try std.fmt.allocPrint(alloc, "{d}", .{try depthFor(payload_used)}) },
+        .{ "@CYCLES@", try std.fmt.allocPrint(alloc, "{d}", .{cycles}) },
+        .{ "@AW@", try std.fmt.allocPrint(alloc, "{d}", .{addr_w}) },
     };
     for (pairs) |pair| text = try std.mem.replaceOwned(u8, alloc, text, pair[0], pair[1]);
     return text;
-}
-
-fn depthFor(used: usize) !usize {
-    var d: usize = 2;
-    while (d < used) d *= 2;
-    return d;
 }
 
 // ============================================================================
@@ -550,27 +619,44 @@ fn appendJsonl(alloc: std.mem.Allocator, out: *std.ArrayList(u8), rows: []const 
         alloc,
         "{{\"schema\":\"oasic.stimulus/1\",\"top\":\"programmable_asic_zio_42\",\"clock\":\"clk\",\"period_ps\":{d}," ++
             "\"inputs\":[\"gpio_in[0]\",\"gpio_in[1]\",\"gpio_in[2]\",\"gpio_in[3]\",\"i2c_sda_in\",\"i2c_scl\",\"rst_n\"]," ++
-            "\"outputs\":[\"i2c_sda_oe\",\"i2c_sda_out\",\"core_running\",\"gpio_oe[0]\",\"gpio_oe[1]\",\"gpio_oe[2]\",\"gpio_oe[3]\",\"gpio_out[0]\",\"gpio_out[1]\",\"gpio_out[2]\",\"gpio_out[3]\"]}}\n",
+            "\"outputs\":[\"i2c_sda_oe\",\"i2c_sda_out\",\"core_running\",\"gpio_oe[0]\",\"gpio_oe[1]\",\"gpio_oe[2]\",\"gpio_oe[3]\",\"gpio_out[0]\",\"gpio_out[1]\",\"gpio_out[2]\",\"gpio_out[3]\",\"tx_full\",\"tx_empty\",\"underrun\",\"op_fault\",\"pc_oob\"]}}\n",
         .{period_ps},
     );
     try out.appendSlice(alloc, header);
     // Walk the model to fill per-row GPIO expectations; rows past the checked
-    // window (idle before the empty restart) stay unchecked (`x`).
+    // window (idle before the empty restart) stay unchecked (`x`). Status
+    // expectations cover the claimed scenarios: running/healthy during the
+    // frame window, and starved + OOB-parked on the final row after the empty
+    // restart and the out-of-range fetch.
     var run_idx: usize = 0;
     var run_left: u32 = 0;
     var level: u1 = 0;
     for (rows, 0..) |row, i| {
         var drive: [7]u8 = undefined;
         for (0..7) |b| drive[b] = '0' + @as(u8, @intCast((row.inputs >> @intCast(b)) & 1));
-        var expect: [11]u8 = [_]u8{'x'} ** 11;
+        var expect: [16]u8 = [_]u8{'x'} ** 16;
         if (i >= result.anchor and run_idx < runs.len and !runs[run_idx].min) {
             if (run_left == 0) {
                 level = runs[run_idx].level;
                 run_left = runs[run_idx].cycles;
             }
             expect[7] = if (level == 1) '1' else '0';
+            expect[2] = '1'; // core_running
+            expect[11] = '0'; // tx_full
+            expect[13] = '0'; // underrun
+            expect[14] = '0'; // op_fault
+            expect[15] = '0'; // pc_oob
             if (run_left > 0) run_left -= 1;
             if (run_left == 0) run_idx += 1;
+        }
+        if (i + 1 == rows.len) {
+            expect[2] = '0'; // core stopped
+            expect[7] = '0';
+            expect[11] = '0';
+            expect[12] = '1';
+            expect[13] = '1';
+            expect[14] = '0';
+            expect[15] = '1';
         }
         const line = try std.fmt.allocPrint(alloc, "{{\"drive\":\"{s}\",\"expect\":\"{s}\"}}\n", .{ drive, expect });
         try out.appendSlice(alloc, line);
@@ -664,6 +750,14 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("FAIL: underrun was not observed after the empty restart\n", .{});
             return error.UnderrunNotObserved;
         }
+        if ((rows[rows.len - 1].outputs >> 15) & 1 != 1) {
+            std.debug.print("FAIL: pc_oob was not observed after the out-of-range fetch\n", .{});
+            return error.OobNotObserved;
+        }
+        if ((rows[rows.len - 1].outputs >> 14) & 1 != 0) {
+            std.debug.print("FAIL: op_fault asserted on valid microcode\n", .{});
+            return error.UnexpectedOpFault;
+        }
         var jsonl = std.ArrayList(u8).empty;
         try appendJsonl(alloc, &jsonl, rows, runs, result, clk_hz);
         try cwd.writeFile(io, .{ .sub_path = out_path, .data = jsonl.items });
@@ -675,13 +769,15 @@ pub fn main(init: std.process.Init) !void {
         const clk_hz = cfg[0];
         const tag = if (clk_hz == 60_000_000) "60" else "120";
         const bundle = try buildBundle(alloc, clk_hz);
-        const harness = try harnessText(alloc, tag, cfg[1], bundle.program.len, bundle.payload.len);
+        const host = try buildHostImage(alloc, clk_hz, bundle.program, bundle.payload);
+        const harness = try harnessText(alloc, tag, cfg[1], host.cycles);
         try cwd.createDirPath(io, "out");
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}.v", .{tag}), .data = bundle.rtl });
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}.json", .{tag}), .data = bundle.json });
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}.sdc", .{tag}), .data = bundle.sdc });
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_prog.hex", .{tag}), .data = try hexWords(alloc, bundle.program) });
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_payload.hex", .{tag}), .data = try hexWords(alloc, bundle.payload) });
+        try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_host.hex", .{tag}), .data = try hexBytes(alloc, host.bytes) });
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_tb.v", .{tag}), .data = harness });
         const manifest = try std.fmt.allocPrint(
             alloc,

@@ -338,7 +338,8 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                     b.assign(delay_cnt, 0),
                     b.assign(osr, 0),
                     b.assign(osr_cnt, 0),
-                    b.assign(underrun_r, 0),
+                    // `underrun` is sticky across start/stop; only reset clears
+                    // it, so a data gap stays visible to the host.
                 }, &.{
                     b.when(b.eq(ins.ctrl_stop, 1), &.{
                         b.assign(running, 0),
