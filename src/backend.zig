@@ -8,6 +8,7 @@ pub const render = @import("backend/render.zig");
 pub const verilog = @import("backend/verilog.zig");
 pub const systemverilog = @import("backend/systemverilog.zig");
 pub const metadata = @import("backend/metadata.zig");
+pub const provenance = @import("backend/provenance.zig");
 pub const sdc = @import("backend/sdc.zig");
 
 /// HDL target selected through the generic `emitDesign` / `emitModule` hub.
@@ -76,5 +77,6 @@ test {
     _ = verilog;
     _ = systemverilog;
     _ = metadata;
+    _ = provenance;
     _ = sdc;
 }

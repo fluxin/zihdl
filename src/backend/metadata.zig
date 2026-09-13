@@ -6,6 +6,7 @@
 const std = @import("std");
 const ir = @import("../netlist.zig");
 const render = @import("render.zig");
+const provenance = @import("provenance.zig");
 
 pub const schema = "js_asic.design/1";
 
@@ -13,6 +14,10 @@ pub const Options = struct {
     whitespace: enum { minified, indent_2, indent_4 } = .indent_2,
     /// Top module name; defaults to the module marked by `Design.elaborate`.
     top: ?[]const u8 = null,
+    /// Optional provenance collector. When set, an extra `"provenance"`
+    /// section documents operations, authored groups and emitted byte ranges;
+    /// when null the sidecar is byte-for-byte unchanged.
+    provenance: ?*const provenance.Collector = null,
 };
 
 pub fn emitDesignJson(allocator: std.mem.Allocator, design: *const ir.Design, options: Options) ![]u8 {
@@ -36,6 +41,7 @@ pub fn emitDesignJson(allocator: std.mem.Allocator, design: *const ir.Design, op
     try j.beginArray();
     for (design.modules.items) |module| try writeModule(&j, allocator, module);
     try j.endArray();
+    if (options.provenance) |collector| try provenance.writeJson(&j, collector);
     try j.endObject();
     try aw.writer.writeAll("\n");
     return aw.toOwnedSlice();

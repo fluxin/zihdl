@@ -631,16 +631,39 @@ fn foldNode(x: *const AnyExpr) ?u64 {
     };
 }
 
+/// One elaboration-time constant fold: `node` collapsed to `value` before it
+/// entered the IR. Descriptive only and never serialized as identity; the
+/// provenance sidecar reports these as omitted expressions.
+pub const FoldEvent = struct {
+    kind: std.meta.Tag(AnyExpr.Node),
+    width: usize,
+    is_signed: bool,
+    op: ?BinOp = null,
+    index: ?usize = null,
+    hi: ?usize = null,
+    lo: ?usize = null,
+    count: ?usize = null,
+    value: u64,
+};
+
+/// An authored functional group root. The group's membership is the transitive
+/// closure of `root`; a shared expression may be rooted by any number of tags.
+pub const GroupTag = struct {
+    name: []const u8,
+    root: AnyExpr,
+};
+
 pub const ExprBuilder = struct {
     allocator: std.mem.Allocator,
     intern_table: ?*InternTable = null,
+    fold_log: ?*std.ArrayList(FoldEvent) = null,
 
     pub fn init(allocator: std.mem.Allocator) ExprBuilder {
         return .{ .allocator = allocator };
     }
 
-    pub fn initInterned(allocator: std.mem.Allocator, intern_table: *InternTable) ExprBuilder {
-        return .{ .allocator = allocator, .intern_table = intern_table };
+    pub fn initInterned(allocator: std.mem.Allocator, intern_table: *InternTable, fold_log: ?*std.ArrayList(FoldEvent)) ExprBuilder {
+        return .{ .allocator = allocator, .intern_table = intern_table, .fold_log = fold_log };
     }
 
     /// Canonicalizes (and constant-folds) any expression root. Statement and
@@ -654,6 +677,7 @@ pub const ExprBuilder = struct {
         var node = x;
         node.known = foldNode(&node);
         if (node.known) |value| {
+            if (std.meta.activeTag(x.node) != .lit) self.logFold(x, value);
             node.node = .{ .lit = value };
             node.hash = 0;
         }
@@ -670,6 +694,27 @@ pub const ExprBuilder = struct {
         const p = self.allocator.create(AnyExpr) catch @panic("js_asic: expression arena out of memory");
         p.* = node;
         return p;
+    }
+
+    fn logFold(self: ExprBuilder, x: AnyExpr, value: u64) void {
+        const log = self.fold_log orelse return;
+        var event = FoldEvent{
+            .kind = std.meta.activeTag(x.node),
+            .width = x.width,
+            .is_signed = x.is_signed,
+            .value = value,
+        };
+        switch (x.node) {
+            .bin_op => |bo| event.op = bo.op,
+            .bit => |bt| event.index = bt.index,
+            .slice => |s| {
+                event.hi = s.hi;
+                event.lo = s.lo;
+            },
+            .replicate => |rep| event.count = rep.count,
+            else => {},
+        }
+        log.append(self.allocator, event) catch @panic("js_asic: expression arena out of memory");
     }
 
     fn dupStmts(self: ExprBuilder, stmts: []const Stmt) []const Stmt {
@@ -1233,6 +1278,10 @@ pub const Module = struct {
     clocks: []const ClockDomain = &.{},
     /// Bundle shapes declared in this module (packed-struct emission).
     bundles: []const Bundle = &.{},
+    /// Authored functional group roots tagged during elaboration.
+    groups: []const GroupTag = &.{},
+    /// Constant-fold events observed while elaborating this module.
+    folds: []const FoldEvent = &.{},
 };
 
 // ============================================================================
@@ -1818,6 +1867,8 @@ pub const ModuleBuilder = struct {
     meta: std.ArrayList(EnumGroup),
     clocks: std.ArrayList(ClockDomain),
     bundles: std.ArrayList(Bundle),
+    groups: std.ArrayList(GroupTag),
+    fold_log: std.ArrayList(FoldEvent),
 
     pub fn init(allocator: std.mem.Allocator, design: *Design, name: []const u8) !ModuleBuilder {
         return .{
@@ -1832,6 +1883,8 @@ pub const ModuleBuilder = struct {
             .meta = .empty,
             .clocks = .empty,
             .bundles = .empty,
+            .groups = .empty,
+            .fold_log = .empty,
         };
     }
 
@@ -1843,10 +1896,20 @@ pub const ModuleBuilder = struct {
         self.meta.deinit(self.allocator);
         self.clocks.deinit(self.allocator);
         self.bundles.deinit(self.allocator);
+        self.groups.deinit(self.allocator);
+        self.fold_log.deinit(self.allocator);
     }
 
     pub fn exprs(self: *ModuleBuilder) ExprBuilder {
-        return ExprBuilder.initInterned(self.allocator, &self.intern_table);
+        return ExprBuilder.initInterned(self.allocator, &self.intern_table, &self.fold_log);
+    }
+
+    /// Tags `expr` as a root of the authored functional group `name`. The
+    /// group's emitted membership is the transitive closure of every root
+    /// tagged with that name; shared subexpressions may belong to many groups.
+    /// Metadata only: grouping never changes emitted RTL.
+    pub fn tagGroup(self: *ModuleBuilder, name: []const u8, expr: anytype) !void {
+        try self.groups.append(self.allocator, .{ .name = name, .root = self.intern(expr) });
     }
 
     /// Canonicalizes and constant-folds an expression root into this module's
@@ -2667,6 +2730,8 @@ pub const ModuleBuilder = struct {
             .meta = try self.meta.toOwnedSlice(self.allocator),
             .clocks = try self.clocks.toOwnedSlice(self.allocator),
             .bundles = try self.bundles.toOwnedSlice(self.allocator),
+            .groups = try self.groups.toOwnedSlice(self.allocator),
+            .folds = try self.fold_log.toOwnedSlice(self.allocator),
         };
         try self.design.register(mod);
         return mod;

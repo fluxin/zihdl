@@ -19,6 +19,7 @@ const js_asic = @import("js_asic");
 const netlist = js_asic.netlist;
 const verilog = js_asic.backend.verilog;
 const metadata = js_asic.backend.metadata;
+const provenance = js_asic.backend.provenance;
 const sdc = js_asic.backend.sdc;
 const eth_mc = @import("eth_microcode.zig");
 const zio_asic = @import("zio_asic.zig");
@@ -311,8 +312,11 @@ pub fn buildBundle(alloc: std.mem.Allocator, clk_hz: u64) !Bundle {
     const frame = try eth_mc.assembleZioPayload(alloc, &default_payload, .{ .half_cycles = half, .nlp_period_cycles = short_nlp_period });
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(zio_asic.ZioAsicI2c42);
+    var prov = try provenance.Collector.init(alloc, &design);
+    const rtl = try verilog.emitDesign(alloc, &design, .{ .provenance = &prov });
+    prov.bindArtifact(rtl, "verilog2001");
     var sdc_text = try sdc.emitDesignSdc(alloc, &design, .{});
-    var json_text = try metadata.emitDesignJson(alloc, &design, .{});
+    var json_text = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &prov });
     if (clk_hz == 60_000_000) {
         // The ZIO top annotates the product 120 MHz clock; the 60 MHz witness
         // runs the same netlist at half rate, so its period doubles and the
@@ -324,7 +328,7 @@ pub fn buildBundle(alloc: std.mem.Allocator, clk_hz: u64) !Bundle {
     return .{
         .clk_hz = clk_hz,
         .half_cycles = half,
-        .rtl = try verilog.emitDesign(alloc, &design, .{}),
+        .rtl = rtl,
         .json = json_text,
         .sdc = sdc_text,
         .program = frame.program,

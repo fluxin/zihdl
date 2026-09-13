@@ -314,6 +314,15 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 b.resize(fifo_pop, fifo_cnt_w),
             );
 
+            // Authored functional groups for the artifact provenance sidecar.
+            // Membership is the transitive closure of each root, so the shared
+            // FIFO-status subexpressions appear in more than one group and the
+            // mask pipeline is covered without tagging every add.
+            try mb.tagGroup("zio_mask_generation", out_mask);
+            try mb.tagGroup("zio_fifo_control", fifo_push);
+            try mb.tagGroup("zio_fifo_control", fifo_pop);
+            try mb.tagGroup("zio_fifo_control", fifo_cnt_next);
+
             try mb.assign(outs.pc, fetch_addr);
             try mb.assign(outs.core_running, running.expr());
             try mb.assign(outs.op_fault, fault.expr());

@@ -337,10 +337,10 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
     if (wrote_section) try render.appendStr(&out, allocator, "\n");
 
     // Hoisted shared subexpressions (definitions)
-    for (renderer.defs.items) |def| {
-        try render.appendFmt(&out, allocator, "    {s}\n", .{def});
+    if (renderer.hoisted.items.len > 0) {
+        try renderer.emitHoistedDefs(&out);
+        try render.appendStr(&out, allocator, "\n");
     }
-    if (renderer.defs.items.len > 0) try render.appendStr(&out, allocator, "\n");
 
     // Continuous assignments
     for (module.assigns) |a| {

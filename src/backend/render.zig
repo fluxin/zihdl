@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ir = @import("../netlist.zig");
+const provenance = @import("provenance.zig");
 
 const Stmt = ir.Stmt;
 const AnyExpr = ir.AnyExpr;
@@ -36,9 +37,13 @@ pub const Renderer = struct {
     hoist: ExprMap = .empty,
     temps: std.ArrayList(Temp) = .empty,
     hoisted: std.ArrayList(ir.AnyExpr) = .empty,
-    defs: std.ArrayList([]const u8) = .empty,
     name_counter: usize = 0,
     names: ?[]const ?[]const u8 = null,
+    /// Optional provenance sink; when set, expression emissions record exact
+    /// byte ranges for the artifact being built.
+    spans: ?*provenance.Collector = null,
+    /// Context attributed to the next recorded occurrence.
+    occurrence: provenance.Occurrence = .assign,
 
     pub fn init(allocator: std.mem.Allocator) Renderer {
         return .{ .allocator = allocator };
@@ -48,7 +53,10 @@ pub const Renderer = struct {
         self.hoist.deinit(self.allocator);
         self.temps.deinit(self.allocator);
         self.hoisted.deinit(self.allocator);
-        self.defs.deinit(self.allocator);
+    }
+
+    fn recordOccurrence(self: *Renderer, expr: ir.AnyExpr, occurrence: provenance.Occurrence, start: usize, end: usize) void {
+        if (self.spans) |collector| collector.record(expr, occurrence, start, end);
     }
 
     /// Emitted text for a scope symbol: the declared name, unless a name map
@@ -102,14 +110,25 @@ pub const Renderer = struct {
 
         for (module.assigns) |a| try self.selectExpr(module, a.src, &counts);
         for (module.processes) |proc| try self.selectStmts(module, proc.stmts, &counts);
+    }
 
+    /// Emits the hoisted subexpression definitions (`assign tmpN = ...;`) in
+    /// deterministic temp order. Each definition is rendered with its own node
+    /// temporarily unhoisted so the right-hand side expands in place; all other
+    /// hoisted nodes stay registered and emit as `tmpN` uses.
+    pub fn emitHoistedDefs(self: *Renderer, out: *std.ArrayList(u8)) !void {
+        if (self.hoisted.items.len == 0) return;
+        const prev = self.occurrence;
+        self.occurrence = .hoisted_def;
+        defer self.occurrence = prev;
         for (self.hoisted.items) |node| {
             const idx = self.hoist.get(node).?;
             _ = self.hoist.remove(node);
-            const rhs = try emitExpr(self, node);
-            defer self.allocator.free(rhs);
-            const def = try std.fmt.allocPrint(self.allocator, "assign {s} = {s};", .{ self.temps.items[idx].name, rhs });
-            try self.defs.append(self.allocator, def);
+            try appendStr(out, self.allocator, "    assign ");
+            try appendStr(out, self.allocator, self.temps.items[idx].name);
+            try appendStr(out, self.allocator, " = ");
+            try emitExprTo(out, self, node);
+            try appendStr(out, self.allocator, ";\n");
             try self.hoist.put(self.allocator, node, idx);
         }
     }
@@ -369,6 +388,9 @@ pub fn emitProcess(
     assertions: bool,
 ) !void {
     const alloc = r.allocator;
+    const prev_occurrence = r.occurrence;
+    r.occurrence = .process;
+    defer r.occurrence = prev_occurrence;
     switch (proc.sensitivity) {
         .comb => {
             switch (dialect) {
@@ -457,66 +479,69 @@ pub fn emitStmt(out: *std.ArrayList(u8), r: *Renderer, stmt: Stmt, indent: usize
         .assert_, .assume_, .cover_ => {
             if (assertions) try appendStr(out, alloc, "`ifdef JS_ASIC_ASSERT\n");
             try emitIndent(out, alloc, indent);
+            const prev = r.occurrence;
+            r.occurrence = .assertion;
             switch (stmt) {
                 .assert_ => |a| {
-                    const c = try emitExpr(r, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "assert ({s}) else $error(\"{s}\");\n", .{ c, a.msg });
+                    try appendStr(out, alloc, "assert (");
+                    try emitExprTo(out, r, a.cond);
+                    try appendFmt(out, alloc, ") else $error(\"{s}\");\n", .{a.msg});
                 },
                 .assume_ => |a| {
-                    const c = try emitExpr(r, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "assume ({s}) else $error(\"{s}\");\n", .{ c, a.msg });
+                    try appendStr(out, alloc, "assume (");
+                    try emitExprTo(out, r, a.cond);
+                    try appendFmt(out, alloc, ") else $error(\"{s}\");\n", .{a.msg});
                 },
                 .cover_ => |a| {
-                    const c = try emitExpr(r, a.cond);
-                    defer alloc.free(c);
-                    try appendFmt(out, alloc, "cover ({s});\n", .{c});
+                    try appendStr(out, alloc, "cover (");
+                    try emitExprTo(out, r, a.cond);
+                    try appendStr(out, alloc, ");\n");
                 },
                 else => unreachable,
             }
+            r.occurrence = prev;
             if (assertions) try appendStr(out, alloc, "`endif\n");
         },
         .assign => |a| {
-            const src_str = try emitExpr(r, a.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s} {s} {s};\n", .{ r.symName(a.dst), op, src_str });
+            try appendFmt(out, alloc, "{s} {s} ", .{ r.symName(a.dst), op });
+            try emitExprTo(out, r, a.src);
+            try appendStr(out, alloc, ";\n");
         },
         .slice_assign => |sa| {
-            const src_str = try emitExpr(r, sa.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s}[{d}:{d}] {s} {s};\n", .{ r.symName(sa.dst), sa.hi, sa.lo, op, src_str });
+            try appendFmt(out, alloc, "{s}[{d}:{d}] {s} ", .{ r.symName(sa.dst), sa.hi, sa.lo, op });
+            try emitExprTo(out, r, sa.src);
+            try appendStr(out, alloc, ";\n");
         },
         .mem_write => |mw| {
-            const addr_str = try emitExpr(r, mw.addr);
-            defer alloc.free(addr_str);
-            const src_str = try emitExpr(r, mw.src);
-            defer alloc.free(src_str);
-            try appendFmt(out, alloc, "{s}[{s}] {s} {s};\n", .{ r.symName(mw.mem), addr_str, op, src_str });
+            try appendFmt(out, alloc, "{s}[", .{r.symName(mw.mem)});
+            try emitExprTo(out, r, mw.addr);
+            try appendFmt(out, alloc, "] {s} ", .{op});
+            try emitExprTo(out, r, mw.src);
+            try appendStr(out, alloc, ";\n");
         },
         .mem_write_bytes => |mw| {
-            const addr_str = try emitExpr(r, mw.addr);
-            defer alloc.free(addr_str);
-            const src_str = try emitExpr(r, mw.src);
-            defer alloc.free(src_str);
-            const be_str = try emitExpr(r, mw.be);
-            defer alloc.free(be_str);
             var byte: usize = 0;
             while (byte * 8 < mw.mem.width()) : (byte += 1) {
                 const lo = byte * 8;
                 const hi = @min(lo + 7, mw.mem.width() - 1);
                 if (byte > 0) try emitIndent(out, alloc, indent);
-                try appendFmt(out, alloc, "if ({s}[{d}]) begin\n", .{ be_str, byte });
+                try appendStr(out, alloc, "if (");
+                try emitExprTo(out, r, mw.be);
+                try appendFmt(out, alloc, "[{d}]) begin\n", .{byte});
                 try emitIndent(out, alloc, indent + 1);
-                try appendFmt(out, alloc, "{s}[{s}][{d}:{d}] {s} {s}[{d}:{d}];\n", .{ r.symName(mw.mem), addr_str, hi, lo, op, src_str, hi, lo });
+                try appendFmt(out, alloc, "{s}[", .{r.symName(mw.mem)});
+                try emitExprTo(out, r, mw.addr);
+                try appendFmt(out, alloc, "][{d}:{d}] {s} ", .{ hi, lo, op });
+                try emitExprTo(out, r, mw.src);
+                try appendFmt(out, alloc, "[{d}:{d}];\n", .{ hi, lo });
                 try emitIndent(out, alloc, indent);
                 try appendStr(out, alloc, "end\n");
             }
         },
         .if_then => |it| {
-            const cond_str = try emitExpr(r, it.cond);
-            defer alloc.free(cond_str);
-            try appendFmt(out, alloc, "if ({s}) begin\n", .{cond_str});
+            try appendStr(out, alloc, "if (");
+            try emitExprTo(out, r, it.cond);
+            try appendStr(out, alloc, ") begin\n");
             for (it.then_stmts) |s| try emitStmt(out, r, s, indent + 1, op, assertions);
             if (it.else_stmts.len > 0) {
                 try emitIndent(out, alloc, indent);
@@ -527,9 +552,9 @@ pub fn emitStmt(out: *std.ArrayList(u8), r: *Renderer, stmt: Stmt, indent: usize
             try appendStr(out, alloc, "end\n");
         },
         .case_block => |cb| {
-            const sel_str = try emitExpr(r, cb.sel);
-            defer alloc.free(sel_str);
-            try appendFmt(out, alloc, "case ({s})\n", .{sel_str});
+            try appendStr(out, alloc, "case (");
+            try emitExprTo(out, r, cb.sel);
+            try appendStr(out, alloc, ")\n");
             for (cb.cases) |c| {
                 try emitIndent(out, alloc, indent + 1);
                 switch (c.val) {
@@ -555,183 +580,222 @@ pub fn emitStmt(out: *std.ArrayList(u8), r: *Renderer, stmt: Stmt, indent: usize
 
 pub fn emitExpr(r: *Renderer, expr: AnyExpr) std.mem.Allocator.Error![]u8 {
     const alloc = r.allocator;
-    const raw = try emitRaw(r, expr);
-    if (expr.is_signed) {
-        const wrapped = try std.fmt.allocPrint(alloc, "$signed({s})", .{raw});
-        alloc.free(raw);
-        return wrapped;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(alloc);
+    try emitExprTo(&buf, r, expr);
+    return alloc.dupe(u8, buf.items);
+}
+
+/// Emits one expression occurrence directly into `out`, recording its exact
+/// byte range (including any `$signed(...)` wrapper) when a provenance sink is
+/// installed.
+pub fn emitExprTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr) std.mem.Allocator.Error!void {
+    const alloc = r.allocator;
+    if (!expr.is_signed) {
+        try emitRawTo(out, r, expr, true);
+        return;
     }
-    return raw;
+    const start = out.items.len;
+    const hoisted = r.hoist.contains(expr);
+    try appendStr(out, alloc, "$signed(");
+    try emitRawTo(out, r, expr, false);
+    try appendStr(out, alloc, ")");
+    r.recordOccurrence(expr, if (hoisted) .hoisted_use else r.occurrence, start, out.items.len);
 }
 
-/// Renders a select base. Expression bases are hoisted by `prepare`, so this
-/// yields a `tmpN` name; symbol bases resolve through the name map.
-fn emitSelectBase(r: *Renderer, base: ir.SelectBase) std.mem.Allocator.Error![]u8 {
-    return switch (base) {
-        .sym => |ref| r.allocator.dupe(u8, r.symName(ref)),
-        .expr => |e| emitRaw(r, e.*),
-    };
+/// Appends a select base directly; expression bases are hoisted by `prepare`.
+fn emitSelectBaseTo(out: *std.ArrayList(u8), r: *Renderer, base: ir.SelectBase, record: bool) std.mem.Allocator.Error!void {
+    switch (base) {
+        .sym => |ref| try appendStr(out, r.allocator, r.symName(ref)),
+        .expr => |e| try emitRawTo(out, r, e.*, record),
+    }
 }
 
+/// Spanless string form of `emitRawTo`; used for descriptive text that is not
+/// part of an emitted HDL artifact (for example `design.json` assertions).
 pub fn emitRaw(r: *Renderer, expr: AnyExpr) std.mem.Allocator.Error![]u8 {
     const alloc = r.allocator;
-    if (r.hoist.get(expr)) |idx| return alloc.dupe(u8, r.temps.items[idx].name);
-    return switch (expr.node) {
-        .ref => |sym| alloc.dupe(u8, r.symName(sym)),
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(alloc);
+    try emitRawTo(&buf, r, expr, false);
+    return alloc.dupe(u8, buf.items);
+}
+
+/// Appends the raw (unwrapped) lowering of `expr` and, when `record` is set,
+/// records the node's byte range under the renderer's current occurrence kind.
+fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool) std.mem.Allocator.Error!void {
+    const alloc = r.allocator;
+    if (r.hoist.get(expr)) |idx| {
+        const start = out.items.len;
+        try appendStr(out, alloc, r.temps.items[idx].name);
+        if (record) r.recordOccurrence(expr, .hoisted_use, start, out.items.len);
+        return;
+    }
+    const start = out.items.len;
+    switch (expr.node) {
+        .ref => |sym| try appendStr(out, alloc, r.symName(sym)),
         .lit => |l| if (expr.width == 1)
-            std.fmt.allocPrint(alloc, "1'b{d}", .{l & 1})
+            try appendFmt(out, alloc, "1'b{d}", .{l & 1})
         else
-            std.fmt.allocPrint(alloc, "{d}'d{d}", .{ expr.width, l }),
+            try appendFmt(out, alloc, "{d}'d{d}", .{ expr.width, l }),
         .bit => |b| {
-            const base = try emitSelectBase(r, b.base);
-            defer alloc.free(base);
-            return std.fmt.allocPrint(alloc, "{s}[{d}]", .{ base, b.index });
+            try emitSelectBaseTo(out, r, b.base, record);
+            try appendFmt(out, alloc, "[{d}]", .{b.index});
         },
         .bit_dyn => |bd| {
-            const base = try emitSelectBase(r, bd.base);
-            defer alloc.free(base);
-            const idx_str = try emitExpr(r, bd.index.*);
-            defer alloc.free(idx_str);
-            return std.fmt.allocPrint(alloc, "{s}[{s}]", .{ base, idx_str });
+            try emitSelectBaseTo(out, r, bd.base, record);
+            try appendStr(out, alloc, "[");
+            try emitExprTo(out, r, bd.index.*);
+            try appendStr(out, alloc, "]");
         },
         .slice => |s| {
-            const base = try emitSelectBase(r, s.base);
-            defer alloc.free(base);
-            return std.fmt.allocPrint(alloc, "{s}[{d}:{d}]", .{ base, s.hi, s.lo });
+            try emitSelectBaseTo(out, r, s.base, record);
+            try appendFmt(out, alloc, "[{d}:{d}]", .{ s.hi, s.lo });
         },
         .concat => |items| {
-            var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-            defer buf.deinit(alloc);
-            try appendStr(&buf, alloc, "{");
+            try appendStr(out, alloc, "{");
             for (items, 0..) |item, idx| {
-                const comma = if (idx + 1 == items.len) "" else ", ";
-                const part = try emitExpr(r, item);
-                defer alloc.free(part);
-                try appendFmt(&buf, alloc, "{s}{s}", .{ part, comma });
+                if (idx != 0) try appendStr(out, alloc, ", ");
+                try emitExprTo(out, r, item);
             }
-            try appendStr(&buf, alloc, "}");
-            return alloc.dupe(u8, buf.items);
+            try appendStr(out, alloc, "}");
         },
         .mem_read => |mr| {
-            const addr_str = try emitExpr(r, mr.addr.*);
-            defer alloc.free(addr_str);
-            return std.fmt.allocPrint(alloc, "{s}[{s}]", .{ r.symName(mr.mem), addr_str });
+            try appendStr(out, alloc, r.symName(mr.mem));
+            try appendStr(out, alloc, "[");
+            try emitExprTo(out, r, mr.addr.*);
+            try appendStr(out, alloc, "]");
         },
         .not => |n| {
-            const inner = try emitExpr(r, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(!{s})", .{inner});
+            try appendStr(out, alloc, "(!");
+            try emitExprTo(out, r, n.*);
+            try appendStr(out, alloc, ")");
         },
         .bit_not => |n| {
-            const inner = try emitExpr(r, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(~{s})", .{inner});
+            try appendStr(out, alloc, "(~");
+            try emitExprTo(out, r, n.*);
+            try appendStr(out, alloc, ")");
         },
         .neg => |n| {
-            const inner = try emitExpr(r, n.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "(-{s})", .{inner});
+            try appendStr(out, alloc, "(-");
+            try emitExprTo(out, r, n.*);
+            try appendStr(out, alloc, ")");
         },
         .reduce_and, .reduce_or, .reduce_xor => {
-            const inner = try emitExpr(r, switch (expr.node) {
+            const inner = switch (expr.node) {
                 .reduce_and, .reduce_or, .reduce_xor => |n| n.*,
                 else => unreachable,
-            });
-            defer alloc.free(inner);
+            };
             const sign: []const u8 = switch (expr.node) {
                 .reduce_and => "&",
                 .reduce_or => "|",
                 .reduce_xor => "^",
                 else => unreachable,
             };
-            return std.fmt.allocPrint(alloc, "({s}{s})", .{ sign, inner });
+            try appendStr(out, alloc, "(");
+            try appendStr(out, alloc, sign);
+            try emitExprTo(out, r, inner);
+            try appendStr(out, alloc, ")");
         },
         .replicate => |rep| {
-            const inner = try emitExpr(r, rep.base.*);
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "{{" ++ "{d}" ++ "{{" ++ "{s}" ++ "}}" ++ "}}", .{ rep.count, inner });
+            try appendStr(out, alloc, "{");
+            try appendFmt(out, alloc, "{d}", .{rep.count});
+            try appendStr(out, alloc, "{");
+            try emitExprTo(out, r, rep.base.*);
+            try appendStr(out, alloc, "}}");
         },
         .bin_op => |bo| {
-            const lhs = try emitExpr(r, bo.lhs.*);
-            defer alloc.free(lhs);
-            const rhs = try emitExpr(r, bo.rhs.*);
-            defer alloc.free(rhs);
-            const op_sym: []const u8 = if (bo.op == .shr and bo.lhs.*.is_signed) ">>>" else bo.op.symbol();
-            return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ lhs, op_sym, rhs });
+            try appendStr(out, alloc, "(");
+            try emitExprTo(out, r, bo.lhs.*);
+            try appendStr(out, alloc, " ");
+            try appendStr(out, alloc, if (bo.op == .shr and bo.lhs.*.is_signed) ">>>" else bo.op.symbol());
+            try appendStr(out, alloc, " ");
+            try emitExprTo(out, r, bo.rhs.*);
+            try appendStr(out, alloc, ")");
         },
         .ternary => |t| {
-            const c = try emitExpr(r, t.cond.*);
-            defer alloc.free(c);
-            const th = try emitExpr(r, t.then_e.*);
-            defer alloc.free(th);
-            const el = try emitExpr(r, t.else_e.*);
-            defer alloc.free(el);
-            return std.fmt.allocPrint(alloc, "({s} ? {s} : {s})", .{ c, th, el });
+            try appendStr(out, alloc, "(");
+            try emitExprTo(out, r, t.cond.*);
+            try appendStr(out, alloc, " ? ");
+            try emitExprTo(out, r, t.then_e.*);
+            try appendStr(out, alloc, " : ");
+            try emitExprTo(out, r, t.else_e.*);
+            try appendStr(out, alloc, ")");
         },
         .sext => |n| {
             const k = expr.width - n.width;
-            if (k == 0) return emitExpr(r, n.*);
-            const msb: ?[]u8 = switch (n.*.node) {
-                .ref => |sym| try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ r.symName(sym), n.width - 1 }),
-                .slice => |s| blk: {
-                    const base = try emitSelectBase(r, s.base);
-                    defer alloc.free(base);
-                    break :blk try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ base, s.hi });
+            if (k == 0) {
+                try emitExprTo(out, r, n.*);
+            } else switch (n.*.node) {
+                .ref, .slice, .bit, .bit_dyn => {
+                    try appendStr(out, alloc, "{{");
+                    try appendFmt(out, alloc, "{d}", .{k});
+                    try appendStr(out, alloc, "{");
+                    switch (n.*.node) {
+                        .ref => |sym| try appendFmt(out, alloc, "{s}[{d}]", .{ r.symName(sym), n.width - 1 }),
+                        .slice => |s| {
+                            try emitSelectBaseTo(out, r, s.base, record);
+                            try appendFmt(out, alloc, "[{d}]", .{s.hi});
+                        },
+                        .bit => |bt| {
+                            try emitSelectBaseTo(out, r, bt.base, record);
+                            try appendFmt(out, alloc, "[{d}]", .{bt.index});
+                        },
+                        .bit_dyn => |bd| {
+                            try emitSelectBaseTo(out, r, bd.base, record);
+                            try appendStr(out, alloc, "[");
+                            try emitExprTo(out, r, bd.index.*);
+                            try appendStr(out, alloc, "]");
+                        },
+                        else => unreachable,
+                    }
+                    try appendStr(out, alloc, "}}, ");
+                    try emitRawTo(out, r, n.*, record);
+                    try appendStr(out, alloc, "}");
                 },
-                .bit => |bt| blk: {
-                    const base = try emitSelectBase(r, bt.base);
-                    defer alloc.free(base);
-                    break :blk try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ base, bt.index });
-                },
-                .bit_dyn => |bd| blk: {
-                    const base = try emitSelectBase(r, bd.base);
-                    defer alloc.free(base);
-                    const idx = try emitExpr(r, bd.index.*);
-                    defer alloc.free(idx);
-                    break :blk try std.fmt.allocPrint(alloc, "{s}[{s}]", .{ base, idx });
-                },
-                else => null,
-            };
-            if (msb) |m| {
-                defer alloc.free(m);
-                const inner = try emitRaw(r, n.*);
-                defer alloc.free(inner);
-                return std.fmt.allocPrint(alloc, "{{{{" ++ "{d}" ++ "{{" ++ "{s}" ++ "}}" ++ "}}" ++ ", {s}" ++ "}}", .{ k, m, inner });
+                else => try emitRawTo(out, r, n.*, record),
             }
-            return emitRaw(r, n.*);
         },
         .zext => |n| {
-            const inner = try emitExpr(r, n.*);
             const k = expr.width - n.width;
-            if (k == 0) return inner;
-            defer alloc.free(inner);
-            return std.fmt.allocPrint(alloc, "{{{{" ++ "{d}" ++ "{{1'b0}}" ++ "}}, {s}" ++ "}}", .{ k, inner });
+            if (k == 0) {
+                try emitExprTo(out, r, n.*);
+            } else {
+                try appendStr(out, alloc, "{{");
+                try appendFmt(out, alloc, "{d}", .{k});
+                try appendStr(out, alloc, "{1'b0}}, ");
+                try emitExprTo(out, r, n.*);
+                try appendStr(out, alloc, "}");
+            }
         },
         .trunc => |n| {
             // Part-select is only legal on vectors; mask wider expressions so
             // the low bits survive in a wider context.
             switch (n.*.node) {
                 .ref, .bit, .slice, .bit_dyn => {
-                    const inner = try emitExpr(r, n.*);
-                    defer alloc.free(inner);
-                    return std.fmt.allocPrint(alloc, "{s}[{d}:0]", .{ inner, expr.width - 1 });
+                    try emitExprTo(out, r, n.*);
+                    try appendFmt(out, alloc, "[{d}:0]", .{expr.width - 1});
                 },
                 else => {
-                    const inner = try emitExpr(r, n.*);
-                    defer alloc.free(inner);
                     const zeros = n.width - expr.width;
-                    if (zeros == 0) return std.fmt.allocPrint(alloc, "({s})", .{inner});
-                    const mask = try std.fmt.allocPrint(
-                        alloc,
-                        "{{{{" ++ "{d}" ++ "{{1'b0}}" ++ "}}" ++ ", " ++ "{{" ++ "{d}" ++ "{{1'b1}}" ++ "}}" ++ "}}",
-                        .{ zeros, expr.width },
-                    );
-                    defer alloc.free(mask);
-                    return std.fmt.allocPrint(alloc, "({s} & {s})", .{ inner, mask });
+                    if (zeros == 0) {
+                        try appendStr(out, alloc, "(");
+                        try emitExprTo(out, r, n.*);
+                        try appendStr(out, alloc, ")");
+                    } else {
+                        try appendStr(out, alloc, "(");
+                        try emitExprTo(out, r, n.*);
+                        try appendStr(out, alloc, " & {{");
+                        try appendFmt(out, alloc, "{d}", .{zeros});
+                        try appendStr(out, alloc, "{1'b0}}, {");
+                        try appendFmt(out, alloc, "{d}", .{expr.width});
+                        try appendStr(out, alloc, "{1'b1}}})");
+                    }
                 },
             }
         },
-    };
+    }
+    if (record) r.recordOccurrence(expr, r.occurrence, start, out.items.len);
 }
 
 pub fn appendStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {

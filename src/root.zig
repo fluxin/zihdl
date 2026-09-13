@@ -11,6 +11,7 @@ test {
     _ = @import("backend/verilog_test.zig");
     _ = @import("backend/systemverilog_test.zig");
     _ = @import("backend/metadata_test.zig");
+    _ = @import("backend/provenance_test.zig");
     _ = @import("backend/sdc_test.zig");
     _ = @import("backend/golden_test.zig");
 }

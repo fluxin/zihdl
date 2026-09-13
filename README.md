@@ -21,6 +21,14 @@ Add `--sv` (`zig build run -- --sv`) to also emit `out/asic_core.sv`: the same
 design with `logic`, `always_comb`/`always_ff`, FSM `enum` typedefs and packed
 struct bundle ports.
 
+When provenance is enabled, `design.json` also carries a `provenance` section
+(`js_asic.provenance/1`): per-module operation rows with deterministic integer
+ids, authored functional groups with explicit membership, and a source map of
+zero-based half-open byte ranges into the exact emitted RTL, anchored by the
+artifact SHA-256. Expressions folded during elaboration are reported as
+`omitted` with a reason and no spans. It is descriptive only: RTL bytes are
+identical with or without it. Schema: `src/backend/provenance.zig`.
+
 ## Quick Start
 
 ```bash
