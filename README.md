@@ -71,7 +71,7 @@ incompatible schema changes.
 | `inputs[].slew.threshold.low_fraction` / `high_fraction` | Explicit fractions of the transition's low/high levels (for example `0.1` and `0.9` for a 10 %–90 % measurement). Always authored: the library never defaults a measurement basis. |
 | `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
 | `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
-| `outputs[].required.min` / `.max` | Required arrival window relative to the destination clock's active edge, same explicit-time shape as `arrival`. A null bound is unknown, never zero; the destination clock stays consumer-resolved. |
+| `outputs[].required.clock` / `.edge` / `.min` / `.max` | Required arrival window relative to an explicit reference clock port and its active edge (`rising`/`falling`). A null bound is unknown, never zero. js_asic rejects a required window without a clock, so consumers must treat a missing clock as an error rather than infer one. |
 | `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first, declared by the module that owns the chain registers. A released domain's reset is the chain output (directly or through hierarchy), never the raw reset; empty when none is declared. |
 | `clocks[].relationship.relation` / `.related_to` / `.source_period` / `.jitter` | Relation to a reference clock (`synchronous`, `asynchronous`, `mesochronous`, `plesiochronous`), the related 1-bit input in the declaring module (`null` means an external reference), and explicit source period / jitter times. |
 
@@ -108,8 +108,8 @@ classification/synchronizer/arrival).
 
 Per-bit slew/load stays whole-port: one row applies to every bit of its port
 and per-bit distinct values remain deferred until a consumer analysis can act
-on them. Deeper-than-immediate-child resolution and a destination-clock
-identity on outputs remain open as well.
+on them. Required windows always name their reference clock (js_asic rejects a
+window without one); deeper-than-immediate-child resolution remains open.
 
 ## Quick Start
 
@@ -153,7 +153,7 @@ holes matter for general-purpose use; the detailed review is in
 | Parameterization | Widths/depths are comptime type arguments: block families declare a `Shape` schema and `instantiateShape` merges instance-site overrides, so a parent's comptime value parameter forwards into a child's shape (each distinct shape is its own checked module); runtime `Param(W)` values stay 64-bit Verilog overrides and cannot size ports or memories |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
 | Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a single-slot mailbox and a structural CDC lint landed; remaining: Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers) and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
-| Timing / constraints | Output required times, clock relationships and reset-release topology are authored (v2); per-bit slew/load, destination-clock identity on outputs and deeper-than-immediate-child resolution remain deferred; SDC has no IO delays, multicycle or generated clocks |
+| Timing / constraints | Output required times (with explicit clock and edge), clock relationships and reset-release topology are authored (v2); per-bit slew/load and deeper-than-immediate-child resolution remain deferred; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
 | Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
 

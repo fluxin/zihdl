@@ -144,17 +144,21 @@ pub const Child = struct {
         try mb.addOutputTiming(.{
             .signal = outs.sync_out.ref,
             .load = .{ .value = 4.0, .unit = .ff },
+            .required_clock = ins.clk.ref,
             .required_min = .{ .value = -0.4, .unit = .ns },
             .required_max = .{ .value = 0.9, .unit = .ns },
         });
         try mb.addOutputTiming(.{
             .signal = outs.async_pulse.ref,
             .load = null,
+            .required_clock = ins.clk.ref,
             .required_min = .{ .value = -0.2, .unit = .ns },
         });
         try mb.addOutputTiming(.{
             .signal = outs.async_bus_out.ref,
             .load = .{ .value = 1.5, .unit = .pf },
+            .required_clock = ins.clk.ref,
+            .required_edge = .falling,
             .required_min = .{ .value = 0.1, .unit = .ns },
             .required_max = .{ .value = 0.8, .unit = .ns },
         });
@@ -306,18 +310,22 @@ pub const Top = struct {
         try mb.addOutputTiming(.{
             .signal = outs.fast_sync_out.ref,
             .load = .{ .value = 5.0, .unit = .ff },
+            .required_clock = ins.clk.ref,
             .required_min = .{ .value = -0.35, .unit = .ns },
             .required_max = .{ .value = 0.85, .unit = .ns },
         });
         try mb.addOutputTiming(.{
             .signal = outs.slow_sync_out.ref,
             .load = .{ .value = 2.5, .unit = .pf },
+            .required_clock = ins.clk.ref,
             .required_max = .{ .value = 1.2, .unit = .ns },
         });
         try mb.addOutputTiming(.{ .signal = outs.fast_async_bus_out.ref, .load = null });
         try mb.addOutputTiming(.{
             .signal = outs.fast_raw_out.ref,
             .load = null,
+            .required_clock = ins.clk.ref,
+            .required_edge = .falling,
             .required_max = .{ .value = 300.0, .unit = .ps },
         });
     }
@@ -561,12 +569,18 @@ test "contract fixture elaborates with two renamed instances" {
         }
         if (std.mem.eql(u8, intent.signal.name(), "fast_sync_out")) {
             try std.testing.expectEqual(@as(f64, 5.0), intent.load.?.value);
+            try std.testing.expectEqualStrings("clk", intent.required_clock.?.name());
+            try std.testing.expectEqual(netlist.ClockEdge.rising, intent.required_edge);
             try std.testing.expectEqual(@as(f64, -0.35), intent.required_min.?.value);
             try std.testing.expectEqual(@as(f64, 0.85), intent.required_max.?.value);
         }
         if (std.mem.eql(u8, intent.signal.name(), "slow_sync_out")) {
             try std.testing.expect(intent.required_min == null);
+            try std.testing.expectEqualStrings("clk", intent.required_clock.?.name());
             try std.testing.expectEqual(@as(f64, 1.2), intent.required_max.?.value);
+        }
+        if (std.mem.eql(u8, intent.signal.name(), "fast_raw_out")) {
+            try std.testing.expectEqual(netlist.ClockEdge.falling, intent.required_edge);
         }
     }
 
@@ -595,11 +609,17 @@ test "contract fixture elaborates with two renamed instances" {
     // keeps them in force for consumers.
     for (child.output_timing) |intent| {
         if (std.mem.eql(u8, intent.signal.name(), "sync_out")) {
+            try std.testing.expectEqualStrings("clk", intent.required_clock.?.name());
+            try std.testing.expectEqual(netlist.ClockEdge.rising, intent.required_edge);
             try std.testing.expectEqual(@as(f64, -0.4), intent.required_min.?.value);
             try std.testing.expectEqual(@as(f64, 0.9), intent.required_max.?.value);
         }
         if (std.mem.eql(u8, intent.signal.name(), "async_pulse")) {
             try std.testing.expect(intent.required_min != null and intent.required_max == null);
+            try std.testing.expectEqualStrings("clk", intent.required_clock.?.name());
+        }
+        if (std.mem.eql(u8, intent.signal.name(), "async_bus_out")) {
+            try std.testing.expectEqual(netlist.ClockEdge.falling, intent.required_edge);
         }
     }
 

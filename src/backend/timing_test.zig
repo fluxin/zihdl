@@ -686,11 +686,14 @@ const SinkFull = struct {
 
         try mb.addOutputTiming(.{
             .signal = outs.q.ref,
+            .required_clock = ins.clk.ref,
             .required_min = .{ .value = -0.3, .unit = .ns },
             .required_max = .{ .value = 1.1, .unit = .ns },
         });
         try mb.addOutputTiming(.{
             .signal = outs.direct.ref,
+            .required_clock = ins.clk.ref,
+            .required_edge = .falling,
             .required_max = .{ .value = 250, .unit = .ps },
         });
     }
@@ -734,13 +737,17 @@ test "timing intent v2 exports required windows, clock relationship and release 
     const q = findOutput(timing, "q").?;
     try std.testing.expectEqual(@as(i64, 4), q.object.get("width").?.integer);
     const required = q.object.get("required").?;
+    // Every required window names its reference clock and active edge.
+    try std.testing.expectEqualStrings("clk", required.object.get("clock").?.string);
+    try std.testing.expectEqualStrings("rising", required.object.get("edge").?.string);
     try expectJsonNumber(required.object.get("min").?.object.get("value").?, -0.3);
     try std.testing.expectEqualStrings("ns", required.object.get("min").?.object.get("unit").?.string);
     try expectJsonNumber(required.object.get("max").?.object.get("value").?, 1.1);
 
-    // Partial window and absent window stay explicit nulls, never zero.
+    // Partial window and explicit edge stay explicit, never inferred.
     const direct = findOutput(timing, "direct").?;
     const direct_required = direct.object.get("required").?;
+    try std.testing.expectEqualStrings("falling", direct_required.object.get("edge").?.string);
     try std.testing.expect(direct_required.object.get("min").? == .null);
     try expectJsonNumber(direct_required.object.get("max").?.object.get("value").?, 250);
 }
@@ -811,7 +818,7 @@ test "timing intent validation rejects bad required windows and clock topology" 
 
     const BadRequired = struct {
         pub const name = "bad_required";
-        pub const Inputs = struct { a: Signal(1) };
+        pub const Inputs = struct { clk: Signal(1), a: Signal(1) };
         pub const Outputs = struct { y: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
@@ -819,6 +826,7 @@ test "timing intent validation rejects bad required windows and clock topology" 
             try mb.assign(outs.y, ins.a);
             try mb.addOutputTiming(.{
                 .signal = outs.y.ref,
+                .required_clock = ins.clk.ref,
                 .required_min = .{ .value = 2, .unit = .ns },
                 .required_max = .{ .value = 1, .unit = .ns },
             });
@@ -827,6 +835,22 @@ test "timing intent validation rejects bad required windows and clock topology" 
 
     const NonFiniteRequired = struct {
         pub const name = "bad_required_nan";
+        pub const Inputs = struct { clk: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .required_clock = ins.clk.ref,
+                .required_max = .{ .value = std.math.inf(f64), .unit = .ns },
+            });
+        }
+    };
+
+    const RequiredWithoutClock = struct {
+        pub const name = "bad_required_no_clock";
         pub const Inputs = struct { a: Signal(1) };
         pub const Outputs = struct { y: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
@@ -835,7 +859,38 @@ test "timing intent validation rejects bad required windows and clock topology" 
             try mb.assign(outs.y, ins.a);
             try mb.addOutputTiming(.{
                 .signal = outs.y.ref,
-                .required_max = .{ .value = std.math.inf(f64), .unit = .ns },
+                .required_max = .{ .value = 1, .unit = .ns },
+            });
+        }
+    };
+
+    const RequiredClockNotInput = struct {
+        pub const name = "bad_required_clock_ref";
+        pub const Inputs = struct { a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .required_clock = outs.y.ref,
+                .required_max = .{ .value = 1, .unit = .ns },
+            });
+        }
+    };
+
+    const RequiredClockWithoutBound = struct {
+        pub const name = "bad_required_clock_only";
+        pub const Inputs = struct { clk: Signal(1), a: Signal(1) };
+        pub const Outputs = struct { y: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.y, ins.a);
+            try mb.addOutputTiming(.{
+                .signal = outs.y.ref,
+                .required_clock = ins.clk.ref,
             });
         }
     };
@@ -984,6 +1039,9 @@ test "timing intent validation rejects bad required windows and clock topology" 
 
     try expectIntentError(BadRequired);
     try expectIntentError(NonFiniteRequired);
+    try expectIntentError(RequiredWithoutClock);
+    try expectIntentError(RequiredClockNotInput);
+    try expectIntentError(RequiredClockWithoutBound);
     try expectIntentError(ReleaseWithoutSyncPolicy);
     try expectIntentError(BadReleaseStage);
     try expectIntentError(DuplicateReleaseStage);

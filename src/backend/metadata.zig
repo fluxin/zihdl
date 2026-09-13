@@ -379,9 +379,11 @@ fn isPort(kind: ir.SymbolKind) bool {
 //
 // Further additive v2 fields (all optional, consumers that do not read them
 // keep the value unknown):
-//   * `outputs[].required`: `{ min, max }` arrival requirement relative to the
-//     destination clock's active edge, same explicit-time shape as `arrival`.
-//     The destination clock itself stays consumer-resolved.
+//   * `outputs[].required`: `{ clock, edge, min, max }` arrival requirement
+//     relative to an explicit reference clock port and its active edge, same
+//     explicit-time shape as `arrival` for the bounds. There is no inferred
+//     default: the library never emits a required window without a clock, so a
+//     consumer must treat a missing clock as an error rather than guess.
 //   * `clocks[].reset.release_synchronizer`: `[{ module, signal, bit }]` reset
 //     release chain, first stage first; empty when none is declared.
 //   * `clocks[].relationship`: `{ relation, related_to, source_period, jitter }`
@@ -586,6 +588,10 @@ fn writeOutputTiming(j: *std.json.Stringify, intent: ir.OutputTiming) !void {
         try j.write(null);
     } else {
         try j.beginObject();
+        try j.objectField("clock");
+        try j.write(intent.required_clock.?.name());
+        try j.objectField("edge");
+        try j.write(@tagName(intent.required_edge));
         try j.objectField("min");
         try writeTimeValue(j, intent.required_min);
         try j.objectField("max");

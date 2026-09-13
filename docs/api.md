@@ -199,10 +199,10 @@ rather than the authoring half of this specific project.
 
 **Timing and constraints**
 - Timing intent covers input classification, synchronizer stages, arrival
-  windows, reset policy, slew/load, output required windows, clock
-  relationships and reset-release topology. Still deferred: per-bit slew/load
-  (rows apply to every bit), destination-clock identity on outputs,
-  deeper-than-immediate-child resolution, and clock/domain on outputs.
+  windows, reset policy, slew/load, output required windows (each with an
+  explicit reference clock and edge), clock relationships and reset-release
+  topology. Still deferred: per-bit slew/load (rows apply to every bit) and
+  deeper-than-immediate-child resolution.
 - SDC emits clocks, uncertainty and reset false paths; no IO delays, generated
   clocks or multicycle paths.
 
@@ -243,8 +243,9 @@ rather than the authoring half of this specific project.
    parameter propagation (constrained by comptime widths), richer shape
    constraint errors, and recording resolved shape values in `design.json`.
 4. **Finish the timing-intent backlog** as consumers grow: per-bit slew/load
-   rows, a destination-clock identity on outputs, deeper-than-immediate-child
-   resolution, and /3 only for incompatible schema changes.
+   rows, deeper-than-immediate-child resolution, and /3 only for incompatible
+   schema changes. Required windows already carry an explicit clock and edge;
+   a consumer must reject one without a clock rather than guess.
 5. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.

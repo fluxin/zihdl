@@ -1347,6 +1347,9 @@ pub const LoadValue = struct {
     unit: LoadUnit = .ff,
 };
 
+/// Active edge of a destination clock for a required window.
+pub const ClockEdge = enum { rising, falling };
+
 /// Authored timing intent for one output port. Only declare a load or a
 /// required window when a real design requirement exists; absence keeps the
 /// value unknown.
@@ -1354,9 +1357,16 @@ pub const OutputTiming = struct {
     signal: SymRef,
     /// Additional external load per port bit; null keeps it unknown.
     load: ?LoadValue = null,
-    /// Required arrival window relative to the destination clock's active
-    /// edge (the consumer resolves which clock); null keeps each bound
-    /// unknown. Bounds may be negative (before the edge) or positive (after).
+    /// Destination clock the required window is measured against. Required
+    /// whenever a required bound is declared: with more than one clock in a
+    /// design there is no unambiguous default, so the library never emits an
+    /// unqualified window and consumers must not infer one.
+    required_clock: ?SymRef = null,
+    /// Active edge of `required_clock` the window is referenced to.
+    required_edge: ClockEdge = .rising,
+    /// Required arrival window relative to `required_clock`'s active edge;
+    /// null keeps each bound unknown. Bounds may be negative (before the
+    /// edge) or positive (after).
     required_min: ?TimeValue = null,
     required_max: ?TimeValue = null,
 };
@@ -3042,6 +3052,17 @@ pub const ModuleBuilder = struct {
                 }
             }
             if (intent.required_min != null or intent.required_max != null) {
+                // A required window without a reference clock is ambiguous as
+                // soon as a design has more than one clock; never emit one.
+                if (intent.required_clock) |clock| {
+                    if (clock.scope != self.scope or clock.kind() != .input or clock.width() != 1) {
+                        std.log.warn("js_asic: output timing required clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
+                        return error.InvalidTimingIntent;
+                    }
+                } else {
+                    std.log.warn("js_asic: output timing required window for '{s}' in module '{s}' must name its reference clock", .{ intent.signal.name(), self.name });
+                    return error.InvalidTimingIntent;
+                }
                 inline for (.{ intent.required_min, intent.required_max }) |bound| {
                     if (bound) |value| {
                         if (!std.math.isFinite(value.value)) {
@@ -3056,6 +3077,9 @@ pub const ModuleBuilder = struct {
                     std.log.warn("js_asic: output timing required window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
+            } else if (intent.required_clock != null) {
+                std.log.warn("js_asic: output timing for '{s}' in module '{s}' names a required clock but declares no required bound", .{ intent.signal.name(), self.name });
+                return error.InvalidTimingIntent;
             }
         }
     }
