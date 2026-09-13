@@ -165,6 +165,33 @@ pub fn build(b: *std.Build) void {
     });
     const eth_tb_gen = b.addRunArtifact(eth_tb_exe);
 
+    // Dual-clock async FIFO witness: emits the gray-pointer FIFO RTL and
+    // replays a handwritten iverilog bench that fills, overflows and wraps it.
+    const async_fifo_exe = b.addExecutable(.{
+        .name = "js_asic_async_fifo_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/async_fifo_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "js_asic", .module = mod },
+            },
+        }),
+    });
+    const async_fifo_gen = b.addRunArtifact(async_fifo_exe);
+    const async_fifo_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/async_fifo_16x8.v" });
+    async_fifo_lint.step.dependOn(&async_fifo_gen.step);
+    const async_fifo_compile = b.addSystemCommand(&.{
+        "iverilog",              "-g2001",                          "-o", "out/async_fifo_iv",
+        "out/async_fifo_16x8.v", "examples/blocks/async_fifo_tb.v",
+    });
+    async_fifo_compile.step.dependOn(&async_fifo_gen.step);
+    const async_fifo_run = b.addSystemCommand(&.{ "vvp", "out/async_fifo_iv" });
+    async_fifo_run.step.dependOn(&async_fifo_compile.step);
+    const async_fifo_step = b.step("async-fifo", "Emit, lint and replay the dual-clock async FIFO witness");
+    async_fifo_step.dependOn(&async_fifo_lint.step);
+    async_fifo_step.dependOn(&async_fifo_run.step);
+
     // Integrated ZIO witness bundles (RTL, design.json, SDC, microcode,
     // payload, harness, model-checked JSONL) for 60 and 120 MHz.
     const zio_wit_exe = b.addExecutable(.{
@@ -309,6 +336,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&part_run.step);
     sim_step.dependOn(&width_run.step);
     sim_step.dependOn(&eth_run.step);
+    sim_step.dependOn(&async_fifo_run.step);
     sim_step.dependOn(zio_step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
@@ -325,6 +353,8 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&part_run.step);
     verify_step.dependOn(&width_run.step);
     verify_step.dependOn(&eth_run.step);
+    verify_step.dependOn(&async_fifo_lint.step);
+    verify_step.dependOn(&async_fifo_run.step);
     verify_step.dependOn(zio_step);
 
     // By making the run step depend on the default step, it will be run from the

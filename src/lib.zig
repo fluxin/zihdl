@@ -61,6 +61,34 @@ pub fn muxLookup(mb: *ModuleBuilder, sel: anytype, default: anytype, cases: anyt
 }
 
 // ============================================================================
+// Rotates
+// ============================================================================
+
+/// Constant left rotate by `n` bits (`0 <= n < W`). Emitted as a bit-slice
+/// concatenation, so no operator is required from the target language.
+pub fn rotl(mb: *ModuleBuilder, x: anytype, comptime n: usize) netlist.Expr(@TypeOf(x).width) {
+    const W = @TypeOf(x).width;
+    comptime {
+        if (W == 0) @compileError("rotl requires a non-empty value");
+        if (n >= W) @compileError("rotl amount must be smaller than the width");
+    }
+    const b = mb.exprs();
+    if (n == 0) return b.resize(x, W);
+    return b.concat(.{ b.slice(x, W - n - 1, 0), b.slice(x, W - 1, W - n) });
+}
+
+/// Constant right rotate by `n` bits (`0 <= n < W`).
+pub fn rotr(mb: *ModuleBuilder, x: anytype, comptime n: usize) netlist.Expr(@TypeOf(x).width) {
+    const W = @TypeOf(x).width;
+    comptime {
+        if (W == 0) @compileError("rotr requires a non-empty value");
+        if (n >= W) @compileError("rotr amount must be smaller than the width");
+    }
+    if (n == 0) return mb.exprs().resize(x, W);
+    return rotl(mb, x, W - n);
+}
+
+// ============================================================================
 // Temporal helpers (assertion support without SVA)
 // ============================================================================
 
@@ -220,6 +248,50 @@ pub fn syncInput(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clo
     return .{ .d0 = d0, .value = d1, .prev = prev };
 }
 
+/// Pulse synchronizer: one pulse in `src` becomes one pulse in `dst`. The
+/// source toggles a register, the toggle crosses on a two-flop synchronizer,
+/// and an edge detector recovers the pulse. `pulse` must be high for a single
+/// `src` clock cycle; longer levels need a handshake.
+pub fn pulseSync(
+    mb: *ModuleBuilder,
+    name: []const u8,
+    pulse: anytype,
+    src: ClockDomain,
+    dst: ClockDomain,
+) !netlist.Expr(1) {
+    const b = mb.exprs();
+    const toggle = try mb.reg(try memberName(mb, name, "toggle"), 1, 0);
+    try mb.seq(src, &.{
+        b.when(pulse, &.{b.assign(toggle, b.not(toggle.expr()))}, &.{}),
+    });
+
+    const q1 = try mb.reg(try memberName(mb, name, "q1"), 1, 0);
+    const q2 = try mb.reg(try memberName(mb, name, "q2"), 1, 0);
+    const q3 = try mb.reg(try memberName(mb, name, "q3"), 1, 0);
+    try mb.seq(dst, &.{
+        b.assign(q1, toggle.expr()),
+        b.assign(q2, q1.expr()),
+        b.assign(q3, q2.expr()),
+    });
+    return b.bxor(q2.expr(), q3.expr());
+}
+
+/// Reset synchronizer: asynchronously asserts the active-low output while
+/// `raw_rst_n` is low, and releases it synchronously to `domain.clk` (classic
+/// async-assert / sync-release). The output releases two `domain` edges after
+/// `raw_rst_n` rises; use it as the `rst_n` of a domain whose reset policy has
+/// `release = .synchronous`.
+pub fn resetSync(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domain: ClockDomain) !Signal(1) {
+    const b = mb.exprs();
+    const s0 = try mb.reg(try memberName(mb, name, "sync0"), 1, 0);
+    const s1 = try mb.reg(try memberName(mb, name, "sync1"), 1, 0);
+    try mb.seqReset(domain.clk, .{ .signal = raw_rst_n, .kind = .async_low }, &.{
+        b.assign(s0, 1),
+        b.assign(s1, s0.expr()),
+    });
+    return s1;
+}
+
 // ============================================================================
 // Encoders / decoders
 // ============================================================================
@@ -359,3 +431,66 @@ pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: Stat
 // ============================================================================
 // Tests
 // ============================================================================
+
+const verilog = @import("backend/verilog.zig");
+
+test "rotate helpers emit bit-slice concatenations of the operand width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Rot = struct {
+        pub const name = "rot_helpers";
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { l: Signal(8), r: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            try mb.assign(outs.l, rotl(mb, ins.a, 3));
+            try mb.assign(outs.r, rotr(mb, ins.a, 3));
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Rot);
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign l = {a[4:0], a[7:5]};") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign r = {a[2:0], a[7:3]};") != null);
+}
+
+test "CDC helpers emit a toggle synchronizer and an async-assert reset chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Cdc = struct {
+        pub const name = "cdc_helpers";
+        pub const Inputs = struct {
+            src_clk: Signal(1),
+            src_rst_n: Signal(1),
+            dst_clk: Signal(1),
+            dst_rst_n: Signal(1),
+            pulse: Signal(1),
+        };
+        pub const Outputs = struct { synced_pulse: Signal(1), synced_rst_n: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const src = ClockDomain{ .clk = ins.src_clk, .rst_n = ins.src_rst_n };
+            const dst = ClockDomain{ .clk = ins.dst_clk, .rst_n = ins.dst_rst_n };
+            try mb.addClockDomain(src);
+            try mb.addClockDomain(dst);
+            try mb.assign(outs.synced_pulse, try pulseSync(mb, "evt", ins.pulse, src, dst));
+            try mb.assign(outs.synced_rst_n, try resetSync(mb, "rst", ins.src_rst_n, dst));
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Cdc);
+    const rtl = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "reg         evt_toggle;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "evt_q2 <= evt_q1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_pulse = (evt_q2 ^ evt_q3);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(posedge dst_clk or negedge src_rst_n) begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_rst_n = rst_sync1;") != null);
+}

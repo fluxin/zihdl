@@ -74,16 +74,17 @@ Everything else hangs off that. The public surface is exported through
 
 ### lib
 
-`regNext`, `regEnable`, `muxLookup`, `past`, `rose`, `fell`, `stable`,
-`changed`; `Stream(W)` with `streamSource`/`streamSink`/`streamWire`/
-`connectStream`/`regStream`; `sync2`, `syncInput`; `decode`, `priorityEncode`,
-`isOneHot`; `stateWidth`, `StateEncoding`, `StateMachine` (`create`, `current`,
-`param`, `goto`, `arm`, `case_`, `run`).
+`regNext`, `regEnable`, `muxLookup`, `rotl`, `rotr`, `past`, `rose`, `fell`,
+`stable`, `changed`; `Stream(W)` with `streamSource`/`streamSink`/
+`streamWire`/`connectStream`/`regStream`; `sync2`, `syncInput`, `pulseSync`,
+`resetSync`; `decode`, `priorityEncode`, `isOneHot`; `stateWidth`,
+`StateEncoding`, `StateMachine` (`create`, `current`, `param`, `goto`, `arm`,
+`case_`, `run`).
 
 ### blocks
 
-`SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `ShiftRegisterBlock`,
-`EdgeDetectorBlock`, `CounterBlock`.
+`SramBlock`, `TtSramBlock` (foreign macro), `FifoBlock`, `AsyncFifoBlock`,
+`ShiftRegisterBlock`, `EdgeDetectorBlock`, `CounterBlock`.
 
 ### backend
 
@@ -124,8 +125,9 @@ rather than the authoring half of this specific project.
 ### Gaps by category
 
 **Expression language**
-- No division/modulo (`/`, `%`) in `BinOp`; no rotate. Ranges, dividers and
-  some protocol timing need them.
+- No division/modulo (`/`, `%`) in `BinOp`. Constant rotate is
+  `lib.rotl`/`rotr` (slice concatenation); dynamic rotate is built from
+  shifts/ors.
 - No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
   bit at runtime. Variable field extraction needs `shift`+`mask` today.
 - Signedness is expression-level (`asSigned`) only; ports/registers cannot be
@@ -156,11 +158,13 @@ rather than the authoring half of this specific project.
   init content.
 
 **Clocking, reset, CDC**
-- `ResetRelease` is descriptive; no reset synchronizer is lowered.
-- `sync2`/`syncInput` only: no pulse synchronizer, handshake bridge, async FIFO
-  or gray-code FIFO (planned Phase 3).
+- `ResetRelease` is descriptive; `lib.resetSync` lowers an async-assert /
+  sync-release chain, but the policy field itself still does not generate one.
+- `sync2`, `syncInput`, `pulseSync` and `AsyncFifoBlock` cover level, edge and
+  gray-pointer crossings; no request/acknowledge bridge, mailbox or
+  bundled-data handoff, and no CDC structural lint.
 - No clock divider/PLL/gating primitives; PLLs are foreign macros.
-- No CDC lint or multi-clock-domain structural check.
+- No multi-clock-domain structural check beyond per-process reset coverage.
 
 **Timing and constraints**
 - Timing intent covers input classification, synchronizer stages, arrival
@@ -193,16 +197,20 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Arithmetic coverage**: add `div`/`mod` (and rotate if needed), then use
-   them in a protocol example; this also closes part of the oasic front-end
-   parity list in PLAN §2.
-2. **Parameter propagation**: a way for a parent parameter to specialize a
+1. **Arithmetic in lockstep with `oasic`.** `/` and `%` are on oasic's missing
+   front-end list and nothing here needs them yet (dividers are counters), so
+   land the checker parser/lowering first and add the IR operators in the same
+   change. Constant rotate already landed as `lib.rotl`/`rotr`; signed port and
+   register declarations are the other parser-relevant arithmetic item.
+2. **Handshake and bundled-data CDC.** `sync2`, `syncInput`, `pulseSync`,
+   `resetSync` and `AsyncFifoBlock` now cover the common crossings; add
+   request/acknowledge bridges, mailboxes and a CDC structural lint.
+3. **Parameter propagation**: a way for a parent parameter to specialize a
    child's structural widths/depths, so generated suites do not need comptime
    duplication.
-3. **CDC/IP library (Phase 3)**: async FIFO, pulse synchronizer, reset
-   synchronizer lowering, arbiter, UART/SPI/I2C targets.
-4. **Finish the timing-intent v2 backlog**: output required times, clock
-   relationships, reset-release synchronizer identity, per-bit slew/load.
+4. **Finish the timing-intent v2 backlog** once `oasic` accepts `/2`: output
+   required times, clock relationships, reset-release synchronizer identity,
+   per-bit slew/load.
 5. **Reusable reference model**: lift the per-fixture cycle models into a
    small interpreter/testbench generator so stimulus expectations are not
    rewritten per test.

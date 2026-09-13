@@ -24,7 +24,7 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, FIFO, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, sync + async FIFO, shift reg, edge det, counter)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
 root.zig             module root; exports netlist, lib, blocks, backend
@@ -125,6 +125,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build sim` | Transitional iverilog regressions (oasic's simulator replaces these) |
 | `zig build verify` | Enforced lint + simulation of every artifact + contract fixture |
 | `zig build contract` | Emits the timing-intent fixture under `out/contract/` |
+| `zig build async-fifo` | Emits, lints and Icarus-replays the dual-clock async FIFO witness |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 
 ## Tests

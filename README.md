@@ -114,6 +114,9 @@ zig build lint-sv        # also emits out/asic_core.sv
 # Transitional behavioral regressions (iverilog; oasic's simulator replaces them)
 zig build sim
 
+# Dual-clock async FIFO witness: emit, lint and replay (iverilog)
+zig build async-fifo
+
 # Lint and simulate every emitted artifact
 zig build verify
 ```
@@ -127,10 +130,10 @@ holes matter for general-purpose use; the detailed review is in
 
 | Area | Gap |
 |---|---|
-| Expressions | No integer division/modulo or rotate; `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
+| Expressions | No integer division/modulo (constant rotates are `lib.rotl`/`rotr`); `slice` is comptime-only; signedness is expression-level (`asSigned`), not a port/register declaration; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
 | Parameterization | Widths/depths are comptime type arguments; value parameters are 64-bit and cannot size ports or memories, so a parent cannot specialize a child's shape |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
-| Clocking / CDC / IP | No async FIFO, pulse synchronizer or reset-synchronizer lowering; Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers) is not built |
+| Clocking / CDC / IP | Async FIFO and pulse/reset synchronizers landed; remaining: request/ack bridge, mailboxes, CDC structural lint, and Phase 3 IP (AXI4-Lite, UART, SPI/I2C targets, arbiter, crossbar, timers); `ResetPolicy.release` itself still does not lower a synchronizer |
 | Timing / constraints | Output required times, external clock relationships, reset-release synchronization and per-bit slew/load remain deferred; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
 | Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
