@@ -95,7 +95,10 @@ Everything else hangs off that. The public surface is exported through
 `lint(allocator, design)` returns `[]Crossing` for sequential captures that
 read a signal driven only by another clock domain without a declared
 synchronizer stage, a recognized two-flop structure, a declared synchronous
-clock relationship or a request/acknowledge handshake. Descriptive only: the
+clock relationship or a request/acknowledge handshake. On flat modules it also
+reports an input classified `asynchronous` with fewer than two declared
+synchronizer stages (`kind == .unsynchronized_input`); parent boundary rows
+that resolve through instances are left to the consumer. Descriptive only: the
 lint never changes RTL.
 
 ### backend

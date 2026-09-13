@@ -635,6 +635,22 @@ test "contract fixture elaborates with two renamed instances" {
     }
 }
 
+test "contract fixture CDC lint reports only the intentional unsynchronized input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const design = try buildDesign(alloc);
+    const cdc = @import("../cdc.zig");
+    const crossings = try cdc.lint(alloc, design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(cdc.Kind.unsynchronized_input, crossings[0].kind);
+    try std.testing.expectEqualStrings(child_name, crossings[0].module);
+    try std.testing.expectEqualStrings("raw_in", crossings[0].signal);
+    try std.testing.expectEqualStrings("clk", crossings[0].to_clock);
+}
+
 test "contract stimulus binds every input and output with a model-derived row" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -15,6 +15,12 @@
 //!   * the capture is bundled data landing in a domain pair that already has a
 //!     two-way request/acknowledge synchronizer handshake.
 //!
+//! It also checks authored input intent: an input classified `asynchronous`
+//! with fewer than two declared synchronizer stages is reported as an
+//! unprotected input. That check runs on flat modules only; a parent's
+//! boundary rows may be refined by the child that captures the signal, which
+//! is the consumer's hierarchical resolution to make.
+//!
 //! Memories are treated as dual-port state, not as crossings, and external
 //! inputs are unknown rather than foreign. Findings are descriptive: the lint
 //! never changes RTL, and a declared synchronizer identity remains the precise
@@ -23,16 +29,27 @@
 const std = @import("std");
 const ir = @import("netlist.zig");
 
+pub const Kind = enum {
+    /// Sequential capture reads a signal driven only by another clock domain
+    /// without a recognized synchronization structure.
+    unsynchronized_capture,
+    /// Authored timing intent classifies an input asynchronous but declares
+    /// fewer than two synchronizer stages, so the capture is unprotected.
+    unsynchronized_input,
+};
+
 pub const Crossing = struct {
+    kind: Kind,
     module: []const u8,
     /// Assigned destination, or empty when the foreign signal is only read in
-    /// a condition/address.
+    /// a condition/address or when the finding is about an input declaration.
     destination: []const u8,
-    /// Foreign-domain signal read by the capture.
+    /// Foreign-domain signal read by the capture, or the declared input.
     signal: []const u8,
-    /// Clock port of the domain that drives `signal`.
+    /// Clock port of the domain that drives `signal`; empty for an external
+    /// input that no internal process drives.
     from_clock: []const u8,
-    /// Clock port of the capturing process.
+    /// Clock port of the capturing process or destination domain.
     to_clock: []const u8,
 };
 
@@ -152,12 +169,13 @@ const ModuleLint = struct {
         while (bit < 64) : (bit += 1) {
             const one = @as(Mask, 1) << @intCast(bit);
             if (foreign & one == 0) continue;
-            try self.append(findings, dst, idx, @intCast(bit), domain);
+            try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(bit), domain);
         }
     }
 
-    fn append(self: *ModuleLint, findings: *std.ArrayList(Crossing), dst: []const u8, idx: usize, from: u32, to: u32) std.mem.Allocator.Error!void {
+    fn append(self: *ModuleLint, findings: *std.ArrayList(Crossing), kind: Kind, dst: []const u8, idx: usize, from: u32, to: u32) std.mem.Allocator.Error!void {
         const row = Crossing{
+            .kind = kind,
             .module = self.module.name,
             .destination = dst,
             .signal = self.module.scope.symbols.items[idx].name,
@@ -165,7 +183,8 @@ const ModuleLint = struct {
             .to_clock = self.domains.items[to].name(),
         };
         for (findings.items) |existing| {
-            if (std.mem.eql(u8, existing.module, row.module) and
+            if (existing.kind == row.kind and
+                std.mem.eql(u8, existing.module, row.module) and
                 std.mem.eql(u8, existing.destination, row.destination) and
                 std.mem.eql(u8, existing.signal, row.signal) and
                 std.mem.eql(u8, existing.from_clock, row.from_clock) and
@@ -497,6 +516,36 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
             .edge => |e| try ctx.checkStmts(findings, proc.stmts, ctx.domainId(e.clk), ""),
         }
     }
+
+    // Authored asynchronous inputs need at least a two-flop chain; fewer
+    // declared stages means the capture is unprotected, whatever the internal
+    // structure looks like. Only flat modules are checked: a parent's boundary
+    // rows may be refined by the child that actually captures the signal, so
+    // resolving them is the consumer's job.
+    if (module.instances.len == 0) {
+        for (module.timing) |intent| {
+            if (intent.classification != .asynchronous or intent.stages.len >= 2) continue;
+            const signal_name = intent.signal.name();
+            const to_clock = if (intent.clock) |clk| clk.name() else "";
+            var seen = false;
+            for (findings.items) |existing| {
+                if (existing.kind == .unsynchronized_input and std.mem.eql(u8, existing.module, module.name) and
+                    std.mem.eql(u8, existing.signal, signal_name))
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) try findings.append(allocator, .{
+                .kind = .unsynchronized_input,
+                .module = module.name,
+                .destination = "",
+                .signal = signal_name,
+                .from_clock = "",
+                .to_clock = to_clock,
+            });
+        }
+    }
 }
 
 fn exprMask(masks: []const Mask, expr: ir.AnyExpr) Mask {
@@ -631,6 +680,85 @@ test "CDC lint flags unsynchronized captures and accepts sync structures" {
     try std.testing.expectEqualStrings("a_q", crossings[0].signal);
     try std.testing.expectEqualStrings("b_via_w", crossings[1].destination);
     try std.testing.expectEqualStrings("w", crossings[1].signal);
+}
+
+test "CDC lint reports asynchronous inputs without a synchronizer chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_async_input";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const q_reg = try mb.reg("q_reg", 1, 0);
+            try mb.seq(domain, &.{b.assign(q_reg, ins.async_in.expr())});
+            try mb.assign(outs.q, q_reg.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.async_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_input, crossings[0].kind);
+    try std.testing.expectEqualStrings("cdc_async_input", crossings[0].module);
+    try std.testing.expectEqualStrings("async_in", crossings[0].signal);
+    try std.testing.expectEqualStrings("clk", crossings[0].to_clock);
+    try std.testing.expectEqualStrings("", crossings[0].from_clock);
+}
+
+test "CDC lint accepts an asynchronous input with a two-stage chain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_async_synced";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_in: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const d0 = try mb.reg("d0", 1, 0);
+            const d1 = try mb.reg("d1", 1, 0);
+            try mb.seq(domain, &.{
+                b.assign(d0, ins.async_in.expr()),
+                b.assign(d1, d0.expr()),
+            });
+            try mb.assign(outs.q, d1.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.async_in.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = d0.ref, .bit = 0 },
+                    .{ .signal = d1.ref, .bit = 0 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    try std.testing.expectEqual(@as(usize, 0), crossings.len);
 }
 
 test "CDC lint accepts declared synchronous clock relationships" {
