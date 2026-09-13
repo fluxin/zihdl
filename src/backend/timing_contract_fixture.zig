@@ -12,18 +12,19 @@
 //! required windows) and to author distinct slew windows. Child input rows and
 //! parent input rows stay compatible and merge field by field.
 //!
-//! `emitStimulus` builds an independent `oasic.stimulus/1` program whose
-//! expectations come from the cycle model written here, never from emitted RTL.
-//! The model advances the reset synchronizer edge by edge, so the replay pins
-//! the released domain's two-edge release latency: inputs driven during the
-//! release edges must not appear at the outputs. Arrival, slew, load and
-//! required values are fixture values that exercise the schema; they are not
-//! board requirements and must not be treated as such.
+//! `emitStimulus` builds an independent `oasic.stimulus/1` program through the
+//! shared `stimulus.Writer`; its expectations come from the cycle model written
+//! here, never from emitted RTL. The model advances the reset synchronizer edge
+//! by edge, so the replay pins the released domain's two-edge release latency:
+//! inputs driven during the release edges must not appear at the outputs.
+//! Arrival, slew, load and required values are fixture values that exercise the
+//! schema; they are not board requirements and must not be treated as such.
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
 const lib = @import("../lib.zig");
 const cdc_blocks = @import("../blocks/cdc.zig");
+const stimulus = @import("stimulus.zig");
 
 const Signal = netlist.Signal;
 const Design = netlist.Design;
@@ -431,32 +432,14 @@ const Sync = struct {
 };
 
 pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-
-    try out.appendSlice(allocator, "{\"schema\":\"");
-    try out.appendSlice(allocator, stimulus_schema);
-    try out.appendSlice(allocator, "\",\"top\":\"");
-    try out.appendSlice(allocator, top_name);
-    try out.appendSlice(allocator, "\",\"clock\":\"");
-    try out.appendSlice(allocator, clock_name);
-    try out.appendSlice(allocator, "\",\"period_ps\":");
-    try appendFmt(&out, allocator, "{d}", .{period_ps});
-    try out.appendSlice(allocator, ",\"inputs\":[");
-    for (input_names, 0..) |name, i| {
-        if (i != 0) try out.appendSlice(allocator, ",");
-        try out.appendSlice(allocator, "\"");
-        try out.appendSlice(allocator, name);
-        try out.appendSlice(allocator, "\"");
-    }
-    try out.appendSlice(allocator, "],\"outputs\":[");
-    for (output_names, 0..) |name, i| {
-        if (i != 0) try out.appendSlice(allocator, ",");
-        try out.appendSlice(allocator, "\"");
-        try out.appendSlice(allocator, name);
-        try out.appendSlice(allocator, "\"");
-    }
-    try out.appendSlice(allocator, "]}\n");
+    var writer = try stimulus.Writer.init(allocator, .{
+        .top = top_name,
+        .clock = clock_name,
+        .period_ps = period_ps,
+        .input_names = &input_names,
+        .output_names = &output_names,
+    });
+    defer writer.deinit();
 
     var fast = Sync{};
     var slow = Sync{};
@@ -498,47 +481,37 @@ pub fn emitStimulus(allocator: std.mem.Allocator) ![]u8 {
             rel1 = old_rel0;
         }
 
-        var drive = [_]u8{'0'} ** input_names.len;
-        drive[0] = if (row.rst_n == 1) '1' else '0';
-        for (0..8) |bit| drive[1 + bit] = if ((row.fast_sync >> @intCast(bit)) & 1 == 1) '1' else '0';
-        for (0..8) |bit| drive[9 + bit] = if ((row.slow_sync >> @intCast(bit)) & 1 == 1) '1' else '0';
-        drive[17] = if (row.fast_async == 1) '1' else '0';
-        drive[18] = if (row.slow_async == 1) '1' else '0';
-        drive[19] = if ((row.fast_bus >> 0) & 1 == 1) '1' else '0';
-        drive[20] = if ((row.fast_bus >> 1) & 1 == 1) '1' else '0';
-        drive[21] = if ((row.slow_bus >> 0) & 1 == 1) '1' else '0';
-        drive[22] = if ((row.slow_bus >> 1) & 1 == 1) '1' else '0';
-        drive[23] = if (row.fast_raw == 1) '1' else '0';
-        drive[24] = if (row.slow_raw == 1) '1' else '0';
+        @memset(writer.drive, '0');
+        writer.drive[0] = if (row.rst_n == 1) '1' else '0';
+        for (0..8) |bit| writer.drive[1 + bit] = if ((row.fast_sync >> @intCast(bit)) & 1 == 1) '1' else '0';
+        for (0..8) |bit| writer.drive[9 + bit] = if ((row.slow_sync >> @intCast(bit)) & 1 == 1) '1' else '0';
+        writer.drive[17] = if (row.fast_async == 1) '1' else '0';
+        writer.drive[18] = if (row.slow_async == 1) '1' else '0';
+        writer.drive[19] = if ((row.fast_bus >> 0) & 1 == 1) '1' else '0';
+        writer.drive[20] = if ((row.fast_bus >> 1) & 1 == 1) '1' else '0';
+        writer.drive[21] = if ((row.slow_bus >> 0) & 1 == 1) '1' else '0';
+        writer.drive[22] = if ((row.slow_bus >> 1) & 1 == 1) '1' else '0';
+        writer.drive[23] = if (row.fast_raw == 1) '1' else '0';
+        writer.drive[24] = if (row.slow_raw == 1) '1' else '0';
         // External reference clock: metadata-visible in the clock relationship
         // declarations only; functionally idle at a constant level.
-        drive[25] = '1';
+        writer.drive[25] = '1';
 
-        var expect = [_]u8{'0'} ** output_names.len;
-        for (0..8) |bit| expect[bit] = if ((fast.q >> @intCast(bit)) & 1 == 1) '1' else '0';
-        for (0..8) |bit| expect[8 + bit] = if ((slow.q >> @intCast(bit)) & 1 == 1) '1' else '0';
-        expect[16] = if ((fast.d1 & ~fast.prev) == 1) '1' else '0';
-        expect[17] = if ((slow.d1 & ~slow.prev) == 1) '1' else '0';
-        expect[18] = if ((fast.bus_d1 >> 0) & 1 == 1) '1' else '0';
-        expect[19] = if ((fast.bus_d1 >> 1) & 1 == 1) '1' else '0';
-        expect[20] = if ((slow.bus_d1 >> 0) & 1 == 1) '1' else '0';
-        expect[21] = if ((slow.bus_d1 >> 1) & 1 == 1) '1' else '0';
-        expect[22] = drive[23];
-        expect[23] = drive[24];
+        @memset(writer.expect, '0');
+        for (0..8) |bit| writer.expect[bit] = if ((fast.q >> @intCast(bit)) & 1 == 1) '1' else '0';
+        for (0..8) |bit| writer.expect[8 + bit] = if ((slow.q >> @intCast(bit)) & 1 == 1) '1' else '0';
+        writer.expect[16] = if ((fast.d1 & ~fast.prev) == 1) '1' else '0';
+        writer.expect[17] = if ((slow.d1 & ~slow.prev) == 1) '1' else '0';
+        writer.expect[18] = if ((fast.bus_d1 >> 0) & 1 == 1) '1' else '0';
+        writer.expect[19] = if ((fast.bus_d1 >> 1) & 1 == 1) '1' else '0';
+        writer.expect[20] = if ((slow.bus_d1 >> 0) & 1 == 1) '1' else '0';
+        writer.expect[21] = if ((slow.bus_d1 >> 1) & 1 == 1) '1' else '0';
+        writer.expect[22] = writer.drive[23];
+        writer.expect[23] = writer.drive[24];
 
-        try out.appendSlice(allocator, "{\"drive\":\"");
-        try out.appendSlice(allocator, &drive);
-        try out.appendSlice(allocator, "\",\"expect\":\"");
-        try out.appendSlice(allocator, &expect);
-        try out.appendSlice(allocator, "\"}\n");
+        try writer.push();
     }
-    return out.toOwnedSlice(allocator);
-}
-
-fn appendFmt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
-    const formatted = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(formatted);
-    try out.appendSlice(allocator, formatted);
+    return writer.finish();
 }
 
 test "contract fixture elaborates with two renamed instances" {

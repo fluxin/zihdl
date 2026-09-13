@@ -124,6 +124,7 @@ downward. Descriptive only: the lint never changes RTL.
 | `systemverilog.emitModule` / `emitDesign` | SystemVerilog (`logic`, `always_*`, enums, packed struct bundles) |
 | `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, per-bit slew/load, output load/required and clock relationship/reset-release topology), resolved per-instance `Shape` values, forwarded-parameter sources, provenance |
 | `sdc.emitDesignSdc` | `create_clock`, uncertainty, reset false paths |
+| `stimulus.Writer` | `oasic.stimulus/1` schedule: one header (top, clock, period, input/output bit order) plus per-cycle `drive`/`expect` rows shared by fixtures |
 | `provenance.Collector` | operation rows, authored groups, byte-exact RTL spans, artifact hash binding |
 | `timing_contract` fixture | the consumer contract fixture (RTL, v2 JSON, v1 projection, stimulus, manifest) |
 
@@ -268,21 +269,12 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **Parameter propagation**: structural `Shape` specialization from a parent's
-   comptime values, a family `validateShape` constraint hook, forwarding a
-   parent `Param`/constant into a child override, and per-instance resolved-shape
-   export in `design.json` landed. Forwarding stays explicit by design: no
-   same-name implicit propagation is planned.
-2. **Consume the per-bit timing rows**: declaration, validation and additive
-   `/2` export for per-bit slew/load landed, and hierarchy contradictions are
-   rejected transitively through silent levels and siblings. The live consumer
-   still reads whole-port rows only and constraint resolution stays
-   consumer-side; `/3` remains reserved for incompatible schema changes.
-3. **Reusable reference model**: lift the per-fixture cycle models into a
-   small interpreter/testbench generator so stimulus expectations are not
-   rewritten per test.
-4. **Process**: add a `LICENSE`, decide whether docs ship in the package
+1. **Process**: add a `LICENSE`, decide whether docs ship in the package
    `paths`, and tag versions when consumers pin hashes.
+2. **IP library**: the authoring API has no open items; the next phase is the
+   `PLAN.md` Phase 3 block library (AXI4-Lite, UART, SPI master/target, I2C
+   target, arbiter/crossbar, timers, ROM/RAM wrappers). Consumer-side work
+   (per-bit constraint resolution, formal crossing proofs) belongs to `oasic`.
 
 ## Stability policy
 
