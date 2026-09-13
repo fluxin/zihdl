@@ -54,7 +54,7 @@ Everything else hangs off that. The public surface is exported through
 | Assignment | `assign`, `assignExpr` |
 | Processes | `seq`, `seqNoReset`, `seqReset`, `seqEnable`, `seqResetEnable`, `comb` |
 | Memory ports | `syncRead`, `readWritePort` |
-| Hierarchy | `instantiate` (typed `Inputs`/`Outputs` binding + `Params` overrides), `instantiateShape` (comptime `Shape` specialization forwarded to a child) |
+| Hierarchy | `instantiate` (typed `Inputs`/`Outputs` binding + `Params` overrides, literal or a parent `Param`/constant forwarded by name), `instantiateShape` (comptime `Shape` specialization forwarded to a child) |
 | Clocking | `addClockDomain`, `createClockDomain` |
 | Metadata | `addEnumGroup`, `addEnumType`, `tagGroup`, `addInputTiming`, `addOutputTiming` |
 | Lifecycle | `init`, `deinit`, `exprs`, `intern`, `finish` |
@@ -197,9 +197,13 @@ rather than the authoring half of this specific project.
 - No IR-level generate/loop construct: elaboration loops are Zig `inline for`.
   Intentional, but it means no reproducible "same source, runtime parameter
   set" flow.
-- Runtime parameters flow only through explicit `ParamOverride`; there is no
-  automatic propagation or symbol visibility guarantee across hierarchy.
-  Structural `Shape` values are explicit at each instantiation.
+- Runtime parameters flow through explicit `ParamOverride`, and a parent
+  `Param(W)` or constant can be forwarded by name into a child override
+  (emitted `#(.CHILD(PARENT))`), so a top-level override reaches descendants
+  without being frozen to a literal; forwarded widths are checked against the
+  child parameter. There is still no automatic propagation for symbols that
+  are not explicitly passed. Structural `Shape` values are explicit at each
+  instantiation.
 
 **Memory**
 - One read port plus one write path per memory (`syncRead`, `readWritePort`);

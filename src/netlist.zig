@@ -1280,11 +1280,15 @@ pub const Connection = struct {
     direction: PortDir,
 };
 
-/// One instance-site module-parameter override.
+/// One instance-site module-parameter override. `symbol` forwards a parent
+/// module parameter or constant by name (the emitted `#(.NAME(PARENT))`), so a
+/// parent's override value reaches the child without being frozen to a literal;
+/// `value` then carries the forwarded symbol's declared default.
 pub const ParamOverride = struct {
     name: []const u8,
     width: usize,
     value: u64,
+    symbol: ?SymRef = null,
 };
 
 pub const Instance = struct {
@@ -1968,6 +1972,12 @@ fn validateStmts(stmts: []const Stmt) !void {
 /// True for `Signal(W)` handles (bundle leaves) as opposed to nested bundles.
 fn isSignalHandle(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_signal");
+}
+
+/// True for a width-typed handle carrying a `ref` (Signal, SignedSignal,
+/// Param, Mem), the shapes an instance parameter may forward by name.
+fn isRefHandle(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasField(T, "ref");
 }
 
 fn flipPortDir(dir: PortDir) PortDir {
@@ -3239,7 +3249,25 @@ pub const ModuleBuilder = struct {
             }
             const width = comptime valWidth(Spec);
             if (width > 64) @compileError("parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "' is wider than 64 bits");
-            const value = std.math.cast(u64, @field(params, field.name)) orelse return error.ParameterOutOfRange;
+            const raw = @field(params, field.name);
+            if (comptime isRefHandle(@TypeOf(raw))) {
+                // Forward a parent parameter or constant by name rather than a
+                // frozen literal; the parent's runtime override reaches the
+                // child. The forwarded symbol must fit the child's parameter.
+                const forwarded: SymRef = raw.ref;
+                const sym = forwarded.symbol();
+                if (sym.kind != .module_param and sym.kind != .constant) {
+                    std.log.warn("js_asic: parameter '{s}' for module '{s}' must forward a module parameter or constant, not '{s}'", .{ field.name, BlockType.name, forwarded.name() });
+                    return error.InvalidParameter;
+                }
+                if (comptime valWidth(@TypeOf(raw)) > width) {
+                    @compileError("forwarded parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "' is wider than the child parameter");
+                }
+                list[idx] = .{ .name = field.name, .width = width, .value = sym.init_val, .symbol = forwarded };
+                idx += 1;
+                continue;
+            }
+            const value = std.math.cast(u64, raw) orelse return error.ParameterOutOfRange;
             if (width < 64 and value >= (@as(u64, 1) << @intCast(width))) return error.ParameterOutOfRange;
             list[idx] = .{ .name = field.name, .width = width, .value = value };
             idx += 1;

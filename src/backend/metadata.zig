@@ -271,6 +271,10 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
             try j.write(param.width);
             try j.objectField("value");
             try j.write(param.value);
+            if (param.symbol) |ref| {
+                try j.objectField("symbol");
+                try j.write(ref.name());
+            }
             try j.endObject();
         }
         try j.endArray();

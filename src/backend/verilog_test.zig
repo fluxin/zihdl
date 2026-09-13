@@ -563,6 +563,67 @@ test "black box parameter schema emits named instance overrides" {
     try std.testing.expect(std.mem.indexOf(u8, v, "tt_sram u_default (") != null);
 }
 
+test "instance parameters forward a parent parameter or constant by name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Mask = struct {
+        pub const name = "fwd_mask";
+        pub const Params = struct { MASK: ParamSpec(8) };
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const mask = try mb.moduleParam("MASK", 8, 0xFF);
+            try mb.assign(outs.y, b.band(ins.a, mask.expr()));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.input("a", 8);
+    const y0 = try top.outputPort("y0", 8);
+    const y1 = try top.outputPort("y1", 8);
+    const inherited = try top.moduleParam("INHERITED", 8, 0x3C);
+    const fixed = try top.constant("FIXED", 8, 0x0F);
+    _ = try top.instantiate(Mask, "u_inherit", .{ .a = a }, .{ .y = y0 }, .{ .MASK = inherited });
+    _ = try top.instantiate(Mask, "u_fixed", .{ .a = a }, .{ .y = y1 }, .{ .MASK = fixed });
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, ".MASK(INHERITED)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, ".MASK(FIXED)") != null);
+}
+
+test "forwarding a non-parameter symbol as an instance parameter is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Mask = struct {
+        pub const name = "fwd_reject_mask";
+        pub const Params = struct { MASK: ParamSpec(8) };
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const mask = try mb.moduleParam("MASK", 8, 0xFF);
+            try mb.assign(outs.y, b.band(ins.a, mask.expr()));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const a = try top.input("a", 8);
+    const y = try top.outputPort("y", 8);
+    try std.testing.expectError(error.InvalidParameter, top.instantiate(Mask, "u_bad", .{ .a = a }, .{ .y = y }, .{ .MASK = a }));
+}
+
 test "block parameter schema declares verilog parameters and overrides them" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

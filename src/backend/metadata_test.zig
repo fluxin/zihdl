@@ -254,3 +254,45 @@ test "design.json marks signed memories and bundle members additively" {
     try std.testing.expectEqualStrings("plain_val", plain_member.object.get("path").?.string);
     try std.testing.expect(plain_member.object.get("is_signed") == null);
 }
+
+test "design.json records a forwarded instance parameter symbol" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Child = struct {
+        pub const name = "json_fwd_child";
+        pub const Params = struct { MASK: ParamSpec(8) };
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const mask = try mb.moduleParam("MASK", 8, 0xFF);
+            try mb.assign(outs.y, b.band(ins.a, mask.expr()));
+        }
+    };
+
+    const Top = struct {
+        pub const name = "json_fwd_top";
+        pub const Inputs = struct { a: Signal(8) };
+        pub const Outputs = struct { y: Signal(8) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const inherited = try mb.moduleParam("INHERITED", 8, 0x3C);
+            _ = try mb.instantiate(Child, "u_child", .{ .a = ins.a }, .{ .y = outs.y }, .{ .MASK = inherited });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Top);
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+    const top = findModule(root, "json_fwd_top").?;
+    const param = top.object.get("instances").?.array.items[0].object.get("params").?.array.items[0];
+    try std.testing.expectEqualStrings("MASK", param.object.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 0x3C), param.object.get("value").?.integer);
+    try std.testing.expectEqualStrings("INHERITED", param.object.get("symbol").?.string);
+}

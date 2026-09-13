@@ -487,7 +487,9 @@ pub fn emitInstanceHeader(out: *std.ArrayList(u8), alloc: std.mem.Allocator, ins
         try appendFmt(out, alloc, "    {s} #(\n", .{inst.module_name});
         for (inst.params, 0..) |p, p_idx| {
             const comma = if (p_idx + 1 == inst.params.len) "" else ",";
-            if (p.width == 1) {
+            if (p.symbol) |ref| {
+                try appendFmt(out, alloc, "        .{s}({s}){s}\n", .{ p.name, ref.name(), comma });
+            } else if (p.width == 1) {
                 try appendFmt(out, alloc, "        .{s}(1'b{d}){s}\n", .{ p.name, p.value & 1, comma });
             } else {
                 try appendFmt(out, alloc, "        .{s}({d}'d{d}){s}\n", .{ p.name, p.width, p.value, comma });
