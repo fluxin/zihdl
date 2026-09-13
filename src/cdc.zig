@@ -6,7 +6,9 @@
 //! recognized crossing:
 //!
 //!   * the destination is declared as a synchronizer stage (input timing chain
-//!     or clock reset-release chain), or
+//!     or clock reset-release chain) for the captured data bit: a stage
+//!     declared without a bit exempts the whole signal, a per-bit stage only
+//!     its own bit, or
 //!   * the destination is a structurally recognized two-flop synchronizer
 //!     (assigned in one domain, never observed combinationally and read only
 //!     through direct captures in that same domain), or
@@ -15,11 +17,20 @@
 //!   * the capture is bundled data landing in a domain pair that already has a
 //!     two-way request/acknowledge synchronizer handshake.
 //!
+//! Per-bit declared stages only narrow a width-aligned direct capture. When
+//! the source is a slice, bit select or expression, no bit mapping is guessed:
+//! the capture is exempt only when every destination bit is declared. The
+//! structural two-flop recognition stays whole-signal because domain ownership
+//! is tracked per signal, not per bit, so per-bit structural inference is out
+//! of scope.
+//!
 //! It also checks authored input intent: an input classified `asynchronous`
-//! with fewer than two declared synchronizer stages is reported as an
-//! unprotected input. That check runs on flat modules only; a parent's
-//! boundary rows may be refined by the child that captures the signal, which
-//! is the consumer's hierarchical resolution to make.
+//! with any data bit covered by fewer than two declared synchronizer stages is
+//! reported as an unprotected input, one finding per uncovered bit (or a
+//! whole-port finding when no stage names a bit). That check runs on flat
+//! modules only; a parent's boundary rows may be refined by the child that
+//! captures the signal, which is the consumer's hierarchical resolution to
+//! make.
 //!
 //! Memories are treated as dual-port state, not as crossings, and external
 //! inputs are unknown rather than foreign. Findings are descriptive: the lint
@@ -34,7 +45,8 @@ pub const Kind = enum {
     /// without a recognized synchronization structure.
     unsynchronized_capture,
     /// Authored timing intent classifies an input asynchronous but declares
-    /// fewer than two synchronizer stages, so the capture is unprotected.
+    /// fewer than two synchronizer stages covering a data bit, so the capture
+    /// is unprotected. Per-bit stages cover only their own bit.
     unsynchronized_input,
 };
 
@@ -51,9 +63,47 @@ pub const Crossing = struct {
     from_clock: []const u8,
     /// Clock port of the capturing process or destination domain.
     to_clock: []const u8,
+    /// Data bit of `signal` the finding is about; null reports the signal as a
+    /// whole (the fallback when no per-bit declaration narrows it).
+    bit: ?u8 = null,
 };
 
 const Mask = u64;
+
+/// Data-bit mask of a signal: every representable bit for widths at or beyond
+/// the mask, zero for a zero-width symbol.
+fn widthMask(width: usize) Mask {
+    if (width >= @bitSizeOf(Mask)) return ~@as(Mask, 0);
+    return (@as(Mask, 1) << @intCast(width)) - 1;
+}
+
+/// Data bits one declared stage covers over a width-matched signal: every bit
+/// for a stage declared without a bit, exactly the named bit otherwise. Bits at
+/// or beyond the mask width cannot be named per-bit and cover nothing.
+fn stageCoverage(stage: ir.SyncStage, width: usize) Mask {
+    const bit = stage.bit orelse return widthMask(width);
+    if (bit >= @bitSizeOf(Mask)) return 0;
+    return @as(Mask, 1) << @intCast(bit);
+}
+
+/// Reports whether two findings are the same row, including the data bit.
+fn sameRow(a: Crossing, b: Crossing) bool {
+    return a.kind == b.kind and a.bit == b.bit and
+        std.mem.eql(u8, a.module, b.module) and
+        std.mem.eql(u8, a.destination, b.destination) and
+        std.mem.eql(u8, a.signal, b.signal) and
+        std.mem.eql(u8, a.from_clock, b.from_clock) and
+        std.mem.eql(u8, a.to_clock, b.to_clock);
+}
+
+/// Appends `row` unless an identical finding (including its data bit) already
+/// exists.
+fn appendRow(allocator: std.mem.Allocator, findings: *std.ArrayList(Crossing), row: Crossing) std.mem.Allocator.Error!void {
+    for (findings.items) |existing| {
+        if (sameRow(existing, row)) return;
+    }
+    try findings.append(allocator, row);
+}
 
 const ReadMode = enum { comb, edge };
 
@@ -87,24 +137,31 @@ const ModuleLint = struct {
         return null;
     }
 
-    /// Declared synchronizer stage: input timing chain or reset-release chain.
-    fn declaredStage(self: *const ModuleLint, idx: usize) bool {
+    /// Data bits of symbol `idx` covered by declared synchronizer stages, from
+    /// input-timing chains and clock reset-release chains alike. Atomic: a
+    /// stage without a bit covers the whole signal, a per-bit stage its bit.
+    fn declaredBits(self: *const ModuleLint, idx: usize) Mask {
+        const width = self.module.scope.symbols.items[idx].width;
+        var covered: Mask = 0;
         for (self.module.timing) |intent| {
             for (intent.stages) |stage| {
-                if (stage.signal.scope == self.module.scope and stage.signal.idx == idx) return true;
+                if (stage.signal.scope != self.module.scope or stage.signal.idx != idx) continue;
+                covered |= stageCoverage(stage, width);
             }
         }
         for (self.module.clocks) |clock| {
             for (clock.release_synchronizer) |stage| {
-                if (stage.signal.scope == self.module.scope and stage.signal.idx == idx) return true;
+                if (stage.signal.scope != self.module.scope or stage.signal.idx != idx) continue;
+                covered |= stageCoverage(stage, width);
             }
         }
-        return false;
+        return covered;
     }
 
     /// Structurally recognized first flop of a two-flop synchronizer: a
     /// register assigned in exactly one domain, never observed combinationally
-    /// and read only through direct captures inside that same domain.
+    /// and read only through direct captures inside that same domain. Always
+    /// whole-signal; per-bit domain ownership is not tracked.
     fn structuralStage(self: *const ModuleLint, idx: usize) bool {
         const sym = self.module.scope.symbols.items[idx];
         if (sym.kind != .reg) return false;
@@ -115,10 +172,6 @@ const ModuleLint = struct {
         return self.direct_capture[idx];
     }
 
-    fn isStage(self: *const ModuleLint, idx: usize) bool {
-        return self.declaredStage(idx) or self.structuralStage(idx);
-    }
-
     fn isCoupled(self: *const ModuleLint, from: u32, to: u32) bool {
         return self.coupled[from * self.domains.items.len + to];
     }
@@ -127,7 +180,7 @@ const ModuleLint = struct {
 
     fn checkExpr(self: *ModuleLint, findings: *std.ArrayList(Crossing), expr: ir.AnyExpr, domain: u32, dst: []const u8) std.mem.Allocator.Error!void {
         switch (expr.node) {
-            .ref => |r| try self.checkSym(findings, r.idx, domain, dst),
+            .ref => |r| try self.checkSym(findings, r.idx, domain, dst, 0),
             .lit => {},
             .bit => |b| try self.checkBase(findings, b.base, domain, dst),
             .bit_dyn => |b| {
@@ -155,42 +208,48 @@ const ModuleLint = struct {
 
     fn checkBase(self: *ModuleLint, findings: *std.ArrayList(Crossing), base: ir.SelectBase, domain: u32, dst: []const u8) std.mem.Allocator.Error!void {
         switch (base) {
-            .sym => |r| try self.checkSym(findings, r.idx, domain, dst),
+            .sym => |r| try self.checkSym(findings, r.idx, domain, dst, 0),
             .expr => |e| try self.checkExpr(findings, e.*, domain, dst),
         }
     }
 
-    fn checkSym(self: *ModuleLint, findings: *std.ArrayList(Crossing), idx: usize, domain: u32, dst: []const u8) std.mem.Allocator.Error!void {
+    /// Reports a foreign read of symbol `idx` into `dst`. A zero `exempt` mask
+    /// reports the signal as a whole (one row per foreign domain); a non-zero
+    /// mask names data bits of a width-aligned direct capture already covered
+    /// by a per-bit declared stage, and only the remaining bits are reported.
+    fn checkSym(self: *ModuleLint, findings: *std.ArrayList(Crossing), idx: usize, domain: u32, dst: []const u8, exempt: Mask) std.mem.Allocator.Error!void {
         const mask = self.masks[idx];
         if (mask == 0) return;
         if (mask & domainBit(domain) != 0) return;
         const foreign = mask & ~self.sync_exempt[domain];
-        var bit: u32 = 0;
-        while (bit < 64) : (bit += 1) {
-            const one = @as(Mask, 1) << @intCast(bit);
+        const width = self.module.scope.symbols.items[idx].width;
+        var d: u32 = 0;
+        while (d < 64) : (d += 1) {
+            const one = @as(Mask, 1) << @intCast(d);
             if (foreign & one == 0) continue;
-            try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(bit), domain);
+            if (exempt == 0) {
+                try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, null);
+                continue;
+            }
+            var b: u32 = 0;
+            while (b < 64 and b < width) : (b += 1) {
+                const bit_mask = @as(Mask, 1) << @intCast(b);
+                if (exempt & bit_mask != 0) continue;
+                try self.append(findings, .unsynchronized_capture, dst, idx, @intCast(d), domain, @intCast(b));
+            }
         }
     }
 
-    fn append(self: *ModuleLint, findings: *std.ArrayList(Crossing), kind: Kind, dst: []const u8, idx: usize, from: u32, to: u32) std.mem.Allocator.Error!void {
-        const row = Crossing{
+    fn append(self: *ModuleLint, findings: *std.ArrayList(Crossing), kind: Kind, dst: []const u8, idx: usize, from: u32, to: u32, bit: ?u8) std.mem.Allocator.Error!void {
+        try appendRow(self.allocator, findings, .{
             .kind = kind,
             .module = self.module.name,
             .destination = dst,
             .signal = self.module.scope.symbols.items[idx].name,
             .from_clock = self.domains.items[from].name(),
             .to_clock = self.domains.items[to].name(),
-        };
-        for (findings.items) |existing| {
-            if (existing.kind == row.kind and
-                std.mem.eql(u8, existing.module, row.module) and
-                std.mem.eql(u8, existing.destination, row.destination) and
-                std.mem.eql(u8, existing.signal, row.signal) and
-                std.mem.eql(u8, existing.from_clock, row.from_clock) and
-                std.mem.eql(u8, existing.to_clock, row.to_clock)) return;
-        }
-        try findings.append(self.allocator, row);
+            .bit = bit,
+        });
     }
 
     fn checkStmts(self: *ModuleLint, findings: *std.ArrayList(Crossing), stmts: []const ir.Stmt, domain: u32, dst: []const u8) std.mem.Allocator.Error!void {
@@ -228,15 +287,27 @@ const ModuleLint = struct {
     fn checkAssign(self: *ModuleLint, findings: *std.ArrayList(Crossing), dst: ir.SymRef, src: ir.AnyExpr, domain: u32) std.mem.Allocator.Error!void {
         const dst_idx = dst.idx;
         const dst_sym = self.module.scope.symbols.items[dst_idx];
+        const full = widthMask(dst_sym.width);
+        const covered = self.declaredBits(dst_idx) & full;
+        // Every destination bit declared exempts the whole capture, whatever
+        // the source shape; a partial declaration needs a width-aligned direct
+        // reference to exempt exactly its bits, and is otherwise ignored
+        // because a partial bit mapping cannot be inferred.
+        if (covered == full) return;
         if (src.node == .ref) {
             const src_idx = src.node.ref.idx;
-            if (self.isStage(dst_idx)) return;
+            if (self.structuralStage(dst_idx)) return;
             if (dst_sym.kind == .reg) {
                 const src_mask = self.masks[src_idx];
                 if (src_mask != 0 and @popCount(src_mask) == 1) {
                     const from: u32 = @intCast(@ctz(src_mask));
                     if (from != domain and self.isCoupled(from, domain)) return;
                 }
+            }
+            const src_sym = self.module.scope.symbols.items[src_idx];
+            if (covered != 0 and src_sym.width == dst_sym.width) {
+                try self.checkSym(findings, src_idx, domain, dst_sym.name, covered);
+                return;
             }
         }
         try self.checkExpr(findings, src, domain, dst_sym.name);
@@ -517,33 +588,56 @@ fn lintModule(allocator: std.mem.Allocator, module: *const ir.Module, findings: 
         }
     }
 
-    // Authored asynchronous inputs need at least a two-flop chain; fewer
-    // declared stages means the capture is unprotected, whatever the internal
-    // structure looks like. Only flat modules are checked: a parent's boundary
-    // rows may be refined by the child that actually captures the signal, so
-    // resolving them is the consumer's job.
+    // Authored asynchronous inputs need every data bit covered by at least two
+    // declared synchronizer stages; a stage without a bit covers the whole
+    // input and a per-bit stage only its own bit. Fewer covering stages means
+    // the bit is unprotected, whatever the internal structure looks like. A
+    // finding narrows to the uncovered bits when any stage names a bit, and
+    // stays a whole-port row otherwise. Only flat modules are checked: a
+    // parent's boundary rows may be refined by the child that actually captures
+    // the signal, so resolving them is the consumer's job.
     if (module.instances.len == 0) {
         for (module.timing) |intent| {
-            if (intent.classification != .asynchronous or intent.stages.len >= 2) continue;
-            const signal_name = intent.signal.name();
-            const to_clock = if (intent.clock) |clk| clk.name() else "";
-            var seen = false;
-            for (findings.items) |existing| {
-                if (existing.kind == .unsynchronized_input and std.mem.eql(u8, existing.module, module.name) and
-                    std.mem.eql(u8, existing.signal, signal_name))
-                {
-                    seen = true;
-                    break;
-                }
+            if (intent.classification != .asynchronous) continue;
+            const width = intent.signal.width();
+            const full = widthMask(width);
+            var covered_once: Mask = 0;
+            var covered_twice: Mask = 0;
+            var per_bit = false;
+            for (intent.stages) |stage| {
+                if (stage.bit != null) per_bit = true;
+                const covered = stageCoverage(stage, width);
+                covered_twice |= covered_once & covered;
+                covered_once |= covered;
             }
-            if (!seen) try findings.append(allocator, .{
-                .kind = .unsynchronized_input,
-                .module = module.name,
-                .destination = "",
-                .signal = signal_name,
-                .from_clock = "",
-                .to_clock = to_clock,
-            });
+            const uncovered = full & ~covered_twice;
+            if (uncovered == 0) continue;
+            const to_clock = if (intent.clock) |clk| clk.name() else "";
+            if (!per_bit) {
+                try appendRow(allocator, findings, .{
+                    .kind = .unsynchronized_input,
+                    .module = module.name,
+                    .destination = "",
+                    .signal = intent.signal.name(),
+                    .from_clock = "",
+                    .to_clock = to_clock,
+                });
+                continue;
+            }
+            var b: u32 = 0;
+            while (b < 64 and b < width) : (b += 1) {
+                const one = @as(Mask, 1) << @intCast(b);
+                if (uncovered & one == 0) continue;
+                try appendRow(allocator, findings, .{
+                    .kind = .unsynchronized_input,
+                    .module = module.name,
+                    .destination = "",
+                    .signal = intent.signal.name(),
+                    .from_clock = "",
+                    .to_clock = to_clock,
+                    .bit = @intCast(b),
+                });
+            }
         }
     }
 }
@@ -804,4 +898,239 @@ test "CDC lint accepts declared synchronous clock relationships" {
     const crossings = try lint(alloc, &design);
     defer alloc.free(crossings);
     try std.testing.expectEqual(@as(usize, 0), crossings.len);
+}
+
+test "CDC lint honors per-bit synchronizer stages and flags sibling bits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_per_bit_stage";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+            bus_in: Signal(2),
+        };
+        pub const Outputs = struct { peek: Signal(2), synced: Signal(2) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.b_rst_n };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+            const bld = mb.exprs();
+
+            const a_bus = try mb.reg("a_bus", 2, 0);
+            try mb.seq(a, &.{bld.assign(a_bus, ins.bus_in.expr())});
+
+            const b_d0 = try mb.reg("b_d0", 2, 0);
+            const b_d1 = try mb.reg("b_d1", 2, 0);
+            try mb.seq(b, &.{
+                bld.assign(b_d0, a_bus.expr()),
+                bld.assign(b_d1, b_d0.expr()),
+            });
+            // Reading the first stage combinationally keeps it out of the
+            // structural two-flop recognition, so only the bit declaration can
+            // exempt its capture.
+            try mb.assign(outs.peek, b_d0.expr());
+            try mb.assign(outs.synced, b_d1.expr());
+
+            try mb.addInputTiming(.{
+                .signal = ins.bus_in.ref,
+                .stages = &.{
+                    .{ .signal = b_d0.ref, .bit = 0 },
+                    .{ .signal = b_d1.ref, .bit = 0 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // Bit 0 is declared on both stages; bit 1 has no coverage and is reported.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_d0", crossings[0].destination);
+    try std.testing.expectEqualStrings("a_bus", crossings[0].signal);
+    try std.testing.expectEqual(@as(?u8, 1), crossings[0].bit);
+}
+
+test "CDC lint reports only uncovered bits of a per-bit asynchronous vector" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_async_bus_bits";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), async_bus: Signal(3) };
+        pub const Outputs = struct { q: Signal(3) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
+            const b = mb.exprs();
+            const d0 = try mb.reg("d0", 3, 0);
+            const d1 = try mb.reg("d1", 3, 0);
+            try mb.seq(domain, &.{
+                b.assign(d0, ins.async_bus.expr()),
+                b.assign(d1, d0.expr()),
+            });
+            try mb.assign(outs.q, d1.expr());
+            try mb.addInputTiming(.{
+                .signal = ins.async_bus.ref,
+                .classification = .asynchronous,
+                .clock = ins.clk.ref,
+                .stages = &.{
+                    .{ .signal = d0.ref, .bit = 0 },
+                    .{ .signal = d1.ref, .bit = 0 },
+                    .{ .signal = d0.ref, .bit = 1 },
+                    .{ .signal = d1.ref, .bit = 1 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // Bits 0 and 1 each have two covering stages; bit 2 has none.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_input, crossings[0].kind);
+    try std.testing.expectEqualStrings("cdc_async_bus_bits", crossings[0].module);
+    try std.testing.expectEqualStrings("async_bus", crossings[0].signal);
+    try std.testing.expectEqualStrings("clk", crossings[0].to_clock);
+    try std.testing.expectEqual(@as(?u8, 2), crossings[0].bit);
+}
+
+test "CDC lint honors a per-bit reset-release stage and flags its sibling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_release_bits";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+            a_in: Signal(1),
+        };
+        pub const Outputs = struct { q: Signal(1), peek: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const bld = mb.exprs();
+
+            const b_sync0 = try mb.reg("b_sync0", 1, 0);
+            const b_sync1 = try mb.reg("b_sync1", 1, 0);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{
+                .name = "b",
+                .clk = ins.b_clk,
+                .rst_n = ins.b_rst_n,
+                .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
+                .release_synchronizer = &.{
+                    .{ .signal = b_sync0.ref, .bit = 0 },
+                    .{ .signal = b_sync1.ref, .bit = 0 },
+                },
+            };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+
+            const a_q = try mb.reg("a_q", 1, 0);
+            try mb.seq(a, &.{bld.assign(a_q, ins.a_in.expr())});
+            const b_other = try mb.reg("b_other", 1, 0);
+            try mb.seq(b, &.{
+                bld.assign(b_sync0, a_q.expr()),
+                bld.assign(b_sync1, b_sync0.expr()),
+                bld.assign(b_other, a_q.expr()),
+            });
+            // Reading the declared stage combinationally keeps it out of the
+            // structural two-flop recognition, so only the release declaration
+            // can exempt its capture.
+            try mb.assign(outs.peek, b_sync0.expr());
+            try mb.assign(outs.q, b_sync1.expr());
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // The declared per-bit release stages cover their capture; the undeclared
+    // sibling keeps the whole-signal row.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_other", crossings[0].destination);
+    try std.testing.expectEqualStrings("a_q", crossings[0].signal);
+    try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
+}
+
+test "CDC lint exempts an expression capture only when every bit is declared" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const Fixture = struct {
+        pub const name = "cdc_expr_stage";
+        pub const Inputs = struct {
+            a_clk: Signal(1),
+            a_rst_n: Signal(1),
+            b_clk: Signal(1),
+            b_rst_n: Signal(1),
+            bus_in: Signal(2),
+        };
+        pub const Outputs = struct { partial: Signal(2), full: Signal(2) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = ClockDomain{ .name = "a", .clk = ins.a_clk, .rst_n = ins.a_rst_n };
+            const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.b_rst_n };
+            try mb.addClockDomain(a);
+            try mb.addClockDomain(b);
+            const bld = mb.exprs();
+
+            const a_bus = try mb.reg("a_bus", 2, 0);
+            try mb.seq(a, &.{bld.assign(a_bus, ins.bus_in.expr())});
+
+            const b_part = try mb.reg("b_part", 2, 0);
+            const b_full = try mb.reg("b_full", 2, 0);
+            try mb.seq(b, &.{
+                bld.assign(b_part, bld.bitNot(a_bus.expr())),
+                bld.assign(b_full, bld.bitNot(a_bus.expr())),
+            });
+            try mb.assign(outs.partial, b_part.expr());
+            try mb.assign(outs.full, b_full.expr());
+
+            try mb.addInputTiming(.{
+                .signal = ins.bus_in.ref,
+                .stages = &.{
+                    .{ .signal = b_part.ref, .bit = 1 },
+                    .{ .signal = b_full.ref, .bit = 0 },
+                    .{ .signal = b_full.ref, .bit = 1 },
+                },
+            });
+        }
+    };
+
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Fixture);
+    const crossings = try lint(alloc, &design);
+    defer alloc.free(crossings);
+    // An expression source cannot map declared bits, so a partial declaration
+    // stays a whole-signal row while a fully declared capture is exempt.
+    try std.testing.expectEqual(@as(usize, 1), crossings.len);
+    try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
+    try std.testing.expectEqualStrings("b_part", crossings[0].destination);
+    try std.testing.expectEqualStrings("a_bus", crossings[0].signal);
+    try std.testing.expectEqual(@as(?u8, null), crossings[0].bit);
 }

@@ -98,11 +98,16 @@ declaration, so their outputs stay signed); `Stream(W)` and
 `lint(allocator, design)` returns `[]Crossing` for sequential captures that
 read a signal driven only by another clock domain without a declared
 synchronizer stage, a recognized two-flop structure, a declared synchronous
-clock relationship or a request/acknowledge handshake. On flat modules it also
-reports an input classified `asynchronous` with fewer than two declared
-synchronizer stages (`kind == .unsynchronized_input`); parent boundary rows
-that resolve through instances are left to the consumer. Descriptive only: the
-lint never changes RTL.
+clock relationship or a request/acknowledge handshake. A declared stage exempts
+the whole signal when it names no bit and only its data bit otherwise; per-bit
+coverage applies to width-aligned direct captures, while a slice, bit select or
+expression capture is exempt only when every bit is declared. Findings carry
+`bit` for the affected data bit, or null when the whole signal is reported. On
+flat modules the lint also reports an input classified `asynchronous` with any
+data bit covered by fewer than two declared synchronizer stages, one finding per
+uncovered bit (`kind == .unsynchronized_input`; a whole-port row when no stage
+names a bit); parent boundary rows that resolve through instances are left to
+the consumer. Descriptive only: the lint never changes RTL.
 
 ### backend
 
@@ -206,9 +211,9 @@ rather than the authoring half of this specific project.
 - `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock` and
   `MailboxBlock` cover level, edge, gray-pointer and bundled-data handshake
   crossings, and `cdc.lint` audits elaborated designs structurally. The lint is
-  heuristic: it cannot see metastability risk beyond structure, per-bit
-  synchronizer declarations are treated as whole signals, and a formal crossing
-  proof is future work.
+  heuristic: it cannot see metastability risk beyond structure, it honors
+  per-bit declared stages but keeps structural two-flop recognition
+  whole-signal, and a formal crossing proof is future work.
 - No clock divider/PLL/gating primitives; PLLs are foreign macros.
 - No multi-clock-domain structural check beyond per-process reset coverage and
   the opt-in `cdc.lint` pass.
@@ -247,10 +252,10 @@ rather than the authoring half of this specific project.
 
 ### Suggested next steps, in order
 
-1. **CDC depth.** The bridge, mailbox, async FIFO and structural lint landed;
-   next are wider handshake shapes (FIFO-backed mailboxes, bundled-data buses),
-   per-bit synchronizer intent in the lint, and a formal crossing proof rather
-   than a heuristic audit.
+1. **CDC depth.** The bridge, mailbox, async FIFO and structural lint, now with
+   per-bit declared-stage coverage, landed; next are wider handshake shapes
+   (FIFO-backed mailboxes, bundled-data buses) and a formal crossing proof
+   rather than a heuristic audit.
 2. **Parameter propagation**: structural `Shape` specialization from a
    parent's comptime values landed with `instantiateShape`. Remaining: runtime
    parameter propagation (constrained by comptime widths), richer shape
