@@ -3,7 +3,7 @@
 A pure Zig (0.16.0) hardware construction library and synthesizable ASIC generator.
 
 - **`src/`**: Pure hardware construction library (`netlist.zig` IR, `lib.zig` conveniences like FSMs, register helpers, `muxLookup` and structural temporal helpers, `blocks.zig` elemental blocks, `backend/` renderers and artifact writers). The IR is target-language neutral; HDL is only involved at export.
-- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the 120 MHz I2C/SPI-programmable ISA core with iverilog testbenches), shared example design blocks in `blocks/`, and the `z80/` scaffold for the FOSSi Z80 port (Track D).
+- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the configurable I2C/SPI-programmable ZIO core with native replay witnesses), shared example design blocks in `blocks/`, and the `z80/` scaffold for the FOSSi Z80 port (Track D).
 
 See [PLAN.md](PLAN.md) for full architecture details, roadmap, and next phases.
 See [docs/](docs/README.md) for [code structure](docs/code-structure.md),
@@ -23,6 +23,40 @@ and the [API review](docs/api.md).
 Add `--sv` (`zig build run -- --sv`) to also emit `out/asic_core.sv`: the same
 design with `logic`, `always_comb`/`always_ff`, FSM `enum` typedefs and packed
 struct bundle ports.
+
+### One programmable core
+
+`examples/protocol_emulator/programmable_asic.zig::Config` selects the host,
+SRAM arrangement, program capacity, counter width, TX FIFO depth and clock rate.
+`ProgrammableAsicBlock(config)` is the sole top; it instantiates the sole
+`ZioTimingUnit(counter_bits, fifo_depth)` execution implementation. The default
+artifacts and the 60/120 MHz witness bundles use this same composition with RX
+capture enabled. The split-memory artifact uses the same instruction semantics.
+
+Instructions execute every `delay + 1` cycles, including taken branches. The
+current input instruction is **IN PINS,4**: eight nibbles produce one RX word;
+the partition owns ring addresses and loss accounting. Start discards partial
+capture state and resets ring counters. TX uses the OSR and host-fed FIFO at
+write addresses 0xF8..0xFF. `WAIT` selects GPIO 0..3. Unsupported opcodes,
+IN widths/sources, OUT targets/counts, MOV operands, branch conditions and WAIT
+pins fault before instruction side effects. See the decode table in
+`zio_timing_unit.zig`; the ISA enum also reserves encodings not implemented yet.
+
+Generate and replay the focused control/capture witness:
+
+```sh
+zig build zio-core
+../oasic/oasic -sim-verilog out/zio_core.v -stimulus out/zio_core.jsonl
+zig build verify
+../oasic/scripts/protocol_replay.sh . /tmp/zio-protocol-replay
+../oasic/oasic -sim-verilog out/zio_asic_60.v -stimulus out/zio_asic_60.jsonl
+../oasic/oasic -sim-verilog out/zio_asic_120.v -stimulus out/zio_asic_120.jsonl
+```
+
+Icarus remains an independent oracle for the integrated host/RX trace; oasic
+replays every edge and compares every top output. The TX waveform and focused
+core expectations come from independent Zig models. Passing digital replay at a
+clock rate does not establish routed timing closure.
 
 When provenance is enabled, `design.json` also carries a `provenance` section
 (`js_asic.provenance/1`): per-module operation rows with deterministic integer

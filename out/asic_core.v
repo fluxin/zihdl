@@ -310,7 +310,6 @@ module sram_partition_single_64 (
     input  wire        ctrl_start,
     input  wire        fetch,
     input  wire        rx_we,
-    input  wire [7:0]  rx_addr,
     input  wire [31:0]  rx_wdata,
     input  wire        host_we,
     input  wire [7:0]  host_addr,
@@ -367,6 +366,8 @@ module sram_partition_single_64 (
     reg [31:0]  w1_data;
     reg         rd_served;
     reg [7:0]  st_addr;
+    reg [7:0]  response_pc;
+    reg         response_oob;
 
     assign tmp0 = (tmp2 || tmp3);
     assign tmp1 = (((host_req == 1'b1) && (!rd_served)) && ((!tmp2) && (!w0_valid)));
@@ -392,7 +393,7 @@ module sram_partition_single_64 (
     assign rx_din0 = 32'd0;
     assign rx_csb1 = 1'b1;
     assign rx_addr1 = 8'd0;
-    assign inst_word = (tmp4 ? {4'd0, 4'd0, core_pc, 16'd0} : sram_dout1);
+    assign inst_word = (response_oob ? {4'd0, 4'd0, response_pc, 16'd0} : sram_dout1);
     assign host_rdata = ((st_addr == 8'd240) ? {16'd0, capture_seq} : ((st_addr == 8'd241) ? {16'd0, capture_lost} : ((st_addr == 8'd242) ? {29'd0, op_fault, prog_reject, pc_oob} : sram_dout0)));
     assign host_ack = tmp5;
 
@@ -414,7 +415,11 @@ module sram_partition_single_64 (
             w1_data <= 32'd0;
             rd_served <= 1'b0;
             st_addr <= 8'd0;
+            response_pc <= 8'd0;
+            response_oob <= 1'b0;
         end else begin
+            response_pc <= core_pc;
+            response_oob <= tmp4;
             host_rvalid <= tmp1;
             if (tmp1) begin
                 rd_served <= 1'b1;
@@ -507,13 +512,13 @@ module sky130_sram_1kbyte_1rw1r_32x256_8 (
 endmodule
 
 // ============================================================================
-// Hardware Module: timing_execution_unit
+// Hardware Module: zio_timing_unit_x16_f16
 // Synthesized from typed Zig AST (js_asic)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
 
-module timing_execution_unit (
+module zio_timing_unit_x16_f16 (
     input  wire        clk,
     input  wire        rst_n,
     input  wire [31:0]  inst,
@@ -521,142 +526,262 @@ module timing_execution_unit (
     input  wire        ctrl_stop,
     input  wire [7:0]  start_pc,
     input  wire [3:0]  pin_in,
-    output reg  [7:0]  pc,
+    input  wire        tx_we,
+    input  wire [31:0]  tx_wdata,
+    output wire [7:0]  pc,
     output reg  [3:0]  pin_out,
     output reg  [3:0]  pin_oe,
-    output reg         core_running,
-    output reg         op_fault,
+    output wire        core_running,
+    output wire        op_fault,
     output wire        fetch,
+    output wire        tx_full,
+    output wire        tx_empty,
+    output wire        underrun,
     output reg         rx_we,
-    output reg  [7:0]  rx_addr,
     output reg  [31:0]  rx_wdata
 );
 
-    localparam [5:0] X_WIDTH = 6'd5;
-    localparam SAMPLE_COUNTER_NIBBLES = 1'b1;
-
-    wire        tmp0;
-    wire [15:0]  tmp1;
-    wire        tmp2;
+    wire [3:0]  tmp0;
+    wire [31:0]  tmp1;
+    wire [31:0]  tmp2;
     wire [31:0]  tmp3;
+    wire [7:0]  tmp4;
+    wire        tmp5;
+    wire        tmp6;
+    wire        tmp7;
+    wire        tmp8;
+    wire        tmp9;
+    wire        tmp10;
+    wire        tmp11;
+    wire [15:0]  tmp12;
+    wire        tmp13;
+    wire        tmp14;
+    wire        tmp15;
+    wire [4:0]  tmp16;
+    wire        tmp17;
+    wire [5:0]  tmp18;
+    wire [31:0]  tmp19;
+    wire [31:0]  tmp20;
+    wire [3:0]  tmp21;
+    wire [15:0]  tmp22;
 
-    reg         fetch_pending;
+    reg [7:0]  pc_exec;
+    reg         ir_valid;
+    reg         running;
+    reg         halt;
+    reg         fault;
     reg [15:0]  delay_cnt;
-    reg         halt_r;
-    reg [4:0]  x_reg;
+    reg [15:0]  x_reg;
+    reg [15:0]  y_reg;
+    reg [31:0]  osr;
+    reg [5:0]  osr_cnt;
     reg [31:0]  isr;
-    reg [2:0]  nibble_cnt;
-    reg [7:0]  rx_ptr;
+    reg [2:0]  sample_cnt;
+    reg [3:0]  fifo_wr;
+    reg [3:0]  fifo_rd;
+    reg [4:0]  fifo_cnt;
+    reg         underrun_r;
 
-    assign tmp0 = (delay_cnt > 16'd0);
-    assign tmp1 = (delay_cnt - 16'd1);
-    assign tmp2 = (inst[23:21] == 3'd0);
-    assign tmp3 = {isr[27:0], pin_in};
+    reg [31:0]  tx_fifo [0:15];
 
-    assign fetch = fetch_pending;
+    assign tmp0 = (pin_in >> inst[19:16]);
+    assign tmp1 = (tmp17 ? tmp20 : osr);
+    assign tmp2 = (tmp1 & ((32'd1 << tmp16) - 32'd1));
+    assign tmp3 = (inst[22] ? (~((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr)))))) : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr))))));
+    assign tmp4 = ((((!ir_valid) || (halt || tmp9)) || tmp10) ? pc_exec : (((inst[31:28] == 4'd0) && ((inst[26:24] == 3'd0) || (((inst[26:24] == 3'd1) && (x_reg == 16'd0)) || (tmp13 || (((inst[26:24] == 3'd3) && (y_reg == 16'd0)) || (tmp14 || (((inst[26:24] == 3'd5) && pin_in[0]) || ((inst[26:24] == 3'd6) && ((osr_cnt != 6'd0) || (!tmp6)))))))))) ? inst[23:16] : (pc_exec + 8'd1)));
+    assign tmp5 = (fifo_cnt == 5'd16);
+    assign tmp6 = (fifo_cnt == 5'd0);
+    assign tmp7 = (tx_we && (!tmp5));
+    assign tmp8 = ((((running && (!(((!ir_valid) || (halt || tmp9)) || tmp10))) && ((!ctrl_start) && (!ctrl_stop))) && tmp11) && ((!tmp6) && (tmp15 || (inst[31:28] == 4'd5))));
+    assign tmp9 = (delay_cnt > 16'd0);
+    assign tmp10 = ((((((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4)))) && (inst[27:26] == 2'd2)) && (!tmp0[0])) || ((((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4)))) && (inst[27:26] == 2'd1)) && tmp0[0])) || (((inst[31:28] == 4'd5) && inst[16]) && tmp6));
+    assign tmp11 = (((inst[31:28] == 4'd7) && (inst[23:21] <= 3'd3)) || (((inst[31:28] == 4'd0) && (inst[26:24] <= 3'd6)) || (((inst[31:28] == 4'd3) && (((inst[23:21] == 3'd0) || ((inst[23:21] == 3'd2) || (inst[23:21] == 3'd4))) && ((tmp18 >= 6'd1) && (tmp18 <= 6'd16)))) || (((inst[31:28] == 4'd2) && ((inst[23:21] == 3'd0) && (inst[20:16] == 5'd4))) || ((inst[31:28] == 4'd5) || (((inst[31:28] == 4'd6) && ((inst[21:19] <= 3'd5) && (inst[18:16] <= 3'd5))) || ((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4))))))))));
+    assign tmp12 = {{11{1'b0}}, inst[20:16]};
+    assign tmp13 = ((inst[26:24] == 3'd2) && (!(x_reg == 16'd0)));
+    assign tmp14 = ((inst[26:24] == 3'd4) && (!(y_reg == 16'd0)));
+    assign tmp15 = ((((running && (!(((!ir_valid) || (halt || tmp9)) || tmp10))) && ((!ctrl_start) && (!ctrl_stop))) && (inst[31:28] == 4'd3)) && tmp17);
+    assign tmp16 = ((inst[20:16] == 5'd0) ? 5'd16 : inst[20:16]);
+    assign tmp17 = (osr_cnt == 6'd0);
+    assign tmp18 = {{1{1'b0}}, tmp16};
+    assign tmp19 = {isr[27:0], pin_in};
+    assign tmp20 = tx_fifo[fifo_rd];
+    assign tmp21 = tmp3[3:0];
+    assign tmp22 = tmp3[15:0];
+
+    assign pc = tmp4;
+    assign core_running = running;
+    assign op_fault = fault;
+    assign fetch = (running && (!halt));
+    assign tx_full = tmp5;
+    assign tx_empty = tmp6;
+    assign underrun = underrun_r;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pc <= 8'd0;
             pin_out <= 4'd0;
             pin_oe <= 4'd0;
-            core_running <= 1'b0;
-            op_fault <= 1'b0;
             rx_we <= 1'b0;
-            rx_addr <= 8'd0;
             rx_wdata <= 32'd0;
-            fetch_pending <= 1'b0;
+            pc_exec <= 8'd0;
+            ir_valid <= 1'b0;
+            running <= 1'b0;
+            halt <= 1'b0;
+            fault <= 1'b0;
             delay_cnt <= 16'd0;
-            halt_r <= 1'b0;
-            x_reg <= 5'd0;
+            x_reg <= 16'd0;
+            y_reg <= 16'd0;
+            osr <= 32'd0;
+            osr_cnt <= 6'd0;
             isr <= 32'd0;
-            nibble_cnt <= 3'd0;
-            rx_ptr <= 8'd0;
+            sample_cnt <= 3'd0;
+            fifo_wr <= 4'd0;
+            fifo_rd <= 4'd0;
+            fifo_cnt <= 5'd0;
+            underrun_r <= 1'b0;
         end else begin
             rx_we <= 1'b0;
+            fifo_cnt <= ((fifo_cnt + {{4{1'b0}}, tmp7}) - {{4{1'b0}}, tmp8});
+            if (tmp7) begin
+                tx_fifo[fifo_wr] <= tx_wdata;
+            end
+            if (tmp7) begin
+                fifo_wr <= (fifo_wr + 4'd1);
+            end
+            if (tmp8) begin
+                fifo_rd <= (fifo_rd + 4'd1);
+            end
             if ((ctrl_start == 1'b1)) begin
-                pc <= start_pc;
-                fetch_pending <= 1'b1;
+                pc_exec <= start_pc;
+                ir_valid <= 1'b0;
+                running <= 1'b1;
+                halt <= 1'b0;
+                fault <= 1'b0;
                 delay_cnt <= 16'd0;
-                core_running <= 1'b1;
-                op_fault <= 1'b0;
-                halt_r <= 1'b0;
+                osr <= 32'd0;
+                osr_cnt <= 6'd0;
                 isr <= 32'd0;
-                nibble_cnt <= 3'd0;
-                rx_ptr <= 8'd0;
+                sample_cnt <= 3'd0;
             end else begin
                 if ((ctrl_stop == 1'b1)) begin
-                    core_running <= 1'b0;
+                    running <= 1'b0;
                 end else begin
-                    if ((core_running == 1'b1)) begin
-                        if (halt_r) begin
-                            core_running <= 1'b0;
-                            op_fault <= 1'b1;
-                            fetch_pending <= 1'b0;
-                            delay_cnt <= 16'd0;
-                            halt_r <= 1'b0;
+                    if (running) begin
+                        pc_exec <= tmp4;
+                        if ((ir_valid == 1'b0)) begin
+                            ir_valid <= 1'b1;
                         end else begin
-                            if ((fetch_pending == 1'b1)) begin
-                                fetch_pending <= 1'b0;
-                                if (tmp0) begin
-                                    delay_cnt <= tmp1;
-                                end
+                            if (tmp9) begin
+                                delay_cnt <= (delay_cnt - 16'd1);
                             end else begin
-                                if (tmp0) begin
-                                    delay_cnt <= tmp1;
+                                if (tmp10) begin
                                 end else begin
-                                    fetch_pending <= 1'b1;
-                                    pc <= (pc + 8'd1);
-                                    delay_cnt <= inst[15:0];
-                                    halt_r <= (!(((inst[31:28] == 4'd7) && (inst[23:21] <= 3'd2)) || (((inst[31:28] == 4'd0) && (inst[26:24] <= 3'd2)) || ((inst[31:28] == 4'd2) && (tmp2 && (inst[20:16] == 5'd4))))));
-                                    case (inst[31:28])
-                                        7: begin
-                                            case (inst[23:21])
+                                    if (halt) begin
+                                    end else begin
+                                        delay_cnt <= inst[15:0];
+                                        if ((!tmp11)) begin
+                                            halt <= 1'b1;
+                                            running <= 1'b0;
+                                            fault <= 1'b1;
+                                        end else begin
+                                            case (inst[31:28])
+                                                7: begin
+                                                    case (inst[23:21])
+                                                        0: begin
+                                                            pin_out <= inst[19:16];
+                                                        end
+                                                        1: begin
+                                                            pin_oe <= inst[19:16];
+                                                        end
+                                                        2: begin
+                                                            x_reg <= tmp12;
+                                                        end
+                                                        3: begin
+                                                            y_reg <= tmp12;
+                                                        end
+                                                    endcase
+                                                end
                                                 0: begin
-                                                    pin_out <= inst[19:16];
+                                                    if (tmp13) begin
+                                                        x_reg <= (x_reg - 16'd1);
+                                                    end
+                                                    if (tmp14) begin
+                                                        y_reg <= (y_reg - 16'd1);
+                                                    end
                                                 end
-                                                1: begin
-                                                    pin_oe <= inst[19:16];
-                                                end
-                                                2: begin
-                                                    x_reg <= inst[20:16];
-                                                end
-                                            endcase
-                                        end
-                                        0: begin
-                                            case (inst[26:24])
-                                                0: begin
-                                                    pc <= inst[23:16];
-                                                end
-                                                1: begin
-                                                    if ((x_reg == 5'd0)) begin
-                                                        pc <= inst[23:16];
+                                                3: begin
+                                                    if ((tmp15 && tmp6)) begin
+                                                        underrun_r <= 1'b1;
+                                                    end else begin
+                                                        case (inst[23:21])
+                                                            0: begin
+                                                                if ((5'd0 < tmp16)) begin
+                                                                    pin_out[0:0] <= tmp1[0];
+                                                                end
+                                                                if ((5'd1 < tmp16)) begin
+                                                                    pin_out[1:1] <= tmp1[1];
+                                                                end
+                                                                if ((5'd2 < tmp16)) begin
+                                                                    pin_out[2:2] <= tmp1[2];
+                                                                end
+                                                                if ((5'd3 < tmp16)) begin
+                                                                    pin_out[3:3] <= tmp1[3];
+                                                                end
+                                                            end
+                                                            2: begin
+                                                                x_reg <= tmp2[15:0];
+                                                            end
+                                                            4: begin
+                                                            end
+                                                        endcase
+                                                        osr <= (tmp1 >> tmp16);
+                                                        osr_cnt <= ((tmp17 ? 6'd32 : osr_cnt) - tmp18);
                                                     end
                                                 end
                                                 2: begin
-                                                    if ((x_reg != 5'd0)) begin
-                                                        x_reg <= (x_reg - 5'd1);
-                                                        pc <= inst[23:16];
+                                                    isr <= tmp19;
+                                                    sample_cnt <= (sample_cnt + 3'd1);
+                                                    if ((sample_cnt == 3'd7)) begin
+                                                        rx_we <= 1'b1;
+                                                        rx_wdata <= tmp19;
                                                     end
+                                                end
+                                                5: begin
+                                                    if (tmp6) begin
+                                                        if ((!inst[16])) begin
+                                                            underrun_r <= 1'b1;
+                                                        end
+                                                    end else begin
+                                                        osr <= tmp20;
+                                                        osr_cnt <= 6'd32;
+                                                    end
+                                                end
+                                                6: begin
+                                                    case (inst[21:19])
+                                                        0: begin
+                                                            pin_out <= tmp21;
+                                                        end
+                                                        1: begin
+                                                            pin_oe <= tmp21;
+                                                        end
+                                                        2: begin
+                                                            x_reg <= tmp22;
+                                                        end
+                                                        3: begin
+                                                            y_reg <= tmp22;
+                                                        end
+                                                        4: begin
+                                                            isr <= tmp3;
+                                                        end
+                                                        5: begin
+                                                            osr <= tmp3;
+                                                        end
+                                                    endcase
+                                                end
+                                                1: begin
                                                 end
                                             endcase
                                         end
-                                        2: begin
-                                            if (tmp2) begin
-                                                if ((nibble_cnt == 3'd7)) begin
-                                                    rx_we <= 1'b1;
-                                                    rx_addr <= rx_ptr;
-                                                    rx_wdata <= tmp3;
-                                                    rx_ptr <= (rx_ptr + 8'd1);
-                                                    isr <= tmp3;
-                                                    nibble_cnt <= 3'd0;
-                                                end else begin
-                                                    isr <= tmp3;
-                                                    nibble_cnt <= (nibble_cnt + 3'd1);
-                                                end
-                                            end
-                                        end
-                                    endcase
+                                    end
                                 end
                             end
                         end
@@ -685,6 +810,11 @@ module programmable_asic_i2c_42 (
     output wire [3:0]  gpio_out,
     output wire [3:0]  gpio_oe,
     output wire        core_running,
+    output wire        tx_full,
+    output wire        tx_empty,
+    output wire        underrun,
+    output wire        op_fault,
+    output wire        pc_oob,
     output wire        i2c_sda_out,
     output wire        i2c_sda_oe
 );
@@ -693,6 +823,8 @@ module programmable_asic_i2c_42 (
     localparam [8:0] CAPTURE_WORDS = 9'd192;
     localparam SRAM_PARTITION_MODE = 1'b0;
     localparam CAPTURE_ENABLED = 1'b1;
+    localparam [7:0] TX_FIFO_HOST_ADDR = 8'd248;
+    localparam [15:0] TX_FIFO_DEPTH = 16'd16;
 
     wire        host_we;
     wire [7:0]  host_addr;
@@ -708,11 +840,8 @@ module programmable_asic_i2c_42 (
     wire [7:0]  core_pc;
     wire [31:0]  inst_word;
     wire        rx_we;
-    wire [7:0]  rx_addr;
     wire [31:0]  rx_wdata;
     wire        prog_reject;
-    wire        pc_oob;
-    wire        op_fault;
     wire        fetch;
     wire [15:0]  capture_seq;
     wire [15:0]  capture_lost;
@@ -733,8 +862,20 @@ module programmable_asic_i2c_42 (
     wire [31:0]  rx_din0;
     wire        rx_csb1;
     wire [7:0]  rx_addr1;
+    wire        tx_we;
+    wire        part_we;
+    wire        part_ack;
+
+    wire        tmp0;
+    wire        tmp1;
+
+    assign tmp0 = (host_we && (host_addr >= 8'd248));
+    assign tmp1 = (!tx_full);
 
     assign rx_dout1 = 32'd0;
+    assign tx_we = (tmp0 && tmp1);
+    assign part_we = (host_we && (!tmp0));
+    assign host_ack = (tmp0 ? tmp1 : part_ack);
 
     i2c_slave_loader_42 u_i2c_loader (
         .clk(clk),
@@ -765,9 +906,8 @@ module programmable_asic_i2c_42 (
         .ctrl_start(ctrl_start),
         .fetch(fetch),
         .rx_we(rx_we),
-        .rx_addr(rx_addr),
         .rx_wdata(rx_wdata),
-        .host_we(host_we),
+        .host_we(part_we),
         .host_addr(host_addr),
         .host_wdata(host_wdata),
         .host_req(host_req),
@@ -776,7 +916,7 @@ module programmable_asic_i2c_42 (
         .sram_dout1(sram_dout1),
         .rx_dout1(rx_dout1),
         .inst_word(inst_word),
-        .host_ack(host_ack),
+        .host_ack(part_ack),
         .host_rvalid(host_rvalid),
         .host_rdata(host_rdata),
         .prog_reject(prog_reject),
@@ -813,7 +953,7 @@ module programmable_asic_i2c_42 (
         .dout1(sram_dout1)
     );
 
-    timing_execution_unit u_core (
+    zio_timing_unit_x16_f16 u_core (
         .clk(clk),
         .rst_n(rst_n),
         .inst(inst_word),
@@ -821,14 +961,18 @@ module programmable_asic_i2c_42 (
         .ctrl_stop(ctrl_stop),
         .start_pc(start_pc),
         .pin_in(gpio_in),
+        .tx_we(tx_we),
+        .tx_wdata(host_wdata),
         .pc(core_pc),
         .pin_out(gpio_out),
         .pin_oe(gpio_oe),
         .core_running(core_running),
         .op_fault(op_fault),
         .fetch(fetch),
+        .tx_full(tx_full),
+        .tx_empty(tx_empty),
+        .underrun(underrun),
         .rx_we(rx_we),
-        .rx_addr(rx_addr),
         .rx_wdata(rx_wdata)
     );
 

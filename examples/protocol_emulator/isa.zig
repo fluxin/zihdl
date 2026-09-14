@@ -74,9 +74,9 @@ pub const MovSrc = enum(u3) {
 /// 32-bit General-Purpose Timing Instruction
 /// [31:28] Opcode (4 bits)
 /// [27:16] Parameter payload (12 bits)
-/// [15:0]  Delay (16 bits: 0 to 65,535 clock cycles at 120 MHz = 0 to 546 us)
+/// [15:0]  Delay (16 bits: execution interval is delay + 1 clock cycles)
 pub const Instruction = packed struct(u32) {
-    delay: u16, // [15:0] Cycle stall after execution (8.33 ns resolution)
+    delay: u16, // [15:0] Clock cycles held after execution
     data: u12, // [27:16] Parameter payload
     op: Opcode, // [31:28] Primary opcode
 

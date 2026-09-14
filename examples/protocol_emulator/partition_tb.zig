@@ -67,6 +67,8 @@ const Model = struct {
     rvalid_r: bool = false,
     dout0: u32 = 0,
     dout1: u32 = 0,
+    response_pc: u8 = 0,
+    response_oob: bool = false,
 
     fn eval(self: *Model, d: Drives, mem: *[256]u32) Observed {
         const fetch_oob_now = d.core_pc >= P;
@@ -124,7 +126,7 @@ const Model = struct {
             .oob = @intFromBool(self.pc_oob),
             .seq = self.capture_seq,
             .lost = self.capture_lost,
-            .inst = if (fetch_oob_now) @as(u32, d.core_pc) << 16 else self.dout1,
+            .inst = if (self.response_oob) @as(u32, self.response_pc) << 16 else self.dout1,
         };
 
         self.rvalid_r = read_grant;
@@ -166,6 +168,8 @@ const Model = struct {
         }
         self.dout0 = dout0_next;
         self.dout1 = dout1_next;
+        self.response_pc = d.core_pc;
+        self.response_oob = fetch_oob_now;
         if (capture_go or write_use) {
             const value: u32 = din0;
             mem[addr0] = value;
@@ -413,7 +417,6 @@ const PartitionTb = struct {
         const core_running_w = try mb.wire("core_running_w", 1);
         const core_pc_w = try mb.wire("core_pc_w", 8);
         const rx_we_w = try mb.wire("rx_we_w", 1);
-        const rx_addr_w = try mb.wire("rx_addr_w", 8);
         const rx_wdata_w = try mb.wire("rx_wdata_w", 32);
         const host_we_w = try mb.wire("host_we_w", 1);
         const host_addr_w = try mb.wire("host_addr_w", 8);
@@ -449,7 +452,6 @@ const PartitionTb = struct {
         const rx_csb1 = try mb.wire("rx_csb1", 1);
         const rx_addr1 = try mb.wire("rx_addr1", 8);
 
-        try mb.assign(rx_addr_w, 0);
         try mb.assign(rx_dout1, 0);
 
         _ = try mb.instantiate(programmable.SramPartitionBlock(.single, P, true), "u_dut", .{
@@ -461,7 +463,6 @@ const PartitionTb = struct {
             .ctrl_start = ctrl_start_w,
             .fetch = fetch_w,
             .rx_we = rx_we_w,
-            .rx_addr = rx_addr_w,
             .rx_wdata = rx_wdata_w,
             .host_we = host_we_w,
             .host_addr = host_addr_w,

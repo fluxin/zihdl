@@ -134,21 +134,17 @@ pub fn build(b: *std.Build) void {
     });
     const part_tb_gen = b.addRunArtifact(part_tb_exe);
 
-    // Counter-width equivalence generator: drives the legacy 32-bit/6-bit core
-    // and the narrowed 5-bit/3-bit core with the same stimulus and compares
-    // every output cycle by cycle.
-    const width_tb_exe = b.addExecutable(.{
-        .name = "js_asic_width_tbgen",
+    const core_witness = b.addExecutable(.{
+        .name = "js_asic_zio_core_witness",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/protocol_emulator/width_tb.zig"),
+            .root_source_file = b.path("examples/protocol_emulator/zio_core_witness.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "js_asic", .module = mod },
-            },
+            .imports = &.{.{ .name = "js_asic", .module = mod }},
         }),
     });
-    const width_tb_gen = b.addRunArtifact(width_tb_exe);
+    const core_gen = b.addRunArtifact(core_witness);
+    b.step("zio-core", "Emit the native ZIO capture/control witness").dependOn(&core_gen.step);
 
     // Ethernet 10BASE-T transmit testbench generator: cycle-accurate expected
     // waveform for the Manchester encoder, NLP generator and stream handshake.
@@ -355,7 +351,7 @@ pub fn build(b: *std.Build) void {
     const tb_step = b.step("tb", "Generate the loader read, partition, width, 10BASE-T and ZIO testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
     tb_step.dependOn(&part_tb_gen.step);
-    tb_step.dependOn(&width_tb_gen.step);
+    tb_step.dependOn(&core_gen.step);
     tb_step.dependOn(&eth_tb_gen.step);
     tb_step.dependOn(&zio_wit_gen.step);
 
@@ -436,12 +432,6 @@ pub fn build(b: *std.Build) void {
     const part_run = b.addSystemCommand(&.{ "vvp", "out/partition_tb_iv" });
     part_run.step.dependOn(&part_compile.step);
 
-    // Counter-width equivalence testbench: legacy vs narrowed core.
-    const width_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "width_tb_harness", "-o", "out/width_tb_iv", "out/width_tb.v" });
-    width_compile.step.dependOn(&width_tb_gen.step);
-    const width_run = b.addSystemCommand(&.{ "vvp", "out/width_tb_iv" });
-    width_run.step.dependOn(&width_compile.step);
-
     // Ethernet 10BASE-T transmit testbench: expected waveform player.
     const eth_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "ethernet_10base_t_tb_harness", "-o", "out/ethernet_10base_t_tb_iv", "out/ethernet_10base_t_tb.v" });
     eth_compile.step.dependOn(&eth_tb_gen.step);
@@ -477,7 +467,6 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&rx_split_run.step);
     sim_step.dependOn(&read_run.step);
     sim_step.dependOn(&part_run.step);
-    sim_step.dependOn(&width_run.step);
     sim_step.dependOn(&eth_run.step);
     sim_step.dependOn(&async_fifo_run.step);
     sim_step.dependOn(&uart_run.step);
@@ -500,7 +489,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&rx_split_run.step);
     verify_step.dependOn(&read_run.step);
     verify_step.dependOn(&part_run.step);
-    verify_step.dependOn(&width_run.step);
+    verify_step.dependOn(&core_gen.step);
     verify_step.dependOn(&eth_run.step);
     verify_step.dependOn(&async_fifo_lint.step);
     verify_step.dependOn(&async_fifo_run.step);

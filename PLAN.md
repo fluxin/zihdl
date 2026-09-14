@@ -61,8 +61,8 @@ examples/                    <-- Reference projects built on js_asic
 ├── protocol_emulator/       # Programmable protocol emulator ASIC (I2C/SPI + ISA)
 │   ├── main.zig             # Runner: elaborate root block, emit RTL + design.json + SDC
 │   ├── isa.zig              # The 32-bit microcode instruction set
-│   ├── timing_execution_unit.zig# 120 MHz microsequencer core executing the ISA
-│   ├── programmable_asic.zig# ProgrammableAsicBlock(loader, addr) top-level composition
+│   ├── zio_timing_unit.zig     # Sole ZIO execution core, delay + 1 timing
+│   ├── programmable_asic.zig   # ProgrammableAsicBlock(Config) top-level composition
 │   ├── asic_i2c_tb.v        # iverilog I2C programming testbench
 │   └── asic_rx_tb.v         # iverilog RX loopback testbench
 └── z80/                     # FOSSi Z80 clone (Track D; empty scaffold)
@@ -84,8 +84,8 @@ contract, never at shared memory or shared code.
 
 Composed flows:
 
-- **F1 — pre-layout functional:** `out/asic_core.v` → `sim/verilog_synth.odin` →
-  `Circuit_Model` → `formal/unroll.odin` → miter/BMC against an ISA-level
+- **F1 — pre-layout functional:** `out/asic_core.v` → `synth/verilog.odin` →
+  `circuit.Model` → `formal/unroll.odin` → miter/BMC against an ISA-level
   reference or captured traces.
 - **F2 — synthesis equivalence:** RTL model ↔ post-synthesis cell model.
 - **F3 — physical:** post-layout extracted netlist ↔ post-synthesis model, plus
@@ -99,48 +99,19 @@ proofs and simulations run through `zig build sim` / `zig build verify`;
 interactive use, if ever needed, goes through a persistent `oasic --serve`
 worker rather than a `.so`.
 
-Integration performance (measured 2026-09-12): the loop is not IPC-bound.
-`zig build run` emits every artifact in ~30 ms, `oasic -synth -sta` parses and
-synthesizes the reference ASIC (3414 gates, 279 DFFs) and reports timing in
-~8 ms, and `zig build verify` (emit + both Verilator lints + three iverilog
-regressions) is ~280 ms warm. Process exec and file I/O are single-digit
-milliseconds, so a shared library would save under 1% while coupling the two
-languages through an ABI and putting Odin's runtime inside the js_asic process.
-If latency becomes a problem (much larger designs, many variants, interactive
-tools), the order is: (1) content-hash caching in `oasic` keyed by artifact +
-flags, (2) `oasic --serve` with warm caches over the same CLI/JSON schema,
-(3) batch mode and process fan-out, and only then (4) an optional exported C
-ABI for a concrete per-cycle co-simulation workload, behind a non-default build
-step. The file/JSON seam stays the contract either way: checker independence is
-a verification property, not just packaging.
-
 ### Simulation authority
 
-**oasic's Verilog simulator is the one semantic reference, and we develop it
-rather than depending on `iverilog`.** The path is
-`parsers/verilog.odin` → `sim/verilog_synth.odin` → `sim/circuit_sim.odin`
-(eventually the compiled `codegen/circuit_model.odin` fast path). iverilog and
-Verilator remain lint/regression tools only; the checked-in
-`examples/protocol_emulator/asic_i2c_tb.v` is transitional until the F1-sim path replays it.
+The native oasic path is `parsers/verilog.odin` -> `synth/verilog.odin` ->
+`circuit.Model` plus private `sim.Sim_State`. `-sim-verilog` consumes the shared
+`oasic.stimulus/1` or timestamped `/2` format. Icarus and Verilator are independent
+oracles. There is no FFI or shared-memory integration.
 
-oasic-side development required for this:
-
-1. **Verilog front end (`parsers/verilog.odin`).** Currently missing pieces
-   js_asic emits or will emit: `*`, `<<`, `>>`, `>>>`, `/`, `%`; `$signed` /
-   `$unsigned` and signed declarations; `initial` + `$readmemh`; dynamic
-   bit-select with a non-constant index; `parameter` / `localparam` resolution in
-   `case` labels; `` `timescale `` / `` `default_nettype `` directives.
-2. **Technology mapper (`sim/verilog_synth.odin`).** Map the above to cells and
-   keep width/sign semantics identical to Verilog; model memories explicitly
-   (arrays with address decode, or a macro cell) instead of skipping them.
-3. **Sim driver and CLI.** A `-sim-verilog` mode: parse → synth → `Circuit_Model`
-   → run N cycles against a stimulus file → emit VCD (and optional expected-output
-   assertions), with the compiled Odin model as the fast path.
-4. **Stimulus / trace contract.** A small format (JSON-lines or VCD) that js_asic
-   can emit from its reference interpreter and replay in oasic.
-5. **js_asic enablers.** Stay inside the supported synthesizable subset, emit
-   metadata (widths, hierarchy, FSM encodings) so the simulator can pack buses and
-   name states, and wrap the invocation in `zig build sim`.
+The default product and 60/120 MHz waveform bundles now elaborate one ZIO core
+and one configurable top, including RX capture. The old execution implementation,
+width-comparison harness and two-cycle microcode assembler are removed. Read
+README's "One programmable core" section for supported instruction boundaries
+and exact generation/replay commands. Gate counts and timing are artifact- and
+consumer-revision-specific; regenerated RTL must be measured again.
 
 ---
 
@@ -334,31 +305,20 @@ simulation claims above become enforced in CI rather than scripted.
 ## 5. Application Roadmap
 
 ### Track A — Physical layout & formal round-trip in `../oasic`
-1. **(done) Verilog front end → synthesis → placement → GDS.**
-   `js_asic/out/asic_core.v` parses (4 modules), synthesizes (3455 gates,
-   278 DFFs), places (0.400mm x 0.240mm), and exports GDSII:
-   ```bash
-   ./oasic -synth ../js_asic/out/asic_core.v -synth-top programmable_asic_i2c_42 \
-           -sta --clock-mhz 120 --gds-out asic_core.gds
-   ```
-   Cross-project regressions live in `oasic`: `parsers/verilog_test.odin`,
-   `sim/verilog_synth_test.odin`, `sim/placement_test.odin`,
-   `timing/sta_test.odin`.
-2. **(in progress) Close the synthesis/timing gaps.** STA reports worst setup
-   slack -2782 ps and worst hold slack -300 ps at 120 MHz, with 30 high-fanout
-   nets. Also, only 278 DFFs appear, so the memory arrays are not yet expanded
-   or modeled; memory macros must be represented before functional equivalence
-   or meaningful timing is possible.
-3. After placement/routing, re-run the functional miter on the extracted
-   netlist and re-run `timing/sta.odin` for 120 MHz closure (F3).
-4. Validate standard-cell routing and power grid integrity.
+
+Native synthesis, SRAM simulation, library mapping, placement, routing and
+clock-tree generation live in oasic. Full-core routing and timing closure are
+still open. A previously emitted GDS or a passing digital witness is not proof
+of connected routing or 60/120 MHz physical closure. Regenerate the unified
+artifacts, record their hashes, and report timing with the exact Liberty/LEF
+views and constraints. Post-route extraction and replay remain acceptance gates.
 
 ### Track B — Bidirectional Hardware RX & Data Streaming (done)
 
-1. **Core RX opcode (`IN PINS, n`) (done):** each `IN` shifts `gpio_in[3:0]`
+1. **Core RX opcode (`IN PINS,4`) (done):** each `IN` shifts `gpio_in[3:0]`
    into the 32-bit `isr`; after the eighth nibble the core pulses `rx_we`,
-   writes `{isr[27:0], pin_in}` to the RX SRAM at `rx_ptr`, and increments the
-   pointer.
+   emits `{isr[27:0], pin_in}`; the shared partition writes it into
+   the SRAM ring and advances its own pointer.
 2. **I2C slave read mode (`0x85`) (done):** the loader ACKs the read address,
    streams four bytes per word MSB-first, ACKs each byte (master NACK ends the
    transfer), and advances the read pointer, with `host_raddr`/`host_rdata`

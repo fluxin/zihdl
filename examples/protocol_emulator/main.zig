@@ -28,17 +28,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("=====================================================\n\n", .{});
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .single, programmable_asic.default_program_words, true));
+    _ = try design.elaborate(programmable_asic.ProgrammableAsicBlock(.{}));
     var design_prov = try provenance.Collector.init(alloc, &design);
     const full_v = try verilog.emitDesign(alloc, &design, .{ .provenance = &design_prov });
     design_prov.bindArtifact(full_v, "verilog2001");
     const design_json = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &design_prov });
     const design_sdc = try sdc.emitDesignSdc(alloc, &design, .{});
 
-    // A/B build: the historical two-macro composition is emitted alongside the
-    // default single-macro partition for oasic comparisons and regressions.
+    // The same core can use shared or separate program/capture macros.
     var split_design = netlist.Design.init(alloc);
-    _ = try split_design.elaborate(programmable_asic.ProgrammableAsicBlock(.i2c, 0x42, .split, programmable_asic.default_program_words, true));
+    _ = try split_design.elaborate(programmable_asic.ProgrammableAsicBlock(.{ .partition = .split }));
     var split_prov = try provenance.Collector.init(alloc, &split_design);
     const split_v = try verilog.emitDesign(alloc, &split_design, .{ .provenance = &split_prov });
     split_prov.bindArtifact(split_v, "verilog2001");
@@ -96,15 +95,13 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("protocol_blocks");
     _ = @import("isa.zig");
-    _ = @import("timing_execution_unit.zig");
     _ = @import("programmable_asic.zig");
     _ = @import("loader_read_tb.zig");
     _ = @import("partition_tb.zig");
-    _ = @import("width_tb.zig");
     _ = @import("ethernet_10base_t.zig");
     _ = @import("ethernet_10base_t_tb.zig");
     _ = @import("eth_microcode.zig");
     _ = @import("zio_timing_unit.zig");
-    _ = @import("zio_asic.zig");
+    _ = @import("zio_core_witness.zig");
     _ = @import("zio_witness.zig");
 }

@@ -275,11 +275,11 @@ module asic_rx_tb;
         end
 
         $display("--- Step 9: Unsupported opcode faults and halts the core ---");
-        // MOV (opcode 6) is declared but not implemented: decode-reject.
+        // Reserved opcode 15 must fault without executing.
         i2c_start;
         i2c_write_byte(8'h84);
         i2c_write_byte(8'h10);
-        i2c_write_word(32'h6000_0000);
+        i2c_write_word(32'hF000_0000);
         i2c_stop;
         i2c_start;
         i2c_write_byte(8'h84);

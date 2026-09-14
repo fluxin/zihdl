@@ -3,23 +3,12 @@
 //! driven by the instruction being executed. It is the protocol-agnostic data
 //! path the Ethernet microcode needs; no Ethernet-specific instruction exists.
 //!
-//! Differences from the legacy `TimingExecutionUnit` (kept intact for the
-//! existing I2C/RX regressions):
-//!   - instruction period is `delay + 1` cycles (legacy: `max(delay,1)+1`);
-//!   - the SRAM address is computed combinationally from the executing
-//!     instruction, so a taken branch fetches its target during the branch
-//!     cycle and the target executes the next cycle: no branch bubble and a
-//!     sustained one-instruction-per-cycle issue rate;
-//!   - `OUT PINS, n` shifts the low `n` bits of OSR (LSB first) to the pins
-//!     and autopulls the next 32-bit word from the TX FIFO when OSR drains;
-//!   - `JMP OSR_NOT_FULL` loops while the OSR or FIFO still holds output data,
-//!     so a streamed frame ends exactly on its last bit without a frame
-//!     counter;
-//!   - an empty FIFO while shifting sets the sticky `underrun` flag instead of
-//!     stalling, so starvation is observable and never pauses mid-frame.
-//!
-//! The host pushes 32-bit words into the FIFO through `tx_we`/`tx_wdata`,
-//! which the PIO top routes from a reserved host write address.
+//! Instruction interval is delay + 1 cycles. Taken branches have no bubble.
+//! OUT consumes the OSR, autopulling from the TX FIFO at word boundaries;
+//! starvation sets sticky underrun without pausing instruction timing.
+//! IN PINS,4 packs eight samples into a word and emits a one-cycle RX write.
+//! Start clears partial capture state. The SRAM partition owns ring addressing.
+//! Unsupported encodings fault before any instruction side effect.
 
 const std = @import("std");
 const js_asic = @import("js_asic");
@@ -66,6 +55,8 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             tx_full: Signal(1),
             tx_empty: Signal(1),
             underrun: Signal(1),
+            rx_we: Signal(1),
+            rx_wdata: Signal(32),
         };
 
         pub fn build(mb: *ModuleBuilder) !void {
@@ -85,6 +76,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const osr = try mb.reg("osr", 32, 0);
             const osr_cnt = try mb.reg("osr_cnt", 6, 0);
             const isr = try mb.reg("isr", 32, 0);
+            const sample_cnt = try mb.reg("sample_cnt", 3, 0);
             const fifo = try mb.mem(32, "tx_fifo", fifo_depth, .{});
             const fifo_wr = try mb.reg("fifo_wr", fifo_w, 0);
             const fifo_rd = try mb.reg("fifo_rd", fifo_w, 0);
@@ -101,6 +93,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const out_target = ins.inst.slice(23, 21);
             const out_count_raw = ins.inst.slice(20, 16);
             const in_source = ins.inst.slice(23, 21);
+            const in_count = ins.inst.slice(20, 16);
             const mov_dest = ins.inst.slice(21, 19);
             const mov_src = ins.inst.slice(18, 16);
             const mov_inv = ins.inst.bit(22);
@@ -128,20 +121,49 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             // Low `out_count` bits of the source, the value OUT writes to X.
             const out_mask = b.sub(b.shl(b.lit(32, 1), out_count_raw5), 1);
 
+            // Supported decode: any other opcode or field combination faults.
+            const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @intFromEnum(isa.SetTarget.Y))));
+            const out_target_ok = b.or_(
+                b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.PINS))),
+                b.or_(
+                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.X))),
+                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.NULL))),
+                ),
+            );
+            const out_ok = b.and_(is_out, b.and_(
+                out_target_ok,
+                b.and_(b.ge(out_count, 1), b.le(out_count, 16)),
+            ));
+            const in_ok = b.and_(is_in, b.and_(b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))), b.eq(in_count, 4)));
+            const wait_ok = b.and_(is_wait, b.and_(
+                b.le(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))),
+                b.or_(b.eq(wait_cond, 0), b.lt(ins.inst.slice(19, 16), 4)),
+            ));
+            const decode_ok = b.or_(
+                set_ok,
+                b.or_(
+                    b.and_(is_jmp, b.le(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.OSR_NOT_FULL)))),
+                    b.or_(
+                        out_ok,
+                        b.or_(in_ok, b.or_(is_pull, b.or_(b.and_(is_mov, b.and_(b.le(mov_dest, b.lit(3, @intFromEnum(isa.MovDest.OSR))), b.le(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.OSR))))), wait_ok))),
+                    ),
+                ),
+            );
+
             // Branch resolution is combinational from the executing
             // instruction, so the fetch address redirects in the same cycle.
             const x_zero = b.eq(x_reg.expr(), 0);
             const y_zero = b.eq(y_reg.expr(), 0);
             const pin_high = b.bit(ins.pin_in, 0);
-            const pin_low = b.not(pin_high);
+            const wait_pin = b.bit(b.shr(ins.pin_in, ins.inst.slice(19, 16)), 0);
             const data_avail = b.or_(b.ne(osr_cnt.expr(), 0), b.not(fifo_empty));
             const x_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.X_DEC))), b.not(x_zero));
             const y_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.Y_DEC))), b.not(y_zero));
-            const wait_pin_high = b.and_(is_wait, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))));
-            const wait_pin_low = b.and_(is_wait, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_LOW))));
+            const wait_pin_high = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))));
+            const wait_pin_low = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_LOW))));
             const wait_pin_blocked = b.or_(
-                b.and_(wait_pin_high, b.not(pin_high)),
-                b.and_(wait_pin_low, b.not(pin_low)),
+                b.and_(wait_pin_high, b.not(wait_pin)),
+                b.and_(wait_pin_low, wait_pin),
             );
             const pull_blocked = b.and_(b.and_(is_pull, pull_block), fifo_empty);
             const hold_fetch = b.or_(
@@ -158,7 +180,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 b.and_(b.not(ins.ctrl_start), b.not(ins.ctrl_stop)),
             );
             const autopull = b.and_(b.and_(executing, is_out), b.eq(osr_cnt.expr(), 0));
-            const fifo_pop = b.and_(executing, b.and_(b.not(fifo_empty), b.or_(autopull, is_pull)));
+            const fifo_pop = b.and_(b.and_(executing, decode_ok), b.and_(b.not(fifo_empty), b.or_(autopull, is_pull)));
             const starved_out = b.and_(autopull, fifo_empty);
             const branch_taken = b.and_(is_jmp, b.or_(
                 b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.ALWAYS))),
@@ -183,32 +205,6 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 hold_fetch,
                 pc_exec.expr(),
                 b.ternary(branch_taken, jmp_target, b.add(pc_exec.expr(), 1)),
-            );
-
-            // Supported decode: any other opcode or field combination faults.
-            const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @intFromEnum(isa.SetTarget.Y))));
-            const out_target_ok = b.or_(
-                b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.PINS))),
-                b.or_(
-                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.X))),
-                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.NULL))),
-                ),
-            );
-            const out_ok = b.and_(is_out, b.and_(
-                out_target_ok,
-                b.and_(b.ge(out_count, 1), b.le(out_count, 16)),
-            ));
-            const in_ok = b.and_(is_in, b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))));
-            const wait_ok = b.and_(is_wait, b.le(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))));
-            const decode_ok = b.or_(
-                set_ok,
-                b.or_(
-                    is_jmp,
-                    b.or_(
-                        out_ok,
-                        b.or_(in_ok, b.or_(is_pull, b.or_(is_mov, wait_ok))),
-                    ),
-                ),
             );
 
             // MOV operand mux.
@@ -273,8 +269,14 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 }),
             };
 
+            const sample_word = b.concat(.{ isr.slice(27, 0), ins.pin_in });
             const in_stmts = [_]Stmt{
-                b.assign(isr, b.concat(.{ isr.slice(27, 0), ins.pin_in })),
+                b.assign(isr, sample_word),
+                b.assign(sample_cnt, b.add(sample_cnt, 1)),
+                b.when(b.eq(sample_cnt, 7), &.{
+                    b.assign(outs.rx_we, 1),
+                    b.assign(outs.rx_wdata, sample_word),
+                }, &.{}),
             };
 
             const pull_stmts = [_]Stmt{
@@ -332,6 +334,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             try mb.assign(outs.underrun, underrun_r.expr());
 
             try mb.seq(domain, &.{
+                b.assign(outs.rx_we, 0),
                 // FIFO accounting runs every cycle, independent of the core.
                 b.assign(fifo_cnt, fifo_cnt_next),
                 b.when(fifo_push, &.{b.memWrite(fifo, fifo_wr.expr(), ins.tx_wdata)}, &.{}),
@@ -347,6 +350,8 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                     b.assign(delay_cnt, 0),
                     b.assign(osr, 0),
                     b.assign(osr_cnt, 0),
+                    b.assign(isr, 0),
+                    b.assign(sample_cnt, 0),
                     // `underrun` is sticky across start/stop; only reset clears
                     // it, so a data gap stays visible to the host.
                 }, &.{
@@ -368,6 +373,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                                             b.assign(delay_cnt, ins.inst.slice(15, 0)),
                                             b.when(b.not(decode_ok), &.{
                                                 b.assign(halt, 1),
+                                                b.assign(running, 0),
                                                 b.assign(fault, 1),
                                             }, &op_stmts),
                                         }),

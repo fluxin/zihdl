@@ -8,7 +8,7 @@ const ModuleBuilder = netlist.ModuleBuilder;
 
 const i2c_loader = js_asic.blocks.i2c;
 const spi_loader = js_asic.blocks.spi;
-const timing_core = @import("timing_execution_unit.zig");
+const timing_core = @import("zio_timing_unit.zig");
 const isa = @import("isa.zig");
 
 pub const LoaderKind = enum {
@@ -16,8 +16,8 @@ pub const LoaderKind = enum {
     spi,
 };
 
-/// Which macro composition the programmable ASIC uses. `.split` keeps the
-/// historical two-macro layout (program macro plus RX macro) for A/B replay;
+/// Which macro composition the programmable ASIC uses. `.split` provides
+/// dedicated program and RX macros;
 /// `.single` time-shares one 256x32 macro between instruction fetch, capture
 /// writes and host reads.
 pub const SramPartition = enum { split, single };
@@ -67,7 +67,6 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             ctrl_start: Signal(1),
             fetch: Signal(1),
             rx_we: Signal(1),
-            rx_addr: Signal(8),
             rx_wdata: Signal(32),
             host_we: Signal(1),
             host_addr: Signal(8),
@@ -240,8 +239,12 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             // Instruction word: out-of-range fetches hold execution at the
             // offending PC with a self-jump instead of aliasing capture contents
             // or restarting at program word 0.
-            const hold_inst = b.concat(.{ b.lit(4, 0), b.lit(4, 0), ins.core_pc, b.lit(16, 0) });
-            try mb.assign(outs.inst_word, b.ternary(fetch_oob_now, hold_inst, ins.sram_dout1.expr()));
+            // Align the hold address/selector with the SRAM response. Using the
+            // current fetch address here creates core_pc -> inst -> core_pc.
+            const response_pc = try mb.reg("response_pc", 8, 0);
+            const response_oob = try mb.reg("response_oob", 1, 0);
+            const hold_inst = b.concat(.{ b.lit(4, 0), b.lit(4, 0), response_pc, b.lit(16, 0) });
+            try mb.assign(outs.inst_word, b.ternary(response_oob, hold_inst, ins.sram_dout1.expr()));
 
             // Status mux for host reads of 0xF0/0xF1/0xF2; all other reads see
             // the shared macro (single) or the RX macro (split).
@@ -263,6 +266,8 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
             try mb.assign(outs.host_ack, enq);
 
             const stmts = &.{
+                b.assign(response_pc, ins.core_pc),
+                b.assign(response_oob, fetch_oob_now),
                 b.assign(outs.host_rvalid, read_grant),
 
                 b.when(read_grant, &.{
@@ -334,13 +339,26 @@ pub fn SramPartitionBlock(comptime partition: SramPartition, comptime program_wo
 /// Reference programmable ASIC, expressed as a regular block: same contract as
 /// every library and example block, so it can be elaborated as a root or
 /// instantiated inside a larger design.
-pub fn ProgrammableAsicBlock(
-    comptime loader: LoaderKind,
-    comptime i2c_addr: u7,
-    comptime partition: SramPartition,
-    comptime program_words: usize,
-    comptime capture_enabled: bool,
-) type {
+pub const Config = struct {
+    loader: LoaderKind = .i2c,
+    i2c_addr: u7 = 0x42,
+    partition: SramPartition = .single,
+    program_words: usize = default_program_words,
+    capture_enabled: bool = true,
+    clock_hz: u64 = 120_000_000,
+    counter_bits: usize = 16,
+    fifo_depth: usize = 16,
+};
+
+pub const tx_fifo_host_addr: u8 = 0xF8;
+
+/// One composition and one execution core for all emitted products/witnesses.
+pub fn ProgrammableAsicBlock(comptime config: Config) type {
+    const loader = config.loader;
+    const i2c_addr = config.i2c_addr;
+    const partition = config.partition;
+    const program_words = config.program_words;
+    const capture_enabled = config.capture_enabled;
     const I2cInputs = struct {
         clk: Signal(1),
         rst_n: Signal(1),
@@ -352,6 +370,11 @@ pub fn ProgrammableAsicBlock(
         gpio_out: Signal(4),
         gpio_oe: Signal(4),
         core_running: Signal(1),
+        tx_full: Signal(1),
+        tx_empty: Signal(1),
+        underrun: Signal(1),
+        op_fault: Signal(1),
+        pc_oob: Signal(1),
         i2c_sda_out: Signal(1),
         i2c_sda_oe: Signal(1),
     };
@@ -367,6 +390,11 @@ pub fn ProgrammableAsicBlock(
         gpio_out: Signal(4),
         gpio_oe: Signal(4),
         core_running: Signal(1),
+        tx_full: Signal(1),
+        tx_empty: Signal(1),
+        underrun: Signal(1),
+        op_fault: Signal(1),
+        pc_oob: Signal(1),
         prog_miso: Signal(1),
     };
 
@@ -382,7 +410,8 @@ pub fn ProgrammableAsicBlock(
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+            const b = mb.exprs();
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = config.clock_hz };
             try mb.addClockDomain(domain);
             try mb.addEnumType("opcode", isa.Opcode);
 
@@ -406,6 +435,9 @@ pub fn ProgrammableAsicBlock(
             _ = try mb.constant("SRAM_PARTITION_MODE", 1, if (partition == .split) 1 else 0);
             _ = try mb.constant("CAPTURE_ENABLED", 1, if (capture) 1 else 0);
 
+            _ = try mb.constant("TX_FIFO_HOST_ADDR", 8, tx_fifo_host_addr);
+            _ = try mb.constant("TX_FIFO_DEPTH", 16, config.fifo_depth);
+
             // Internal interconnect
             const host_we = try mb.wire("host_we", 1);
             const host_addr = try mb.wire("host_addr", 8);
@@ -421,11 +453,10 @@ pub fn ProgrammableAsicBlock(
             const core_pc = try mb.wire("core_pc", 8);
             const inst_word = try mb.wire("inst_word", 32);
             const rx_we = try mb.wire("rx_we", 1);
-            const rx_addr = try mb.wire("rx_addr", 8);
             const rx_wdata = try mb.wire("rx_wdata", 32);
             const prog_reject = try mb.wire("prog_reject", 1);
-            const pc_oob = try mb.wire("pc_oob", 1);
-            const op_fault = try mb.wire("op_fault", 1);
+            const pc_oob = outs.pc_oob;
+            const op_fault = outs.op_fault;
             const fetch = try mb.wire("fetch", 1);
             const capture_seq = try mb.wire("capture_seq", 16);
             const capture_lost = try mb.wire("capture_lost", 16);
@@ -506,6 +537,14 @@ pub fn ProgrammableAsicBlock(
                 if (!capture) try mb.assign(rx_dout1, 0);
             }
 
+            const tx_we = try mb.wire("tx_we", 1);
+            const part_we = try mb.wire("part_we", 1);
+            const part_ack = try mb.wire("part_ack", 1);
+            const fifo_hit = b.and_(host_we, b.ge(host_addr, b.lit(8, tx_fifo_host_addr)));
+            try mb.assign(tx_we, b.and_(fifo_hit, b.not(outs.tx_full)));
+            try mb.assign(part_we, b.and_(host_we, b.not(fifo_hit)));
+            try mb.assign(host_ack, b.ternary(fifo_hit, b.not(outs.tx_full), part_ack));
+
             _ = try mb.instantiate(SramPartitionBlock(partition, program_words, capture), "u_partition", .{
                 .clk = domain.clk,
                 .rst_n = domain.rst_n,
@@ -515,9 +554,8 @@ pub fn ProgrammableAsicBlock(
                 .ctrl_start = ctrl_start,
                 .fetch = fetch,
                 .rx_we = rx_we,
-                .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,
-                .host_we = host_we,
+                .host_we = part_we,
                 .host_addr = host_addr,
                 .host_wdata = host_wdata,
                 .host_req = host_req,
@@ -527,7 +565,7 @@ pub fn ProgrammableAsicBlock(
                 .rx_dout1 = rx_dout1,
             }, .{
                 .inst_word = inst_word,
-                .host_ack = host_ack,
+                .host_ack = part_ack,
                 .host_rvalid = host_rvalid,
                 .host_rdata = host_rdata,
                 .prog_reject = prog_reject,
@@ -591,8 +629,8 @@ pub fn ProgrammableAsicBlock(
                 }
             }
 
-            // 120 MHz timing sequencer core
-            _ = try mb.instantiate(timing_core.TimingExecutionUnitBlock, "u_core", .{
+            // One ZIO execution core; instruction response comes from the partition.
+            _ = try mb.instantiate(timing_core.ZioTimingUnit(config.counter_bits, config.fifo_depth), "u_core", .{
                 .clk = domain.clk,
                 .rst_n = domain.rst_n,
                 .inst = inst_word,
@@ -600,15 +638,19 @@ pub fn ProgrammableAsicBlock(
                 .ctrl_stop = ctrl_stop,
                 .start_pc = start_pc,
                 .pin_in = ins.gpio_in,
+                .tx_we = tx_we,
+                .tx_wdata = host_wdata,
             }, .{
                 .pc = core_pc,
+                .tx_full = outs.tx_full,
+                .tx_empty = outs.tx_empty,
+                .underrun = outs.underrun,
                 .pin_out = outs.gpio_out,
                 .pin_oe = outs.gpio_oe,
                 .core_running = outs.core_running,
                 .op_fault = op_fault,
                 .fetch = fetch,
                 .rx_we = rx_we,
-                .rx_addr = rx_addr,
                 .rx_wdata = rx_wdata,
             }, .{});
         }
@@ -622,11 +664,11 @@ test "programmable asic block elaborates single and split partitions" {
 
     inline for (.{ SramPartition.single, SramPartition.split }) |partition| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, partition, default_program_words, true));
+        _ = try design.elaborate(ProgrammableAsicBlock(.{ .partition = partition }));
         const v = try verilog.emitDesign(alloc, &design, .{});
         try std.testing.expect(std.mem.indexOf(u8, v, "module programmable_asic_") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
-        try std.testing.expect(std.mem.indexOf(u8, v, "module timing_execution_unit") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v, "module zio_timing_unit") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module i2c_slave_loader_42") != null);
         const sram_instances = std.mem.count(u8, v, "sky130_sram_1kbyte_1rw1r_32x256_8 u_");
         const expected: usize = if (partition == .single) 1 else 2;
@@ -644,7 +686,7 @@ test "programmable asic block elaborates spi without capture storage" {
 
     inline for (.{ SramPartition.single, SramPartition.split }) |partition| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.spi, 0x00, partition, default_program_words, false));
+        _ = try design.elaborate(ProgrammableAsicBlock(.{ .loader = .spi, .i2c_addr = 0, .partition = partition, .capture_enabled = false }));
         const v = try verilog.emitDesign(alloc, &design, .{});
         try std.testing.expect(std.mem.indexOf(u8, v, "module programmable_asic_spi") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module spi_slave_programmer") != null);
@@ -663,7 +705,7 @@ test "programmable asic block elaborates a non-default 128/128 program split" {
     const alloc = arena.allocator();
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, .single, 128, true));
+    _ = try design.elaborate(ProgrammableAsicBlock(.{ .program_words = 128 }));
     const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] PROGRAM_WORDS = 9'd128;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "localparam [8:0] CAPTURE_WORDS = 9'd128;") != null);
@@ -681,7 +723,7 @@ test "programmable asic design json records partition parameters" {
         .{ SramPartition.split, @as(u64, 1) },
     }) |case| {
         var design = netlist.Design.init(alloc);
-        _ = try design.elaborate(ProgrammableAsicBlock(.i2c, 0x42, case[0], default_program_words, true));
+        _ = try design.elaborate(ProgrammableAsicBlock(.{ .partition = case[0] }));
         const json = try metadata.emitDesignJson(alloc, &design, .{});
         const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
         var found = false;

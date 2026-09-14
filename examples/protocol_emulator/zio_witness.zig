@@ -1,7 +1,7 @@
 //! Integrated ZIO waveform witness generator.
 //!
 //! Per clock (60/120 MHz) this emits an artifact bundle: Verilog-2001 RTL of
-//! `programmable_asic_zio_42`, design.json, SDC, the microcode image, the raw
+//! `programmable_asic_i2c_42`, design.json, SDC, the microcode image, the raw
 //! payload image and a Verilog harness that loads program + payload over the
 //! real I2C interface and dumps one line per rising edge. The `convert` mode
 //! then checks that trace cycle by cycle against the independent microcode
@@ -22,7 +22,7 @@ const metadata = js_asic.backend.metadata;
 const provenance = js_asic.backend.provenance;
 const sdc = js_asic.backend.sdc;
 const eth_mc = @import("eth_microcode.zig");
-const zio_asic = @import("zio_asic.zig");
+const asic = @import("programmable_asic.zig");
 const ethernet = @import("ethernet_10base_t.zig");
 const isa = @import("isa.zig");
 
@@ -42,7 +42,7 @@ pub const Run = struct {
 
 const Interp = struct {
     program: []const u32,
-    fifo: [zio_asic.zio_fifo_depth]u32 = [_]u32{0} ** zio_asic.zio_fifo_depth,
+    fifo: [(asic.Config{}).fifo_depth]u32 = [_]u32{0} ** (asic.Config{}).fifo_depth,
     fifo_rd: usize = 0,
     fifo_cnt: usize = 0,
     pc_exec: u8 = 0,
@@ -307,24 +307,16 @@ pub const Bundle = struct {
     frame_runs: []eth_mc.Run,
 };
 
-pub fn buildBundle(alloc: std.mem.Allocator, clk_hz: u64) !Bundle {
+pub fn buildBundle(alloc: std.mem.Allocator, comptime clk_hz: u64) !Bundle {
     const half: u32 = @intCast((clk_hz / 10_000_000) / 2);
     const frame = try eth_mc.assembleZioPayload(alloc, &default_payload, .{ .half_cycles = half, .nlp_period_cycles = short_nlp_period });
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(zio_asic.ZioAsicI2c42);
+    _ = try design.elaborate(asic.ProgrammableAsicBlock(.{ .clock_hz = clk_hz }));
     var prov = try provenance.Collector.init(alloc, &design);
     const rtl = try verilog.emitDesign(alloc, &design, .{ .provenance = &prov });
     prov.bindArtifact(rtl, "verilog2001");
-    var sdc_text = try sdc.emitDesignSdc(alloc, &design, .{});
-    var json_text = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &prov });
-    if (clk_hz == 60_000_000) {
-        // The ZIO top annotates the product 120 MHz clock; the 60 MHz witness
-        // runs the same netlist at half rate, so its period doubles and the
-        // falling edge moves to ~8.333 ns.
-        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "-period 8.333", "-period 16.666");
-        sdc_text = try std.mem.replaceOwned(u8, alloc, sdc_text, "{0.000 4.166}", "{0.000 8.333}");
-        json_text = try std.mem.replaceOwned(u8, alloc, json_text, "\"freq_hz\": 120000000", "\"freq_hz\": 60000000");
-    }
+    const sdc_text = try sdc.emitDesignSdc(alloc, &design, .{});
+    const json_text = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &prov });
     return .{
         .clk_hz = clk_hz,
         .half_cycles = half,
@@ -521,7 +513,7 @@ fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, c
         \\    always #@HALF@ clk = ~clk;
         \\    initial $readmemh("out/zio_asic_@TAG@_host.hex", stim);
         \\    initial begin rst_n = 0; #50; rst_n = 1; end
-        \\    programmable_asic_zio_42 u_dut (
+        \\    programmable_asic_i2c_42 u_dut (
         \\        .clk(clk), .rst_n(rst_n), .i2c_scl(scl), .i2c_sda_in(sda_in), .gpio_in(gpio_in),
         \\        .i2c_sda_out(sda_out), .i2c_sda_oe(sda_out_oe), .gpio_out(gpio_out), .gpio_oe(gpio_oe),
         \\        .core_running(core_running), .tx_full(tx_full), .tx_empty(tx_empty),
@@ -621,7 +613,7 @@ fn appendJsonl(alloc: std.mem.Allocator, out: *std.ArrayList(u8), rows: []const 
     const period_ps: u64 = if (clk_hz == 60_000_000) 16_667 else 8_333;
     const header = try std.fmt.allocPrint(
         alloc,
-        "{{\"schema\":\"oasic.stimulus/1\",\"top\":\"programmable_asic_zio_42\",\"clock\":\"clk\",\"period_ps\":{d}," ++
+        "{{\"schema\":\"oasic.stimulus/1\",\"top\":\"programmable_asic_i2c_42\",\"clock\":\"clk\",\"period_ps\":{d}," ++
             "\"inputs\":[\"gpio_in[0]\",\"gpio_in[1]\",\"gpio_in[2]\",\"gpio_in[3]\",\"i2c_sda_in\",\"i2c_scl\",\"rst_n\"]," ++
             "\"outputs\":[\"i2c_sda_oe\",\"i2c_sda_out\",\"core_running\",\"gpio_oe[0]\",\"gpio_oe[1]\",\"gpio_oe[2]\",\"gpio_oe[3]\",\"gpio_out[0]\",\"gpio_out[1]\",\"gpio_out[2]\",\"gpio_out[3]\",\"tx_full\",\"tx_empty\",\"underrun\",\"op_fault\",\"pc_oob\"]}}\n",
         .{period_ps},
@@ -701,7 +693,7 @@ test "bundle emits integrated RTL with the macro and FIFO routing" {
     const alloc = arena.allocator();
 
     const bundle = try buildBundle(alloc, 60_000_000);
-    try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module programmable_asic_zio_42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module programmable_asic_i2c_42") != null);
     try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
     try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module zio_timing_unit_x16_f16") != null);
     try std.testing.expect(std.mem.indexOf(u8, bundle.json, "TX_FIFO_HOST_ADDR") != null);
@@ -786,7 +778,7 @@ pub fn main(init: std.process.Init) !void {
         const manifest = try std.fmt.allocPrint(
             alloc,
             "# ZIO witness bundle {s} MHz\n" ++
-                "top: programmable_asic_zio_42\n" ++
+                "top: programmable_asic_i2c_42\n" ++
                 "clk_hz: {d}\nhalf_cycles: {d}\nprogram_words: {d}\npayload_words: {d}\n" ++
                 "generate: zig build tb (emits this bundle)\n" ++
                 "model: examples/protocol_emulator/zio_witness.zig (interpreter + checker)\n" ++
@@ -794,7 +786,7 @@ pub fn main(init: std.process.Init) !void {
                 "compile: iverilog -g2001 -s zio_witness_tb -o out/zio_asic_{s}_iv out/zio_asic_{s}.v out/zio_asic_{s}_tb.v\n" ++
                 "run: vvp out/zio_asic_{s}_iv\n" ++
                 "check+jsonl: zig build zio (model check + out/zio_asic_{s}.jsonl)\n" ++
-                "replay: ../oasic/oasic -sim-verilog out/zio_asic_{s}.v -synth-top programmable_asic_zio_42 -stimulus out/zio_asic_{s}.jsonl\n" ++
+                "replay: ../oasic/oasic -sim-verilog out/zio_asic_{s}.v -synth-top programmable_asic_i2c_42 -stimulus out/zio_asic_{s}.jsonl\n" ++
                 "fault: zig build zio (injected run 3 must report the exact cycle)\n",
             .{ tag, clk_hz, bundle.half_cycles, bundle.program.len, bundle.payload.len, tag, tag, tag, tag, tag, tag, tag },
         );

@@ -1,21 +1,7 @@
-//! 10BASE-T microcode compiler for the programmable timing core.
-//!
-//! The core issues at most one instruction per execution edge; the interval to
-//! the next execution is `max(delay, 1) + 1` clock cycles (two cycles for
-//! delay 0). A `SET PINS` therefore changes GPIO at exact cycle boundaries,
-//! and a run of `k` Manchester half-bits lasting `k * half_cycles` cycles is
-//! one `SET PINS` with `delay = k * half_cycles - 1`.
-//!
-//! The regular preamble is the only place a branch is affordable: its wire
-//! pattern is `H1 (L2 H2)*27 L2 H1` (half-bit units), so the loop body can
-//! spend one `JMP X_DEC` slot inside the 2-half-bit H run and still hold the
-//! 3/6-cycle half-bit grid. The SFD and payload are branchless, so the
-//! waveform never pauses inside a frame.
-//!
-//! `frameRuns` is the independent bit-level reference: it derives the wire
-//! run lengths from the IEEE 802.3 preamble/SFD pattern and LSB-first octet
-//! order, without looking at the emitted instructions. `assembleFrame` emits
-//! instructions whose execution intervals reproduce that run list.
+//! 10BASE-T microcode and independent wire reference for ZIO.
+//! All programs use delay + 1 instruction intervals and zero-bubble branches.
+//! frameRuns derives Manchester runs directly from octets; the TX witness
+//! checks the microcode interpreter against it for all 256 payload values.
 
 const std = @import("std");
 const isa = @import("isa.zig");
@@ -103,129 +89,7 @@ pub fn preambleRunCount(alloc: std.mem.Allocator) !usize {
     return count;
 }
 
-/// Cycles from one instruction execution to the next for a delay field.
-pub fn issueInterval(delay: u16) u32 {
-    return @as(u32, if (delay == 0) 1 else delay) + 1;
-}
-
-/// Delay field producing an execution interval of exactly `cycles` (>= 2).
-pub fn delayFor(cycles: u32) u16 {
-    std.debug.assert(cycles >= 2);
-    if (cycles == 2) return 0;
-    return @intCast(cycles - 1);
-}
-
-pub const Options = struct {
-    /// 3 at 60 MHz, 6 at 120 MHz.
-    half_cycles: u32,
-    /// Start-to-start idle link pulse spacing. The product default is
-    /// `clk_hz * 16 ms`; the witness shortens it so pulse spacing is visible.
-    nlp_period_cycles: u32,
-    /// Preamble loop count register value: the loop body runs X+1 times.
-    preamble_loops: u5 = 26,
-};
-
-pub const Program = struct {
-    words: []u32,
-    /// Independent wire-run reference for the frame (excludes NLP). The final
-    /// run is flagged as a minimum.
-    runs: []Run,
-    /// Reference runs reproduced by the preamble loop.
-    preamble_run_count: usize,
-    preamble_words: usize,
-    body_words: usize,
-    nlp_words: usize,
-    frame_cycles: u32,
-    nlp_period_cycles: u32,
-};
-
-fn appendSet(words: *std.ArrayList(u32), alloc: std.mem.Allocator, level: u1, cycles: u32) !void {
-    try words.append(alloc, isa.set(.PINS, level, delayFor(cycles)).toU32());
-}
-
-fn appendNlp(words: *std.ArrayList(u32), alloc: std.mem.Allocator, opts: Options) !usize {
-    const start = words.items.len;
-    const width = opts.half_cycles; // 100 ns
-    const gap = opts.nlp_period_cycles -| width;
-    if (gap >= 3 and gap <= 0xFFFF + 2) {
-        // Entry: hold the pin low for the gap before the first pulse, then a
-        // loop that puts the two-cycle JMP bubble inside the low time.
-        try appendSet(words, alloc, 0, gap);
-        try appendSet(words, alloc, 1, width);
-        try appendSet(words, alloc, 0, gap - 2);
-        try words.append(alloc, isa.jmp(.ALWAYS, @intCast(start + 1), 0).toU32());
-    } else {
-        // Long product period: a first low gap, then ceil(gap / 65536) paced
-        // steps counted by X, then repeat.
-        const steps: u32 = @min(32, (gap + 65535) / 65536 + 1);
-        const x_value: u5 = @intCast(steps - 1);
-        try appendSet(words, alloc, 0, gap);
-        try appendSet(words, alloc, 1, width);
-        try words.append(alloc, isa.set(.X, x_value, 0).toU32());
-        const inner = words.items.len;
-        try appendSet(words, alloc, 0, 65536);
-        try words.append(alloc, isa.jmp(.X_DEC, @intCast(inner), 0).toU32());
-        try words.append(alloc, isa.jmp(.ALWAYS, @intCast(start), 0).toU32());
-    }
-    return words.items.len - start;
-}
-
-/// Compile a preloaded frame for a fixed payload. The payload is embedded in
-/// the instruction stream; this is bounded preloaded transmission, not a
-/// host-fed stream.
-pub fn assembleFrame(alloc: std.mem.Allocator, payload: []const u8, opts: Options) !Program {
-    const halves = try frameHalves(alloc, payload);
-    defer alloc.free(halves);
-    const all_runs = try runsFromHalves(alloc, halves);
-    if (all_runs.len > 0) all_runs[all_runs.len - 1].min = true;
-
-    // Split the reference at the preamble boundary: the loop reproduces the
-    // preamble runs, the branchless tail reproduces the SFD and payload.
-    const pre_runs = try preambleRunCount(alloc);
-    var consumed: u32 = 0;
-    var preamble_runs_len: usize = 0;
-    while (preamble_runs_len < pre_runs) : (preamble_runs_len += 1) {
-        consumed += all_runs[preamble_runs_len].halves;
-    }
-    std.debug.assert(consumed == preamble_bytes * 16);
-
-    var words = std.ArrayList(u32).empty;
-    errdefer words.deinit(alloc);
-
-    // Preamble: H1 (L2 H2)^N L2 H1. The H2 run is split across a SET and the
-    // JMP so the branch's two-cycle bubble is inside an already-Hold level.
-    try words.append(alloc, isa.set(.X, opts.preamble_loops, 0).toU32());
-    try appendSet(&words, alloc, 1, opts.half_cycles);
-    const loop = words.items.len;
-    try appendSet(&words, alloc, 0, 2 * opts.half_cycles);
-    try appendSet(&words, alloc, 1, 2 * opts.half_cycles - 2);
-    try words.append(alloc, isa.jmp(.X_DEC, @intCast(loop), 0).toU32());
-    try appendSet(&words, alloc, 0, 2 * opts.half_cycles);
-    try appendSet(&words, alloc, 1, opts.half_cycles);
-    const preamble_words = words.items.len;
-
-    // SFD + payload: one SET per wire run, with the run's exact duration.
-    for (all_runs[preamble_runs_len..]) |run| {
-        try appendSet(&words, alloc, run.level, run.halves * opts.half_cycles);
-    }
-    const body_words = words.items.len - preamble_words;
-
-    const nlp_words = try appendNlp(&words, alloc, opts);
-    const frame_cycles: u32 = @intCast(halves.len * opts.half_cycles);
-
-    return .{
-        .words = try words.toOwnedSlice(alloc),
-        .runs = all_runs,
-        .preamble_run_count = preamble_runs_len,
-        .preamble_words = preamble_words,
-        .body_words = body_words,
-        .nlp_words = nlp_words,
-        .frame_cycles = frame_cycles,
-        .nlp_period_cycles = opts.nlp_period_cycles,
-    };
-}
-
-/// Product-default NLP period in cycles: 16 ms nominal at `clk_hz`.
+/// Nominal 16 ms link-pulse interval, expressed in core clock cycles.
 pub fn productNlpPeriodCycles(comptime clk_hz: u64) u32 {
     return @intCast(clk_hz * 16 / 1000);
 }
@@ -529,57 +393,6 @@ test "reference runs describe the IEEE preamble, SFD and LSB-first payload" {
     try expectRun(runs[pre + sfd.len], 0, 1);
     try expectRun(runs[pre + sfd.len + 1], 1, 2);
     try expectRun(runs[pre + sfd.len + 2], 0, 1);
-}
-
-test "all 256 payload octets compile to branch-free bodies with exact run delays" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    for (0..256) |value| {
-        const payload = [_]u8{@intCast(value)};
-        const opts = Options{ .half_cycles = 3, .nlp_period_cycles = 240 };
-        const program = try assembleFrame(alloc, &payload, opts);
-
-        // Body instructions reproduce the reference tail one for one.
-        var body_index: usize = 0;
-        for (program.runs[program.preamble_run_count..]) |run| {
-            const word = program.words[program.preamble_words + body_index];
-            const inst = isa.Instruction.fromU32(word);
-            try std.testing.expectEqual(isa.Opcode.SET, inst.op);
-            try std.testing.expectEqual(@as(u12, @intFromEnum(isa.SetTarget.PINS)), (inst.data >> 5) & 0x7);
-            try std.testing.expectEqual(run.level, @as(u1, @intCast(inst.data & 0xF)));
-            try std.testing.expectEqual(run.halves * 3, issueInterval(inst.delay));
-            body_index += 1;
-        }
-        try std.testing.expectEqual(body_index, program.body_words);
-
-        // Bounded preloaded one-octet frames fit the default 64-word program.
-        try std.testing.expect(program.words.len <= 64);
-        try std.testing.expectEqual(program.words.len - program.preamble_words - program.body_words, program.nlp_words);
-        try std.testing.expect(program.nlp_words >= 4);
-    }
-}
-
-test "two-octet frames fit the default partition and scale from 60 to 120 MHz" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    inline for (.{ 3, 6 }) |half| {
-        const program = try assembleFrame(alloc, &.{ 0x00, 0xFF }, .{ .half_cycles = half, .nlp_period_cycles = 240 });
-        try std.testing.expect(program.words.len <= 64);
-
-        // Loop body: L2 is one SET, H2 is a SET plus the JMP bubble, so the
-        // full loop period is four half-bit times.
-        const l2 = isa.Instruction.fromU32(program.words[2]);
-        const h2 = isa.Instruction.fromU32(program.words[3]);
-        const jmp = isa.Instruction.fromU32(program.words[4]);
-        try std.testing.expectEqual(@as(u32, 2 * half), issueInterval(l2.delay));
-        try std.testing.expectEqual(@as(u32, 2 * half - 2), issueInterval(h2.delay));
-        try std.testing.expectEqual(@as(u32, 2), issueInterval(jmp.delay));
-        try std.testing.expectEqual(@as(u32, 4 * half), issueInterval(l2.delay) + issueInterval(h2.delay) + issueInterval(jmp.delay));
-    }
 }
 
 test "product NLP period is 16 ms nominal at both clocks" {
