@@ -93,7 +93,8 @@ declaration, so their outputs stay signed); `Stream(W)` and
 `ReqAckBridgeBlock`, `BundledDataBlock`, `MailboxBlock`, `FifoMailboxBlock`,
 `ResetSyncBlock`, `UartBlock`, `SpiSlaveProgrammerBlock`,
 `I2cSlaveLoaderBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
-`CounterBlock`, `Ethernet10BaseTBlock`.
+`CounterBlock`, `TimerBlock`, `RomBlock`, `RamBlock`,
+`Ethernet10BaseTBlock`.
 
 ### cdc
 
@@ -259,8 +260,8 @@ rather than the authoring half of this specific project.
 - `UartBlock` (single-clock TX/RX, 5..8 data bits, mid-bit sampling),
   `SpiSlaveProgrammerBlock` (write/start/stop command decode, host write pulse)
   and `I2cSlaveLoaderBlock` (parameterized device address, control-register
-  pokes, host write-ack and read-valid handshakes) landed; AXI4-Lite,
-  arbiter/crossbar, timer and ROM/RAM wrappers remain.
+  pokes, host write-ack and read-valid handshakes) landed; `TimerBlock` and
+  ROM/RAM wrappers have RTL witnesses; AXI4-Lite and arbiter/crossbar remain.
 
 **Backends and packaging**
 - Verilog-2001 and SystemVerilog only: no VHDL, no structural netlist/cell

@@ -10,7 +10,6 @@ Physical implementation and signoff are tracked in `../oasic`.
    read/write handshake witnesses.
 2. Add a round-robin arbiter and crossbar, including contention and fairness
    witnesses.
-3. Add timers and ROM/RAM wrappers, with parameter and memory-mode witnesses.
 
 Expose each block through `src/blocks.zig` and include its witness in
 `zig build verify` before marking it complete.

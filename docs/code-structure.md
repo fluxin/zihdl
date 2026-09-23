@@ -24,7 +24,7 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, ROM/RAM wrappers, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter, timer)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
@@ -145,12 +145,14 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build lint` / `lint-sv` | Verilator lint of the emitted RTL |
 | `zig build sim` | Transitional iverilog regressions (oasic's simulator replaces these) |
 | `zig build verify` | Enforced lint + simulation of every artifact + contract fixture |
+| `zig build verify-oasic` | Consumer replay of v1/v2 contract and 60/120 MHz ZIO artifacts with metadata |
 | `zig build contract` | Emits the timing-intent fixture under `out/contract/` |
 | `zig build async-fifo` | Emits, lints and Icarus-replays the dual-clock async FIFO witness |
 | `zig build uart` | Emits, lints and Icarus-replays the single-clock UART loopback witness |
 | `zig build spi` | Emits, lints and Icarus-replays the SPI target programmer witness |
 | `zig build i2c` | Emits, lints and Icarus-replays the I2C target loader witness |
 | `zig build cdc` | Emits, lints and Icarus-replays the request/acknowledge bridge + bundled-data + mailbox/FIFO-mailbox witness |
+| `zig build timer-memory` | Icarus-replays timer, ROM and RAM collision-mode witnesses |
 | `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 

@@ -11,6 +11,8 @@ pub const ethernet_10base_t = @import("blocks/ethernet_10base_t.zig");
 pub const shift_reg = @import("blocks/shift_reg.zig");
 pub const edge_det = @import("blocks/edge_det.zig");
 pub const counter = @import("blocks/counter.zig");
+pub const timer = @import("blocks/timer.zig");
+pub const memory = @import("blocks/memory.zig");
 
 pub const SramBlock = sram.SramBlock;
 pub const TtSramBlock = sram.TtSramBlock;
@@ -29,6 +31,9 @@ pub const ShiftRegisterBlock = shift_reg.ShiftRegisterBlock;
 pub const ShiftDirection = shift_reg.ShiftDirection;
 pub const EdgeDetectorBlock = edge_det.EdgeDetectorBlock;
 pub const CounterBlock = counter.CounterBlock;
+pub const TimerBlock = timer.TimerBlock;
+pub const RomBlock = memory.RomBlock;
+pub const RamBlock = memory.RamBlock;
 
 test {
     _ = sram;
@@ -42,4 +47,6 @@ test {
     _ = shift_reg;
     _ = edge_det;
     _ = counter;
+    _ = timer;
+    _ = memory;
 }

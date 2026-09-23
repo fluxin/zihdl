@@ -533,6 +533,25 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(zio_step);
     verify_step.dependOn(protocols_step);
 
+    const timer_memory_exe = b.addExecutable(.{
+        .name = "zihdl_timer_memory_witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/timer_memory_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const timer_memory_gen = b.addRunArtifact(timer_memory_exe);
+    const timer_memory_step = b.step("timer-memory", "Emit timer and ROM/RAM wrapper RTL");
+    timer_memory_step.dependOn(&timer_memory_gen.step);
+    const timer_memory_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "timer_memory_tb", "-o", "out/timer_memory_iv", "out/timer_memory_witness.v", "examples/blocks/timer_memory_tb.v" });
+    timer_memory_compile.step.dependOn(&timer_memory_gen.step);
+    const timer_memory_run = b.addSystemCommand(&.{ "vvp", "out/timer_memory_iv" });
+    timer_memory_run.step.dependOn(&timer_memory_compile.step);
+    timer_memory_step.dependOn(&timer_memory_run.step);
+    verify_step.dependOn(&timer_memory_run.step);
+
     // Consumer replay is an explicit cross-repository gate. It uses the
     // generated metadata as well as RTL, so schema drift fails the build.
     const oasic_bin = b.option([]const u8, "oasic-bin", "Path to the oasic executable for verify-oasic") orelse "../oasic/oasic";
