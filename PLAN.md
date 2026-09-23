@@ -4,14 +4,6 @@ This file tracks unfinished work. The current implementation and verification
 commands are in [README.md](README.md); API limits are in [docs/api.md](docs/api.md).
 Physical implementation and signoff are tracked in `../oasic`.
 
-## Reusable block library
-
-1. Add AXI4-Lite interface blocks in `src/blocks/`, with typed ports and
-   read/write handshake witnesses.
-
-Expose each block through `src/blocks.zig` and include its witness in
-`zig build verify` before marking it complete.
-
 ## Deferred expansion
 
 1. Add a neutral structural or cell-level export only if an `oasic` consumer

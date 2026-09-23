@@ -24,7 +24,7 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, ROM/RAM wrappers, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter, timer, arbiter/crossbar)
+blocks/              elemental reusable IP (SRAM, ROM/RAM wrappers, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter, timer, arbiter/crossbar, AXI4-Lite register slave)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
@@ -154,6 +154,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build cdc` | Emits, lints and Icarus-replays the request/acknowledge bridge + bundled-data + mailbox/FIFO-mailbox witness |
 | `zig build timer-memory` | Icarus-replays timer, ROM and RAM collision-mode witnesses |
 | `zig build arbiter` | Icarus-replays round-robin fairness and crossbar contention witnesses |
+| `zig build axi4-lite` | Icarus-replays independent AW/W and read/write response handshakes |
 | `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 

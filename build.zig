@@ -571,6 +571,25 @@ pub fn build(b: *std.Build) void {
     arbiter_step.dependOn(&arbiter_run.step);
     verify_step.dependOn(&arbiter_run.step);
 
+    const axi_exe = b.addExecutable(.{
+        .name = "zihdl_axi4_lite_witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/axi4_lite_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const axi_gen = b.addRunArtifact(axi_exe);
+    const axi_step = b.step("axi4-lite", "Emit AXI4-Lite register slave RTL");
+    axi_step.dependOn(&axi_gen.step);
+    const axi_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "axi4_lite_tb", "-o", "out/axi4_lite_iv", "out/axi4_lite_witness.v", "examples/blocks/axi4_lite_tb.v" });
+    axi_compile.step.dependOn(&axi_gen.step);
+    const axi_run = b.addSystemCommand(&.{ "vvp", "out/axi4_lite_iv" });
+    axi_run.step.dependOn(&axi_compile.step);
+    axi_step.dependOn(&axi_run.step);
+    verify_step.dependOn(&axi_run.step);
+
     // Consumer replay is an explicit cross-repository gate. It uses the
     // generated metadata as well as RTL, so schema drift fails the build.
     const oasic_bin = b.option([]const u8, "oasic-bin", "Path to the oasic executable for verify-oasic") orelse "../oasic/oasic";
