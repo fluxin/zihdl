@@ -50,8 +50,42 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const testbench_sources_gen = b.addRunArtifact(testbench_sources_exe);
-    b.step("testbenches", "Generate legacy verification testbenches under out/testbenches")
-        .dependOn(&testbench_sources_gen.step);
+    const testbenches_step = b.step("testbenches", "Generate verification testbenches under out/testbenches");
+    testbenches_step.dependOn(&testbench_sources_gen.step);
+
+    const vector_bench_mod = b.createModule(.{
+        .root_source_file = b.path("examples/testing/vector_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const trace_harness_mod = b.createModule(.{
+        .root_source_file = b.path("examples/testing/trace_harness.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const protocol_harness_mod = b.createModule(.{
+        .root_source_file = b.path("examples/testing/protocol_harness.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const witness_wrapper_mod = b.createModule(.{
+        .root_source_file = b.path("examples/testing/witness_wrapper.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const jane_bench_exe = b.addExecutable(.{
+        .name = "zihdl_jane_street_benches",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jane_street/bench_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vector_bench", .module = vector_bench_mod }},
+        }),
+    });
+    const jane_bench_gen = b.addRunArtifact(jane_bench_exe);
+    testbenches_step.dependOn(&jane_bench_gen.step);
+    b.step("jane-benches", "Generate Jane Street simulator vectors from Zig")
+        .dependOn(&jane_bench_gen.step);
 
     // Example-level design blocks (ISA, loaders, execution units); depends on
     // the library module and is shared by the reference projects.
@@ -60,6 +94,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "zihdl", .module = mod },
+            .{ .name = "witness_wrapper", .module = witness_wrapper_mod },
         },
     });
 
@@ -88,6 +123,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
+                .{ .name = "witness_wrapper", .module = witness_wrapper_mod },
             },
         }),
     });
@@ -125,6 +161,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
+                .{ .name = "witness_wrapper", .module = witness_wrapper_mod },
             },
         }),
     });
@@ -141,6 +178,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
+                .{ .name = "witness_wrapper", .module = witness_wrapper_mod },
             },
         }),
     });
@@ -168,13 +206,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zihdl", .module = mod },
+                .{ .name = "witness_wrapper", .module = witness_wrapper_mod },
             },
         }),
     });
     const eth_tb_gen = b.addRunArtifact(eth_tb_exe);
 
     // Dual-clock async FIFO witness: emits the gray-pointer FIFO RTL and
-    // replays a handwritten iverilog bench that fills, overflows and wraps it.
+    // replays Zig-authored fill, overflow, and wrap transactions.
     const async_fifo_exe = b.addExecutable(.{
         .name = "zihdl_async_fifo_gen",
         .root_module = b.createModule(.{
@@ -354,6 +393,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
+                .{ .name = "trace_harness", .module = trace_harness_mod },
             },
         }),
     });
@@ -366,7 +406,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("examples/protocol_emulator/protocol_wave_witness.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zihdl", .module = mod }},
+            .imports = &.{
+                .{ .name = "zihdl", .module = mod },
+                .{ .name = "protocol_harness", .module = protocol_harness_mod },
+            },
         }),
     });
     const protocol_wit_gen = b.addRunArtifact(protocol_wit_exe);
@@ -616,6 +659,7 @@ pub fn build(b: *std.Build) void {
     jane_warmup_lint.step.dependOn(&jane_warmup_gen.step);
     const jane_warmup_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-s", "warmup_tb", "-o", "out/jane_street_warmup_iv", "out/jane_street_warmup.v", "out/testbenches/warmup_tb.v" });
     jane_warmup_compile.step.dependOn(&jane_warmup_gen.step);
+    jane_warmup_compile.step.dependOn(&jane_bench_gen.step);
     const jane_warmup_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_warmup_iv" });
     jane_warmup_run.step.dependOn(&jane_warmup_compile.step);
 
@@ -642,6 +686,7 @@ pub fn build(b: *std.Build) void {
     jane_driver_lint.step.dependOn(&jane_driver_gen.step);
     const jane_driver_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "key_driver_tb", "-o", "out/jane_street_key_driver_iv", "out/jane_street_key_driver.v", "out/testbenches/key_driver_tb.v" });
     jane_driver_compile.step.dependOn(&jane_driver_gen.step);
+    jane_driver_compile.step.dependOn(&jane_bench_gen.step);
     const jane_driver_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_key_driver_iv" });
     jane_driver_run.step.dependOn(&jane_driver_compile.step);
     jane_driver_run.step.dependOn(&jane_solution_gen.step);
@@ -659,6 +704,7 @@ pub fn build(b: *std.Build) void {
     jane_checker_lint.step.dependOn(&jane_checker_gen.step);
     const jane_checker_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-s", "star_battle_tb", "-o", "out/jane_street_star_battle_iv", "out/jane_street_star_battle.v", "out/testbenches/star_battle_tb.v" });
     jane_checker_compile.step.dependOn(&jane_checker_gen.step);
+    jane_checker_compile.step.dependOn(&jane_bench_gen.step);
     const jane_checker_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_star_battle_iv" });
     jane_checker_run.step.dependOn(&jane_checker_compile.step);
     jane_checker_run.step.dependOn(&jane_solution_gen.step);
@@ -679,7 +725,7 @@ pub fn build(b: *std.Build) void {
     jane_puzzle_check.step.dependOn(&jane_solution_gen.step);
     jane_puzzle_check.step.dependOn(&jane_warmup_gen.step);
     jane_puzzle_check.step.dependOn(&jane_checker_gen.step);
-    jane_puzzle_check.step.dependOn(&testbench_sources_gen.step);
+    jane_puzzle_check.step.dependOn(&jane_bench_gen.step);
     b.step("verify-jane-street-puzzle", "Replay the generated key against the sibling GDS simulator and solution VCD")
         .dependOn(&jane_puzzle_check.step);
 
@@ -689,7 +735,6 @@ pub fn build(b: *std.Build) void {
         &divmod_zero_compile.step,  &i2c_compile.step,         &rx_compile.step,
         &i2c_split_compile.step,    &rx_split_compile.step,    &sv_compile.step,
         &timer_memory_compile.step, &arbiter_compile.step,     &axi_compile.step,
-        &jane_warmup_compile.step,  &jane_driver_compile.step, &jane_checker_compile.step,
     }) |compile_step| compile_step.dependOn(&testbench_sources_gen.step);
 
     // Consumer replay is an explicit cross-repository gate. It uses the

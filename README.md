@@ -188,6 +188,11 @@ Install Zig 0.16.0 for generation and unit tests. `zig build verify` also
 requires Verilator, Icarus Verilog and `vvp` on `PATH`. `oasic` is only needed
 for the separate replay commands above.
 
+RTL, protocol stimulus, and testbench checks are authored in Zig. `zig build
+testbenches` generates the 16 simulator cases under `out/testbenches/`; the
+additional ROM-driven witnesses use the same Zig models and a shared generated
+simulator shell. Generated `.v` and `.sv` files live under `out/`.
+
 ```bash
 # Run unit tests
 zig build test

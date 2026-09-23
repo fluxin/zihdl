@@ -24,6 +24,7 @@ const sdc = zihdl.backend.sdc;
 const eth_mc = @import("eth_microcode.zig");
 const asic = @import("programmable_asic.zig");
 const isa = @import("isa.zig");
+const trace_harness = @import("trace_harness");
 
 pub const default_payload = [_]u8{ 0x00, 0xFF, 0xAA, 0x55, 0x01, 0x80, 0xA5, 0x5A };
 pub const short_nlp_period: u32 = 240;
@@ -491,55 +492,45 @@ fn hexBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, cycles: usize) ![]u8 {
-    const addr_w = std.math.log2_int_ceil(usize, @max(2, cycles));
-    const template =
-        \\`timescale 1ns / 1ps
-        \\`default_nettype none
-        \\module zio_witness_tb;
-        \\    reg clk = 0;
-        \\    reg rst_n = 0;
-        \\    reg [@AW@-1:0] addr = 0;
-        \\    reg [6:0] stim [0:@CYCLES@-1];
-        \\    wire [3:0] gpio_in = stim[addr][3:0];
-        \\    wire scl = stim[addr][4];
-        \\    wire sda_drive = stim[addr][5];
-        \\    wire sda_oe = stim[addr][6];
-        \\    wire sda_in, sda_out, sda_out_oe;
-        \\    wire [3:0] gpio_out, gpio_oe;
-        \\    wire core_running, tx_full, tx_empty, underrun, op_fault, pc_oob;
-        \\    wire sda_bus = (sda_oe && !sda_drive) ? 1'b0 : (sda_out_oe && !sda_out) ? 1'b0 : 1'b1;
-        \\    assign sda_in = sda_bus;
-        \\    always #@HALF@ clk = ~clk;
-        \\    initial $readmemh("out/zio_asic_@TAG@_host.hex", stim);
-        \\    initial begin rst_n = 0; #50; rst_n = 1; end
-        \\    programmable_asic_i2c_42 u_dut (
-        \\        .clk(clk), .rst_n(rst_n), .i2c_scl(scl), .i2c_sda_in(sda_in), .gpio_in(gpio_in),
-        \\        .i2c_sda_out(sda_out), .i2c_sda_oe(sda_out_oe), .gpio_out(gpio_out), .gpio_oe(gpio_oe),
-        \\        .core_running(core_running), .tx_full(tx_full), .tx_empty(tx_empty),
-        \\        .underrun(underrun), .op_fault(op_fault), .pc_oob(pc_oob)
-        \\    );
-        \\    integer ef;
-        \\    initial ef = $fopen("out/zio_asic_@TAG@_edges.txt", "w");
-        \\    always @(posedge clk) begin
-        \\        $fwrite(ef, "%02h ", {rst_n, scl, sda_in, gpio_in});
-        \\        #0.001;
-        \\        $fwrite(ef, "%04h\n", {pc_oob, op_fault, underrun, tx_empty, tx_full, gpio_out, gpio_oe, core_running, sda_out, sda_out_oe});
-        \\    end
-        \\    always @(posedge clk) begin
-        \\        if (addr < @CYCLES@ - 1) addr <= addr + 1;
-        \\        else begin #1; $display("ZIO WITNESS HARNESS DONE"); $finish; end
-        \\    end
-        \\endmodule
-    ;
-    var text = try alloc.dupe(u8, template);
-    const pairs = [_][2][]const u8{
-        .{ "@HALF@", half_ns },
-        .{ "@TAG@", tag },
-        .{ "@CYCLES@", try std.fmt.allocPrint(alloc, "{d}", .{cycles}) },
-        .{ "@AW@", try std.fmt.allocPrint(alloc, "{d}", .{addr_w}) },
-    };
-    for (pairs) |pair| text = try std.mem.replaceOwned(u8, alloc, text, pair[0], pair[1]);
-    return text;
+    return trace_harness.source(alloc, .{
+        .name = "zio_witness_tb",
+        .dut = "programmable_asic_i2c_42",
+        .clock_half_ns = half_ns,
+        .reset_release_ns = 50,
+        .cycles = cycles,
+        .image_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_host.hex", .{tag}),
+        .trace_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_edges.txt", .{tag}),
+        .host_width = 7,
+        .gpio_width = 4,
+        .input_ports = &.{
+            .{ .name = "i2c_scl", .signal = "scl" },
+            .{ .name = "i2c_sda_in", .signal = "sda_in" },
+            .{ .name = "gpio_in", .width = 4 },
+        },
+        .output_ports = &.{
+            .{ .name = "i2c_sda_out" },
+            .{ .name = "i2c_sda_oe" },
+            .{ .name = "gpio_out", .width = 4 },
+            .{ .name = "gpio_oe", .width = 4 },
+            .{ .name = "core_running" },
+            .{ .name = "tx_full" },
+            .{ .name = "tx_empty" },
+            .{ .name = "underrun" },
+            .{ .name = "op_fault" },
+            .{ .name = "pc_oob" },
+        },
+        .trace_inputs = &.{
+            .{ .name = "rst_n" }, .{ .name = "scl" },
+            .{ .name = "sda_in" }, .{ .name = "gpio_in", .width = 4 },
+        },
+        .trace_outputs = &.{
+            .{ .name = "pc_oob" }, .{ .name = "op_fault" },
+            .{ .name = "underrun" }, .{ .name = "tx_empty" },
+            .{ .name = "tx_full" }, .{ .name = "gpio_out", .width = 4 },
+            .{ .name = "gpio_oe", .width = 4 }, .{ .name = "core_running" },
+            .{ .name = "i2c_sda_out" }, .{ .name = "i2c_sda_oe" },
+        },
+    });
 }
 
 // ============================================================================

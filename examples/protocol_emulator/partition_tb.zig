@@ -3,6 +3,7 @@ const zihdl = @import("zihdl");
 const netlist = zihdl.netlist;
 const verilog = zihdl.backend.verilog;
 const blocks = @import("protocol_blocks");
+const wrapper = @import("witness_wrapper");
 const programmable = @import("programmable_asic.zig");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
@@ -362,48 +363,6 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
 
 /// Simulation-only physical layer: clock, reset, waveform dump and verdict
 /// glue. Every drive and expectation is generated above.
-pub const TbHarness = netlist.BlackBox(.{
-    .name = "partition_tb_harness",
-    .inputs = struct {},
-    .outputs = struct {},
-    .foreign = netlist.ForeignSource.verilog(
-        \\`timescale 1ns / 1ps
-        \\module partition_tb_harness;
-        \\    reg clk = 0;
-        \\    reg rst_n = 0;
-        \\    always #4.167 clk = ~clk;
-        \\
-        \\    wire done;
-        \\    wire fail;
-        \\    wire [16:0] fail_cycle;
-        \\
-        \\    partition_tb u_tb (
-        \\        .clk(clk),
-        \\        .rst_n(rst_n),
-        \\        .done(done),
-        \\        .fail(fail),
-        \\        .fail_cycle(fail_cycle)
-        \\    );
-        \\
-        \\    initial begin
-        \\        $dumpfile("out/partition_tb.vcd");
-        \\        $dumpvars(0, partition_tb_harness);
-        \\        #100 rst_n = 1;
-        \\    end
-        \\
-        \\    always @(posedge clk) begin
-        \\        if (done) begin
-        \\            if (fail) begin
-        \\                $display("FAIL: partition mismatch at stimulus cycle %0d", fail_cycle);
-        \\                $fatal(1);
-        \\            end
-        \\            $display("SUCCESS: partition arbiter, skid, ring and status words verified");
-        \\            $finish;
-        \\        end
-        \\    end
-        \\endmodule
-    ),
-});
 
 const PartitionTb = struct {
     pub const name = "partition_tb";
@@ -544,8 +503,11 @@ const PartitionTb = struct {
 fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(PartitionTb);
-    _ = try design.ensureModule(TbHarness);
-    return verilog.emitDesign(alloc, &design, .{});
+    return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
+        .name = "partition_tb_harness", .module = "partition_tb", .half_ns = "4.167",
+        .fail_width = 17, .vcd = "out/partition_tb.vcd",
+        .pass_message = "SUCCESS: partition arbiter, skid, ring and status words verified",
+    });
 }
 
 pub fn main(init: std.process.Init) !void {

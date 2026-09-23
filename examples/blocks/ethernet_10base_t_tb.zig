@@ -12,6 +12,7 @@ const zihdl = @import("zihdl");
 const netlist = zihdl.netlist;
 const verilog = zihdl.backend.verilog;
 const metadata = zihdl.backend.metadata;
+const wrapper = @import("witness_wrapper");
 const eth = zihdl.blocks.ethernet_10base_t;
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
@@ -368,48 +369,6 @@ pub fn WavePlayer(comptime init_file: []const u8, comptime depth: usize) type {
 }
 
 /// Simulation-only physical layer: clock, reset, VCD dump and verdict glue.
-pub const TbHarness = netlist.BlackBox(.{
-    .name = "ethernet_10base_t_tb_harness",
-    .inputs = struct {},
-    .outputs = struct {},
-    .foreign = netlist.ForeignSource.verilog(
-        \\`timescale 1ns / 1ps
-        \\module ethernet_10base_t_tb_harness;
-        \\    reg clk = 0;
-        \\    reg rst_n = 0;
-        \\    always #8.333 clk = ~clk;
-        \\
-        \\    wire done;
-        \\    wire fail;
-        \\    wire [10:0] fail_cycle;
-        \\
-        \\    ethernet_10base_t_tb u_tb (
-        \\        .clk(clk),
-        \\        .rst_n(rst_n),
-        \\        .done(done),
-        \\        .fail(fail),
-        \\        .fail_cycle(fail_cycle)
-        \\    );
-        \\
-        \\    initial begin
-        \\        $dumpfile("out/ethernet_10base_t_tb.vcd");
-        \\        $dumpvars(0, ethernet_10base_t_tb_harness);
-        \\        #100 rst_n = 1;
-        \\    end
-        \\
-        \\    always @(posedge clk) begin
-        \\        if (done) begin
-        \\            if (fail) begin
-        \\                $display("FAIL: 10BASE-T waveform mismatch at stimulus cycle %0d", fail_cycle);
-        \\                $fatal(1);
-        \\            end
-        \\            $display("SUCCESS: Manchester preamble/SFD/data, NLP width/spacing and tx backpressure verified");
-        \\            $finish;
-        \\        end
-        \\    end
-        \\endmodule
-    ),
-});
 
 const EthTb = struct {
     pub const name = "ethernet_10base_t_tb";
@@ -461,8 +420,12 @@ const EthTb = struct {
 fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(EthTb);
-    _ = try design.ensureModule(TbHarness);
-    return verilog.emitDesign(alloc, &design, .{});
+    return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
+        .name = "ethernet_10base_t_tb_harness", .module = "ethernet_10base_t_tb",
+        .half_ns = "8.333", .fail_width = 11,
+        .vcd = "out/ethernet_10base_t_tb.vcd",
+        .pass_message = "SUCCESS: Manchester preamble/SFD/data, NLP width/spacing and tx backpressure verified",
+    });
 }
 
 fn emitMetadata(alloc: std.mem.Allocator) ![]u8 {

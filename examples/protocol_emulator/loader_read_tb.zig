@@ -3,6 +3,7 @@ const zihdl = @import("zihdl");
 const netlist = zihdl.netlist;
 const verilog = zihdl.backend.verilog;
 const blocks = @import("protocol_blocks");
+const wrapper = @import("witness_wrapper");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
@@ -169,62 +170,6 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(u64) {
 /// Simulation-only physical layer: clock, reset, open-drain combine, waveform
 /// dump and verdict glue. Everything protocol- or expectation-related is
 /// generated above.
-pub const TbHarness = netlist.BlackBox(.{
-    .name = "loader_read_tb_harness",
-    .inputs = struct {},
-    .outputs = struct {},
-    .foreign = netlist.ForeignSource.verilog(
-        \\`timescale 1ns / 1ps
-        \\module loader_read_tb_harness;
-        \\    reg clk = 0;
-        \\    reg rst_n = 0;
-        \\    always #4.167 clk = ~clk;
-        \\
-        \\    wire scl;
-        \\    wire sda_low;
-        \\    wire sda_oe;
-        \\    wire dut_sda_out;
-        \\    wire dut_sda_oe;
-        \\    wire fail;
-        \\    wire done;
-        \\    wire [13:0] fail_addr;
-        \\
-        \\    wire sda_bus = (sda_oe && sda_low) ? 1'b0 :
-        \\                   (dut_sda_oe && !dut_sda_out) ? 1'b0 : 1'b1;
-        \\
-        \\    loader_read_tb u_tb (
-        \\        .clk(clk),
-        \\        .rst_n(rst_n),
-        \\        .sda_in(sda_bus),
-        \\        .scl(scl),
-        \\        .sda_low(sda_low),
-        \\        .sda_oe(sda_oe),
-        \\        .dut_sda_out(dut_sda_out),
-        \\        .dut_sda_oe(dut_sda_oe),
-        \\        .fail(fail),
-        \\        .done(done),
-        \\        .fail_addr(fail_addr)
-        \\    );
-        \\
-        \\    initial begin
-        \\        $dumpfile("out/loader_read_tb.vcd");
-        \\        $dumpvars(0, loader_read_tb_harness);
-        \\        #100 rst_n = 1;
-        \\    end
-        \\
-        \\    always @(posedge clk) begin
-        \\        if (done) begin
-        \\            if (fail) begin
-        \\                $display("FAIL: loader read-path vector mismatch at stimulus cycle %0d", fail_addr);
-        \\                $fatal(1);
-        \\            end
-        \\            $display("SUCCESS: loader latches read words, honors NACK, commits on ACK");
-        \\            $finish;
-        \\        end
-        \\    end
-        \\endmodule
-    ),
-});
 
 const LoaderReadTb = struct {
     pub const name = "loader_read_tb";
@@ -313,8 +258,12 @@ const LoaderReadTb = struct {
 fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(LoaderReadTb);
-    _ = try design.ensureModule(TbHarness);
-    return verilog.emitDesign(alloc, &design, .{});
+    return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
+        .name = "loader_read_tb_harness", .module = "loader_read_tb", .half_ns = "4.167",
+        .fail_width = 14, .fail_port = "fail_addr", .open_drain = true,
+        .vcd = "out/loader_read_tb.vcd",
+        .pass_message = "SUCCESS: loader latches read words, honors NACK, commits on ACK",
+    });
 }
 
 pub fn main(init: std.process.Init) !void {

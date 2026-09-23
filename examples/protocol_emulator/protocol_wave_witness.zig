@@ -6,6 +6,7 @@ const core = @import("zio_timing_unit.zig");
 const usb = @import("usb_low_speed_microcode.zig");
 const spi = @import("spi_master_microcode.zig");
 const jtag = @import("jtag_microcode.zig");
+const protocol_harness = @import("protocol_harness");
 
 const Case = struct {
     tag: []const u8,
@@ -52,96 +53,19 @@ fn emitCase(alloc: std.mem.Allocator, io: std.Io, case: Case) !void {
     }
     try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "{s}_miso.hex", .{stem}), .data = try hexBytes(alloc, miso) });
     try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "{s}_rx_expected.hex", .{stem}), .data = try hexWords(alloc, rx_expected) });
-    const template =
-        \\`timescale 1ns / 1ps
-        \\`default_nettype none
-        \\module protocol_wave_tb;
-        \\  reg clk = 0, rst_n = 0, ctrl_start = 0, tx_we = 0;
-        \\  reg [31:0] tx_wdata = 0, inst = 0;
-        \\  reg [31:0] program [0:63], stream [0:@SLEN@-1], expected [0:@N@-1], expected_rx [0:@RX_ALLOC@-1];
-        \\  reg [7:0] miso [0:@RX_ALLOC@-1];
-        \\  wire [7:0] pc;
-        \\  wire [3:0] pin_out, pin_oe;
-        \\  wire running, fault, fetch, full, empty, underrun, rx_we;
-        \\  wire [31:0] rx_wdata;
-        \\  integer i, next_tx = 0, elapsed = 0, origin = 0, index = 0, rx_count = 0;
-        \\  reg saw_idle = 0, started = 0, finished_wave = 0;
-        \\  wire [3:0] pin_in = {miso[rx_count < @RX@ ? rx_count : 0][7 - dut.sample_cnt], 3'b000};
-        \\  always #@HALF@ clk = ~clk;
-        \\  zio_timing_unit_x16_f16 dut (
-        \\    .clk(clk), .rst_n(rst_n), .inst(inst), .ctrl_start(ctrl_start),
-        \\    .ctrl_stop(1'b0), .start_pc(8'b0), .pin_in(pin_in),
-        \\    .tx_we(tx_we), .tx_wdata(tx_wdata), .pc(pc), .pin_out(pin_out),
-        \\    .pin_oe(pin_oe), .core_running(running), .op_fault(fault),
-        \\    .fetch(fetch), .tx_full(full), .tx_empty(empty),
-        \\    .underrun(underrun), .rx_we(rx_we), .rx_wdata(rx_wdata));
-        \\  always @(posedge clk) inst <= program[pc];
-        \\  initial begin
-        \\    $readmemh("@STEM@_program.hex", program, 0, @PLEN@-1);
-        \\    $readmemh("@STEM@_stream.hex", stream, 0, @SLEN@-1);
-        \\    $readmemh("@STEM@_expected.hex", expected);
-        \\    $readmemh("@STEM@_miso.hex", miso);
-        \\    $readmemh("@STEM@_rx_expected.hex", expected_rx);
-        \\    repeat (5) @(negedge clk);
-        \\    rst_n = 1;
-        \\    for (i = 0; i < @PRELOAD@; i = i + 1) begin
-        \\      @(negedge clk); tx_we = 1; tx_wdata = stream[i];
-        \\    end
-        \\    next_tx = @PRELOAD@;
-        \\    @(negedge clk); tx_we = 0; ctrl_start = 1;
-        \\    @(negedge clk); ctrl_start = 0;
-        \\    forever begin
-        \\      @(negedge clk); tx_we = 0;
-        \\      if (next_tx < @SLEN@ && !full) begin
-        \\        tx_we = 1; tx_wdata = stream[next_tx]; next_tx = next_tx + 1;
-        \\      end
-        \\    end
-        \\  end
-        \\  always @(posedge clk) begin
-        \\    #0.001;
-        \\    elapsed = elapsed + 1;
-        \\    if (elapsed > @TIMEOUT@) $fatal(1, "@TAG@: timeout");
-        \\    if (rx_we) begin
-        \\      rx_count = rx_count + 1;
-        \\      if (rx_wdata !== expected_rx[rx_count-1]) $fatal(1, "@TAG@: RX word %h expected %h", rx_wdata, expected_rx[rx_count-1]);
-        \\    end
-        \\    if (started && (fault || underrun)) $fatal(1, "@TAG@: core fault or underrun");
-        \\    if (running && pin_oe == 4'h@DIRS@ && pin_out == 4'h@IDLE@) saw_idle = 1;
-        \\    if (!started && saw_idle && running && pin_oe == 4'h@DIRS@ && pin_out == expected[0][3:0]) begin
-        \\      started = 1; origin = elapsed;
-        \\    end
-        \\    if (started && !finished_wave) begin
-        \\      if (index + 1 < @N@ && elapsed - origin == expected[index+1][31:4]) index = index + 1;
-        \\      if (pin_out !== expected[index][3:0] || pin_oe !== 4'h@DIRS@)
-        \\        $fatal(1, "@TAG@: pin mismatch at cycle %0d symbol %0d: got %h oe %h, expected %h", elapsed-origin, index, pin_out, pin_oe, expected[index][3:0]);
-        \\      if (index == @N@ - 1) finished_wave = 1;
-        \\    end
-        \\    if (finished_wave && elapsed - origin > @END@ + 25) begin
-        \\      if (rx_count != @RX@) $fatal(1, "@TAG@: RX count %0d expected @RX@", rx_count);
-        \\      $display("PROTOCOL @TAG@ PASS: @N@ symbols, %0d RX words", rx_count);
-        \\      $finish;
-        \\    end
-        \\  end
-        \\endmodule
-    ;
-    var tb = try alloc.dupe(u8, template);
-    const pairs = [_][2][]const u8{
-        .{ "@STEM@", stem },
-        .{ "@TAG@", case.tag },
-        .{ "@PLEN@", try std.fmt.allocPrint(alloc, "{d}", .{case.program.len}) },
-        .{ "@SLEN@", try std.fmt.allocPrint(alloc, "{d}", .{case.stream.len}) },
-        .{ "@N@", try std.fmt.allocPrint(alloc, "{d}", .{case.symbols.len}) },
-        .{ "@DIRS@", try std.fmt.allocPrint(alloc, "{x}", .{case.dirs}) },
-        .{ "@IDLE@", try std.fmt.allocPrint(alloc, "{x}", .{case.idle}) },
-        .{ "@RX@", try std.fmt.allocPrint(alloc, "{d}", .{case.rx_words}) },
-        .{ "@RX_ALLOC@", try std.fmt.allocPrint(alloc, "{d}", .{rx_alloc}) },
-        .{ "@PRELOAD@", try std.fmt.allocPrint(alloc, "{d}", .{@min(case.stream.len, 16)}) },
-        .{ "@END@", try std.fmt.allocPrint(alloc, "{d}", .{case.offsets[case.offsets.len - 1]}) },
-        .{ "@TIMEOUT@", try std.fmt.allocPrint(alloc, "{d}", .{case.offsets[case.offsets.len - 1] + 500}) },
-        .{ "@HALF@", case.half_period_ns },
-    };
-    for (pairs) |pair| tb = try std.mem.replaceOwned(u8, alloc, tb, pair[0], pair[1]);
-    try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "{s}_tb.v", .{stem}), .data = tb });
+    const harness = try protocol_harness.source(alloc, .{
+        .stem = stem,
+        .tag = case.tag,
+        .program_words = case.program.len,
+        .stream_words = case.stream.len,
+        .symbols = case.symbols.len,
+        .rx_words = case.rx_words,
+        .output_enable = case.dirs,
+        .idle = case.idle,
+        .last_offset = case.offsets[case.offsets.len - 1],
+        .clock_half_ns = case.half_period_ns,
+    });
+    try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "{s}_tb.v", .{stem}), .data = harness });
 }
 
 fn emitUsbCase(alloc: std.mem.Allocator, io: std.Io, tag: []const u8, bytes: []const u8, clock: u64, half_period_ns: []const u8) !void {
