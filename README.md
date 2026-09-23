@@ -7,9 +7,15 @@ Bob Klosinski (fluxin). The package version is `0.0.0`; no stable API promise
 has been made yet.
 
 - **`src/`**: Pure hardware construction library (`netlist.zig` IR, `lib.zig` conveniences like FSMs, register helpers, `muxLookup` and structural temporal helpers, `blocks.zig` reusable blocks including the 10BASE-T serializer, `backend/` renderers and artifact writers). The IR is target-language neutral; HDL is only involved at export.
-- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the configurable I2C/SPI-programmable ZIO core with replay witnesses) and shared example design blocks in `blocks/`. A Z80 port is proposed in the plan; it has no implementation yet.
+- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the configurable I2C/SPI-programmable ZIO core with replay witnesses), shared design blocks in `blocks/`, and the [Jane Street ASIC puzzle](examples/jane_street/README.md) warmup and rule-level checker in `jane_street/`.
 
 See [PLAN.md](PLAN.md) for remaining work.
+
+`zig build jane-street` solves the 11×11 Two Stars puzzle from its region map,
+emits a serial key feeder and rule-level checker as Verilog, and replays all
+four output messages. `zig build verify-jane-street-puzzle` compares generated
+behavior with the puzzle's extracted Verilog and GDS simulator using the
+sibling checkouts; see the [example guide](examples/jane_street/README.md).
 See [docs/](docs/README.md) for [code structure](docs/code-structure.md),
 [migration guides](docs/migration.md), [competitor comparisons](docs/competitors.md)
 and the [API review](docs/api.md).

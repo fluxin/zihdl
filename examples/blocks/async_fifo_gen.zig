@@ -1,5 +1,5 @@
 //! Emits the dual-clock async FIFO RTL replayed by
-//! `examples/blocks/async_fifo_tb.v` with Icarus Verilog.
+//! `out/testbenches/async_fifo_tb.v` with Icarus Verilog.
 
 const std = @import("std");
 const zihdl = @import("zihdl");

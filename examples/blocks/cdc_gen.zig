@@ -1,5 +1,5 @@
 //! Emits the request/acknowledge bridge, bundled-data crossing, single-slot
-//! mailbox and FIFO-backed mailbox RTL replayed by `examples/blocks/cdc_tb.v`
+//! mailbox and FIFO-backed mailbox RTL replayed by `out/testbenches/cdc_tb.v`
 //! with Icarus Verilog.
 
 const std = @import("std");

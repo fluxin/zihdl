@@ -41,6 +41,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const testbench_sources_exe = b.addExecutable(.{
+        .name = "zihdl_testbench_sources",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/testbench_sources.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const testbench_sources_gen = b.addRunArtifact(testbench_sources_exe);
+    b.step("testbenches", "Generate legacy verification testbenches under out/testbenches")
+        .dependOn(&testbench_sources_gen.step);
+
     // Example-level design blocks (ISA, loaders, execution units); depends on
     // the library module and is shared by the reference projects.
     const blocks_mod = b.createModule(.{
@@ -179,7 +191,7 @@ pub fn build(b: *std.Build) void {
     async_fifo_lint.step.dependOn(&async_fifo_gen.step);
     const async_fifo_compile = b.addSystemCommand(&.{
         "iverilog",              "-g2001",                          "-o", "out/async_fifo_iv",
-        "out/async_fifo_16x8.v", "examples/blocks/async_fifo_tb.v",
+        "out/async_fifo_16x8.v", "out/testbenches/async_fifo_tb.v",
     });
     async_fifo_compile.step.dependOn(&async_fifo_gen.step);
     const async_fifo_run = b.addSystemCommand(&.{ "vvp", "out/async_fifo_iv" });
@@ -205,7 +217,7 @@ pub fn build(b: *std.Build) void {
     uart_lint.step.dependOn(&uart_gen.step);
     const uart_compile = b.addSystemCommand(&.{
         "iverilog",           "-g2001",                    "-o", "out/uart_iv",
-        "out/uart_witness.v", "examples/blocks/uart_tb.v",
+        "out/uart_witness.v", "out/testbenches/uart_tb.v",
     });
     uart_compile.step.dependOn(&uart_gen.step);
     const uart_run = b.addSystemCommand(&.{ "vvp", "out/uart_iv" });
@@ -231,7 +243,7 @@ pub fn build(b: *std.Build) void {
     spi_lint.step.dependOn(&spi_gen.step);
     const spi_compile = b.addSystemCommand(&.{
         "iverilog",          "-g2001",                   "-o", "out/spi_iv",
-        "out/spi_witness.v", "examples/blocks/spi_tb.v",
+        "out/spi_witness.v", "out/testbenches/spi_tb.v",
     });
     spi_compile.step.dependOn(&spi_gen.step);
     const spi_run = b.addSystemCommand(&.{ "vvp", "out/spi_iv" });
@@ -257,7 +269,7 @@ pub fn build(b: *std.Build) void {
     i2c_wit_lint.step.dependOn(&i2c_wit_gen.step);
     const i2c_wit_compile = b.addSystemCommand(&.{
         "iverilog",          "-g2001",                   "-o", "out/i2c_witness_iv",
-        "out/i2c_witness.v", "examples/blocks/i2c_tb.v",
+        "out/i2c_witness.v", "out/testbenches/i2c_tb.v",
     });
     i2c_wit_compile.step.dependOn(&i2c_wit_gen.step);
     const i2c_wit_run = b.addSystemCommand(&.{ "vvp", "out/i2c_witness_iv" });
@@ -284,7 +296,7 @@ pub fn build(b: *std.Build) void {
     cdc_lint.step.dependOn(&cdc_gen.step);
     const cdc_compile = b.addSystemCommand(&.{
         "iverilog",          "-g2001",                   "-o", "out/cdc_iv",
-        "out/cdc_witness.v", "examples/blocks/cdc_tb.v",
+        "out/cdc_witness.v", "out/testbenches/cdc_tb.v",
     });
     cdc_compile.step.dependOn(&cdc_gen.step);
     const cdc_run = b.addSystemCommand(&.{ "vvp", "out/cdc_iv" });
@@ -313,14 +325,14 @@ pub fn build(b: *std.Build) void {
     divmod_zero_lint.step.dependOn(&divmod_gen.step);
     const divmod_compile = b.addSystemCommand(&.{
         "iverilog",           "-g2001",                      "-o", "out/divmod/probe_iv",
-        "out/divmod/probe.v", "examples/blocks/divmod_tb.v",
+        "out/divmod/probe.v", "out/testbenches/divmod_tb.v",
     });
     divmod_compile.step.dependOn(&divmod_gen.step);
     const divmod_run = b.addSystemCommand(&.{ "vvp", "out/divmod/probe_iv" });
     divmod_run.step.dependOn(&divmod_compile.step);
     const divmod_zero_compile = b.addSystemCommand(&.{
         "iverilog",          "-g2001",                           "-o", "out/divmod/zero_iv",
-        "out/divmod/zero.v", "examples/blocks/divmod_zero_tb.v",
+        "out/divmod/zero.v", "out/testbenches/divmod_zero_tb.v",
     });
     divmod_zero_compile.step.dependOn(&divmod_gen.step);
     const divmod_zero_run = b.addSystemCommand(&.{ "vvp", "out/divmod/zero_iv" });
@@ -402,12 +414,12 @@ pub fn build(b: *std.Build) void {
 
     // Transitional behavioral simulation with Icarus Verilog. oasic's own
     // simulator replaces this once its Verilog front end lands.
-    const i2c_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_iv", "out/asic_core.v", "examples/protocol_emulator/asic_i2c_tb.v" });
+    const i2c_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_iv", "out/asic_core.v", "out/testbenches/asic_i2c_tb.v" });
     i2c_compile.step.dependOn(&run_cmd.step);
     const i2c_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_iv" });
     i2c_run.step.dependOn(&i2c_compile.step);
 
-    const rx_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_iv", "out/asic_core.v", "examples/protocol_emulator/asic_rx_tb.v" });
+    const rx_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_iv", "out/asic_core.v", "out/testbenches/asic_rx_tb.v" });
     rx_compile.step.dependOn(&run_cmd.step);
     const rx_run = b.addSystemCommand(&.{ "vvp", "out/asic_rx_iv" });
     rx_run.step.dependOn(&rx_compile.step);
@@ -416,16 +428,16 @@ pub fn build(b: *std.Build) void {
     // two-macro composition emitted alongside the default single-macro build.
     const split_lint_cmd = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/asic_core_split.v" });
     split_lint_cmd.step.dependOn(&run_cmd.step);
-    const i2c_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_split_iv", "out/asic_core_split.v", "examples/protocol_emulator/asic_i2c_tb.v" });
+    const i2c_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_i2c_split_iv", "out/asic_core_split.v", "out/testbenches/asic_i2c_tb.v" });
     i2c_split_compile.step.dependOn(&run_cmd.step);
     const i2c_split_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_split_iv" });
     i2c_split_run.step.dependOn(&i2c_split_compile.step);
-    const rx_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_split_iv", "out/asic_core_split.v", "examples/protocol_emulator/asic_rx_tb.v" });
+    const rx_split_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-o", "out/asic_rx_split_iv", "out/asic_core_split.v", "out/testbenches/asic_rx_tb.v" });
     rx_split_compile.step.dependOn(&run_cmd.step);
     const rx_split_run = b.addSystemCommand(&.{ "vvp", "out/asic_rx_split_iv" });
     rx_split_run.step.dependOn(&rx_split_compile.step);
 
-    const sv_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-o", "out/asic_i2c_sv", "out/asic_core.sv", "examples/protocol_emulator/asic_i2c_tb.v" });
+    const sv_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-o", "out/asic_i2c_sv", "out/asic_core.sv", "out/testbenches/asic_i2c_tb.v" });
     sv_compile.step.dependOn(&sv_cmd.step);
     const sv_run = b.addSystemCommand(&.{ "vvp", "out/asic_i2c_sv" });
     sv_run.step.dependOn(&sv_compile.step);
@@ -545,7 +557,7 @@ pub fn build(b: *std.Build) void {
     const timer_memory_gen = b.addRunArtifact(timer_memory_exe);
     const timer_memory_step = b.step("timer-memory", "Emit timer and ROM/RAM wrapper RTL");
     timer_memory_step.dependOn(&timer_memory_gen.step);
-    const timer_memory_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "timer_memory_tb", "-o", "out/timer_memory_iv", "out/timer_memory_witness.v", "examples/blocks/timer_memory_tb.v" });
+    const timer_memory_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "timer_memory_tb", "-o", "out/timer_memory_iv", "out/timer_memory_witness.v", "out/testbenches/timer_memory_tb.v" });
     timer_memory_compile.step.dependOn(&timer_memory_gen.step);
     const timer_memory_run = b.addSystemCommand(&.{ "vvp", "out/timer_memory_iv" });
     timer_memory_run.step.dependOn(&timer_memory_compile.step);
@@ -564,7 +576,7 @@ pub fn build(b: *std.Build) void {
     const arbiter_gen = b.addRunArtifact(arbiter_exe);
     const arbiter_step = b.step("arbiter", "Emit round-robin arbiter and crossbar RTL");
     arbiter_step.dependOn(&arbiter_gen.step);
-    const arbiter_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "arbiter_tb", "-o", "out/arbiter_iv", "out/arbiter_witness.v", "examples/blocks/arbiter_tb.v" });
+    const arbiter_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "arbiter_tb", "-o", "out/arbiter_iv", "out/arbiter_witness.v", "out/testbenches/arbiter_tb.v" });
     arbiter_compile.step.dependOn(&arbiter_gen.step);
     const arbiter_run = b.addSystemCommand(&.{ "vvp", "out/arbiter_iv" });
     arbiter_run.step.dependOn(&arbiter_compile.step);
@@ -583,12 +595,102 @@ pub fn build(b: *std.Build) void {
     const axi_gen = b.addRunArtifact(axi_exe);
     const axi_step = b.step("axi4-lite", "Emit AXI4-Lite register slave RTL");
     axi_step.dependOn(&axi_gen.step);
-    const axi_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "axi4_lite_tb", "-o", "out/axi4_lite_iv", "out/axi4_lite_witness.v", "examples/blocks/axi4_lite_tb.v" });
+    const axi_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "axi4_lite_tb", "-o", "out/axi4_lite_iv", "out/axi4_lite_witness.v", "out/testbenches/axi4_lite_tb.v" });
     axi_compile.step.dependOn(&axi_gen.step);
     const axi_run = b.addSystemCommand(&.{ "vvp", "out/axi4_lite_iv" });
     axi_run.step.dependOn(&axi_compile.step);
     axi_step.dependOn(&axi_run.step);
     verify_step.dependOn(&axi_run.step);
+
+    const jane_warmup_exe = b.addExecutable(.{
+        .name = "zihdl_jane_street_warmup",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jane_street/warmup.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const jane_warmup_gen = b.addRunArtifact(jane_warmup_exe);
+    const jane_warmup_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "out/jane_street_warmup.v" });
+    jane_warmup_lint.step.dependOn(&jane_warmup_gen.step);
+    const jane_warmup_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-s", "warmup_tb", "-o", "out/jane_street_warmup_iv", "out/jane_street_warmup.v", "out/testbenches/warmup_tb.v" });
+    jane_warmup_compile.step.dependOn(&jane_warmup_gen.step);
+    const jane_warmup_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_warmup_iv" });
+    jane_warmup_run.step.dependOn(&jane_warmup_compile.step);
+
+    const jane_solution_exe = b.addExecutable(.{
+        .name = "zihdl_jane_street_solution",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jane_street/puzzle_solution.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const jane_solution_gen = b.addRunArtifact(jane_solution_exe);
+    const jane_driver_exe = b.addExecutable(.{
+        .name = "zihdl_jane_street_key_driver",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jane_street/key_driver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const jane_driver_gen = b.addRunArtifact(jane_driver_exe);
+    const jane_driver_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "out/jane_street_key_driver.v" });
+    jane_driver_lint.step.dependOn(&jane_driver_gen.step);
+    const jane_driver_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "key_driver_tb", "-o", "out/jane_street_key_driver_iv", "out/jane_street_key_driver.v", "out/testbenches/key_driver_tb.v" });
+    jane_driver_compile.step.dependOn(&jane_driver_gen.step);
+    const jane_driver_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_key_driver_iv" });
+    jane_driver_run.step.dependOn(&jane_driver_compile.step);
+    jane_driver_run.step.dependOn(&jane_solution_gen.step);
+    const jane_checker_exe = b.addExecutable(.{
+        .name = "zihdl_jane_street_star_battle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/jane_street/star_battle.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const jane_checker_gen = b.addRunArtifact(jane_checker_exe);
+    const jane_checker_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "out/jane_street_star_battle.v" });
+    jane_checker_lint.step.dependOn(&jane_checker_gen.step);
+    const jane_checker_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-s", "star_battle_tb", "-o", "out/jane_street_star_battle_iv", "out/jane_street_star_battle.v", "out/testbenches/star_battle_tb.v" });
+    jane_checker_compile.step.dependOn(&jane_checker_gen.step);
+    const jane_checker_run = b.addSystemCommand(&.{ "vvp", "out/jane_street_star_battle_iv" });
+    jane_checker_run.step.dependOn(&jane_checker_compile.step);
+    jane_checker_run.step.dependOn(&jane_solution_gen.step);
+    const jane_step = b.step("jane-street", "Solve the puzzle; emit and replay the warmup, key driver and rule-level checker RTL");
+    jane_step.dependOn(&jane_solution_gen.step);
+    jane_step.dependOn(&jane_driver_lint.step);
+    jane_step.dependOn(&jane_driver_run.step);
+    jane_step.dependOn(&jane_checker_lint.step);
+    jane_step.dependOn(&jane_checker_run.step);
+    jane_step.dependOn(&jane_warmup_lint.step);
+    jane_step.dependOn(&jane_warmup_run.step);
+    verify_step.dependOn(jane_step);
+
+    const puzzle_dir = b.option([]const u8, "puzzle-dir", "Path to the Jane Street ASIC puzzle source checkout") orelse "../asic-puzzle-2026";
+    const puzzle_rtl = b.option([]const u8, "puzzle-rtl", "Path to the extracted puzzle Verilog for the Jane Street miter") orelse "../oasic/out/workbench-tests/golden/files/puzzle_rtl.v";
+    const jane_puzzle_check = b.addSystemCommand(&.{ "bash", "examples/jane_street/check_puzzle.sh", puzzle_dir, puzzle_rtl });
+    jane_puzzle_check.step.dependOn(jane_step);
+    jane_puzzle_check.step.dependOn(&jane_solution_gen.step);
+    jane_puzzle_check.step.dependOn(&jane_warmup_gen.step);
+    jane_puzzle_check.step.dependOn(&jane_checker_gen.step);
+    jane_puzzle_check.step.dependOn(&testbench_sources_gen.step);
+    b.step("verify-jane-street-puzzle", "Replay the generated key against the sibling GDS simulator and solution VCD")
+        .dependOn(&jane_puzzle_check.step);
+
+    for ([_]*std.Build.Step{
+        &async_fifo_compile.step,   &uart_compile.step,        &spi_compile.step,
+        &i2c_wit_compile.step,      &cdc_compile.step,         &divmod_compile.step,
+        &divmod_zero_compile.step,  &i2c_compile.step,         &rx_compile.step,
+        &i2c_split_compile.step,    &rx_split_compile.step,    &sv_compile.step,
+        &timer_memory_compile.step, &arbiter_compile.step,     &axi_compile.step,
+        &jane_warmup_compile.step,  &jane_driver_compile.step, &jane_checker_compile.step,
+    }) |compile_step| compile_step.dependOn(&testbench_sources_gen.step);
 
     // Consumer replay is an explicit cross-repository gate. It uses the
     // generated metadata as well as RTL, so schema drift fails the build.

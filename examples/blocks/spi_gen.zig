@@ -1,4 +1,4 @@
-//! Emits the SPI target programmer RTL replayed by `examples/blocks/spi_tb.v`
+//! Emits the SPI target programmer RTL replayed by `out/testbenches/spi_tb.v`
 //! with Icarus Verilog.
 
 const std = @import("std");

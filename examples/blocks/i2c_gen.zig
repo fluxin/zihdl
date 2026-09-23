@@ -1,4 +1,4 @@
-//! Emits the I2C target loader RTL replayed by `examples/blocks/i2c_tb.v`
+//! Emits the I2C target loader RTL replayed by `out/testbenches/i2c_tb.v`
 //! with Icarus Verilog.
 
 const std = @import("std");

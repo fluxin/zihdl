@@ -1,4 +1,4 @@
-//! Emits the single-clock UART RTL replayed by `examples/blocks/uart_tb.v`
+//! Emits the single-clock UART RTL replayed by `out/testbenches/uart_tb.v`
 //! with Icarus Verilog.
 
 const std = @import("std");

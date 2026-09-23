@@ -15,6 +15,7 @@ validation.
 examples/            application designs + contract fixture (top of the tree)
    protocol_emulator/   reference ASIC, ISA, generated testbenches
    blocks/              shared example blocks
+   jane_street/         warmup, Star Battle solver/checker and RTL witnesses
    contract/            timing-intent artifact fixture runner
 backend/             artifact writers and HDL targets
    render.zig           shared hoisting pre-pass + expression/statement text
