@@ -13,7 +13,7 @@ const SymbolKind = ir.SymbolKind;
 
 /// Backend emission options.
 pub const Options = struct {
-    /// Wrap immediate assertions in `` `ifdef JS_ASIC_ASSERT ``.
+    /// Wrap immediate assertions in `` `ifdef ZIHDL_ASSERT ``.
     assertions: bool = true,
     /// `` `timescale `` emitted ahead of each module; null suppresses it.
     timescale: ?render.Timescale = .{},
@@ -178,7 +178,7 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
 
     try render.appendStr(&out, allocator, "// ============================================================================\n");
     try render.appendFmt(&out, allocator, "// Hardware Module: {s}\n", .{module.name});
-    try render.appendStr(&out, allocator, "// Synthesized from typed Zig AST (js_asic, SystemVerilog target)\n");
+    try render.appendStr(&out, allocator, "// Synthesized from typed Zig AST (zihdl, SystemVerilog target)\n");
     try render.appendStr(&out, allocator, "// ============================================================================\n");
     if (options.timescale) |ts| {
         try render.appendFmt(&out, allocator, "`timescale {s} / {s}\n", .{ ts.unit, ts.precision });

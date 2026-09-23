@@ -1,4 +1,4 @@
-// Behavioral replay for the js_asic UART witness: TX is looped back into RX on
+// Behavioral replay for the zihdl UART witness: TX is looped back into RX on
 // a 1 MHz clock at 100 kBaud, and four bytes (0x55, 0xA5, 0x00, 0xFF) must be
 // transmitted, framed, sampled and returned unchanged. The test also checks
 // that the start bit pulls TX low after a load and that no spurious accept

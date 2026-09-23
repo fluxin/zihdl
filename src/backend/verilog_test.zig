@@ -941,7 +941,7 @@ test "assertions emit guarded SVA with messages" {
     _ = try top.finish();
 
     const v = try verilog.emitDesign(alloc, &design, .{});
-    try std.testing.expect(std.mem.indexOf(u8, v, "`ifdef JS_ASIC_ASSERT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "`ifdef ZIHDL_ASSERT") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assert ((a == b)) else $error(\"a must equal b\");") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "cover ((&a));") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "`endif") != null);

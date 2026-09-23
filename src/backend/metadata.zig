@@ -8,7 +8,7 @@ const ir = @import("../netlist.zig");
 const render = @import("render.zig");
 const provenance = @import("provenance.zig");
 
-pub const schema = "js_asic.design/1";
+pub const schema = "zihdl.design/1";
 
 pub const Options = struct {
     whitespace: enum { minified, indent_2, indent_4 } = .indent_2,
@@ -374,7 +374,7 @@ fn isPort(kind: ir.SymbolKind) bool {
 }
 
 // ============================================================================
-// Timing intent (js_asic.timing_intent/1 and /2)
+// Timing intent (zihdl.timing_intent/1 and /2)
 // ============================================================================
 //
 // Optional, versioned export of authored timing intent. Module rows are
@@ -445,8 +445,8 @@ fn isPort(kind: ir.SymbolKind) bool {
 // data-ready only: the live consumer does not act on distinct per-bit values
 // yet, and a bit without an override keeps the whole-port declaration.
 
-pub const timing_schema = "js_asic.timing_intent/1";
-pub const timing_schema_v2 = "js_asic.timing_intent/2";
+pub const timing_schema = "zihdl.timing_intent/1";
+pub const timing_schema_v2 = "zihdl.timing_intent/2";
 
 fn hasTimingIntent(design: *const ir.Design, version: u32) bool {
     for (design.modules.items) |module| {

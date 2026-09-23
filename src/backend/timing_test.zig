@@ -140,7 +140,7 @@ test "timing intent v2 exports slew windows, explicit thresholds and output load
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
     const timing = root.object.get("timing_intent").?;
-    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.timing_intent/2", timing.object.get("schema").?.string);
 
     const data = findInput(timing, "data").?;
     const slew = data.object.get("slew").?;
@@ -181,7 +181,7 @@ test "timing intent v1 stays byte-stable and omits v2-only fields" {
     try std.testing.expect(std.mem.indexOf(u8, dflt, "\"slew\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, dflt, "\"outputs\"") == null);
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, dflt, .{});
-    try std.testing.expectEqualStrings("js_asic.timing_intent/1", root.object.get("timing_intent").?.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.timing_intent/1", root.object.get("timing_intent").?.object.get("schema").?.string);
 }
 
 test "timing intent rejects unsupported schema versions" {
@@ -234,7 +234,7 @@ test "timing intent exports classification, synchronizer and reset policy" {
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
     const timing = root.object.get("timing_intent").?;
-    try std.testing.expectEqualStrings("js_asic.timing_intent/1", timing.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.timing_intent/1", timing.object.get("schema").?.string);
 
     const module = timing.object.get("modules").?.array.items[0];
     try std.testing.expectEqualStrings("timing_sink", module.object.get("name").?.string);
@@ -712,7 +712,7 @@ test "timing intent v2 exports required windows, clock relationship and release 
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
     const timing = root.object.get("timing_intent").?;
-    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.timing_intent/2", timing.object.get("schema").?.string);
     const clock = timing.object.get("modules").?.array.items[0].object.get("clocks").?.array.items[0];
 
     const reset = clock.object.get("reset").?;
@@ -1292,7 +1292,7 @@ test "timing intent v2 exports per-bit slew and load additively" {
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
     const timing = root.object.get("timing_intent").?;
-    try std.testing.expectEqualStrings("js_asic.timing_intent/2", timing.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.timing_intent/2", timing.object.get("schema").?.string);
 
     const input = findInput(timing, "data").?;
     try std.testing.expect(input.object.get("slew") != null and input.object.get("slew").? != .null);

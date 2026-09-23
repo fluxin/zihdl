@@ -1,4 +1,4 @@
-// Behavioral replay for the js_asic dual-clock async FIFO (async_fifo_16x8):
+// Behavioral replay for the zihdl dual-clock async FIFO (async_fifo_16x8):
 // fill to full, prove overflow is dropped, drain in order, then wrap the
 // pointers and drain a second pattern. Clocks are asynchronous (10 ns and
 // 6.2 ns periods) to exercise the gray-code pointer synchronizers.

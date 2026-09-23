@@ -2,7 +2,7 @@
 //! Directly drives the sole execution core; integrated SRAM/I2C replay lives
 //! in oasic/scripts/protocol_replay.sh. No second RTL execution implementation.
 const std = @import("std");
-const js = @import("js_asic");
+const zihdl = @import("zihdl");
 const core = @import("zio_timing_unit.zig");
 const isa = @import("isa.zig");
 const Field = struct { name: []const u8, width: usize };
@@ -43,7 +43,7 @@ const Row = struct {
     rx_we: u1 = 0,
     rx_word: u32 = 0,
 };
-fn row(w: *js.backend.stimulus.Writer, v: Row) !void {
+fn row(w: *zihdl.backend.stimulus.Writer, v: Row) !void {
     const drive = @as(u128, v.reset) | (@as(u128, v.inst) << 1) |
         (@as(u128, v.start) << 33) | (@as(u128, v.stop) << 34) |
         (@as(u128, v.pins) << 43) | (@as(u128, v.tx_we) << 47) | (@as(u128, v.tx_word) << 48);
@@ -61,7 +61,7 @@ fn row(w: *js.backend.stimulus.Writer, v: Row) !void {
     try w.push();
 }
 fn schedule(a: std.mem.Allocator) ![]u8 {
-    var w = try js.backend.stimulus.Writer.init(a, .{
+    var w = try zihdl.backend.stimulus.Writer.init(a, .{
         .top = core.ZioTimingUnitBlock.name,
         .clock = "clk",
         .period_ps = 8333,
@@ -128,11 +128,11 @@ pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var design = js.netlist.Design.init(a);
+    var design = zihdl.netlist.Design.init(a);
     _ = try design.elaborate(core.ZioTimingUnitBlock);
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(init.io, "out");
-    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.v", .data = try js.backend.verilog.emitDesign(a, &design, .{}) });
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.v", .data = try zihdl.backend.verilog.emitDesign(a, &design, .{}) });
     try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.jsonl", .data = try schedule(a) });
 }
 test "capture witness includes independent known words and instruction gates" {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const netlist = @import("js_asic").netlist;
+const netlist = @import("zihdl").netlist;
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 

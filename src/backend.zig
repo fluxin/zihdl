@@ -19,7 +19,7 @@ pub const Target = enum { verilog2001, systemverilog };
 /// Target-independent emission options; per-language options are derived.
 pub const Options = struct {
     target: Target = .verilog2001,
-    /// Wrap immediate assertions in `` `ifdef JS_ASIC_ASSERT ``.
+    /// Wrap immediate assertions in `` `ifdef ZIHDL_ASSERT ``.
     assertions: bool = true,
     /// `` `timescale `` emitted ahead of each module; null suppresses it.
     timescale: ?render.Timescale = .{},

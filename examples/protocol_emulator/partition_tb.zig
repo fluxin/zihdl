@@ -1,7 +1,7 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 const blocks = @import("protocol_blocks");
 const programmable = @import("programmable_asic.zig");
 const Signal = netlist.Signal;
@@ -498,7 +498,7 @@ const PartitionTb = struct {
         }, .{});
 
         // The physical macro lives at the top level, as in the real design.
-        _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_sram", .{
+        _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_sram", .{
             .clk0 = ins.clk,
             .csb0 = sram_csb0,
             .web0 = sram_web0,

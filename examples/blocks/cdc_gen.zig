@@ -3,9 +3,9 @@
 //! with Icarus Verilog.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -15,10 +15,10 @@ pub fn main(init: std.process.Init) !void {
     const alloc = arena.allocator();
 
     var design = netlist.Design.init(alloc);
-    try design.ensureModule(js_asic.blocks.ReqAckBridgeBlock(8));
-    _ = try design.elaborate(js_asic.blocks.BundledDataBlock(8));
-    _ = try design.elaborate(js_asic.blocks.MailboxBlock(8));
-    _ = try design.elaborate(js_asic.blocks.FifoMailboxBlock(4, 8));
+    try design.ensureModule(zihdl.blocks.ReqAckBridgeBlock(8));
+    _ = try design.elaborate(zihdl.blocks.BundledDataBlock(8));
+    _ = try design.elaborate(zihdl.blocks.MailboxBlock(8));
+    _ = try design.elaborate(zihdl.blocks.FifoMailboxBlock(4, 8));
     const rtl = try verilog.emitDesign(alloc, &design, .{});
 
     const cwd = std.Io.Dir.cwd();

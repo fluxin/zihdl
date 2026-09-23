@@ -93,7 +93,7 @@ declaration, so their outputs stay signed); `Stream(W)` and
 `ReqAckBridgeBlock`, `BundledDataBlock`, `MailboxBlock`, `FifoMailboxBlock`,
 `ResetSyncBlock`, `UartBlock`, `SpiSlaveProgrammerBlock`,
 `I2cSlaveLoaderBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
-`CounterBlock`.
+`CounterBlock`, `Ethernet10BaseTBlock`.
 
 ### cdc
 
@@ -145,7 +145,7 @@ downward. Descriptive only: the lint never changes RTL.
    rejects rows that resolve to the same module signal through silent levels or
    sibling branches, instead of reaching the consumer.
 4. **Metadata is additive and versioned.** Provenance, timing intent and enum
-   groups never change RTL bytes. Products emit `js_asic.timing_intent/1`;
+   groups never change RTL bytes. Products emit `zihdl.timing_intent/1`;
    `/2` (slew/load/required, clock relationships, reset-release topology) is
    opt-in and adds fields without changing `/1` or existing `/2` field bytes.
    Declaration-level signedness adds `is_signed` to port/signal rows only when
@@ -158,8 +158,8 @@ downward. Descriptive only: the lint never changes RTL.
 For the scope the repository actually exercises — the protocol emulator, the
 elemental blocks and the contract fixture — the authoring API is closed: every
 construct those designs use has a typed path, validation, and at least one
-artifact-level test. The remaining holes are known and mostly tracked in
-`PLAN.md`; they matter if js_asic is to become a general-purpose generator
+artifact-level test. The remaining holes are listed below; prioritized work is
+in `PLAN.md`. They matter if zihdl is to become a general-purpose generator
 rather than the authoring half of this specific project.
 
 ### Gaps by category
@@ -260,35 +260,28 @@ rather than the authoring half of this specific project.
   `SpiSlaveProgrammerBlock` (write/start/stop command decode, host write pulse)
   and `I2cSlaveLoaderBlock` (parameterized device address, control-register
   pokes, host write-ack and read-valid handshakes) landed; AXI4-Lite,
-  arbiter/crossbar, timer and ROM/RAM wrappers remain (Phase 3).
+  arbiter/crossbar, timer and ROM/RAM wrappers remain.
 
 **Backends and packaging**
 - Verilog-2001 and SystemVerilog only: no VHDL, no structural netlist/cell
   export, no GDS (physical lives in `oasic`), no C/RTL co-simulation model.
 - No standalone CLI; each design is its own Zig executable.
-- Package metadata ships only `build.zig`, `build.zig.zon` and `src`
-  (`build.zig.zon.paths`), the version is `0.0.0`, and there is no `LICENSE`
-  file; zip package consumers therefore get no docs or license.
+- Package metadata ships the source, examples, documentation and MIT license
+  (`build.zig.zon.paths`). The version remains `0.0.0` while the API is
+  pre-release.
 - Zig 0.16.0 is pinned; the project tracks Zig's `std.Io` churn closely.
 
-### Suggested next steps, in order
-
-1. **Process**: add a `LICENSE`, decide whether docs ship in the package
-   `paths`, and tag versions when consumers pin hashes.
-2. **IP library**: the authoring API has no open items; `blocks.UartBlock`,
-   `blocks.SpiSlaveProgrammerBlock` and `blocks.I2cSlaveLoaderBlock` landed with
-   the `zig build uart`/`spi`/`i2c` witnesses, and the `PLAN.md` Phase 3 block
-   library (AXI4-Lite, arbiter/round-robin, crossbar, timers, ROM/RAM wrappers)
-   is next. Consumer-side work (per-bit constraint resolution, formal crossing
-   proofs) belongs to `oasic`.
+The prioritized remaining work is in [PLAN.md](../PLAN.md).
 
 ## Stability policy
 
 - `netlist`, `lib`, `blocks` and `backend` are one crate with no semver
   promise yet (version `0.0.0`). Internal churn is expected.
 - The artifact schemas carry their own version strings and are the actual
-  compatibility contract: `js_asic.design/1`, `js_asic.timing_intent/1` and
-  `js_asic.provenance/1` are byte-stable, and `/2` timing intent is opt-in.
+  compatibility contract: `zihdl.design/1`, `zihdl.timing_intent/1` and
+  `zihdl.provenance/1` are byte-stable, and `/2` timing intent is opt-in.
+  The namespace rename from the former package name is a breaking artifact
+  change for consumers that match the schema string.
   Optional fields added under `/2` are ignored by consumers that do not read
   them, so `/3` is reserved for incompatible changes.
 - `oasic.stimulus/1` is the fixture/consumer stimulus contract; it lives in

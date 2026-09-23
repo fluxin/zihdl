@@ -11,9 +11,9 @@
 //! Unsupported encodings fault before any instruction side effect.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 const Signal = netlist.Signal;
 const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;

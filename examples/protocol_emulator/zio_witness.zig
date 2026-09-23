@@ -15,15 +15,14 @@
 //! copied from the RTL.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
-const metadata = js_asic.backend.metadata;
-const provenance = js_asic.backend.provenance;
-const sdc = js_asic.backend.sdc;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
+const metadata = zihdl.backend.metadata;
+const provenance = zihdl.backend.provenance;
+const sdc = zihdl.backend.sdc;
 const eth_mc = @import("eth_microcode.zig");
 const asic = @import("programmable_asic.zig");
-const ethernet = @import("ethernet_10base_t.zig");
 const isa = @import("isa.zig");
 
 pub const default_payload = [_]u8{ 0x00, 0xFF, 0xAA, 0x55, 0x01, 0x80, 0xA5, 0x5A };

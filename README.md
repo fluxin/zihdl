@@ -1,14 +1,26 @@
-# js_asic
+# zihdl
 
-A pure Zig (0.16.0) hardware construction library and synthesizable ASIC generator.
+A pure Zig (0.16.0) hardware construction library and RTL generator.
+The Zig package, import module and generated executable are all named `zihdl`.
+The project is available under the [MIT license](LICENSE), copyright 2026
+Bob Klosinski (fluxin). The package version is `0.0.0`; no stable API promise
+has been made yet.
 
-- **`src/`**: Pure hardware construction library (`netlist.zig` IR, `lib.zig` conveniences like FSMs, register helpers, `muxLookup` and structural temporal helpers, `blocks.zig` elemental blocks, `backend/` renderers and artifact writers). The IR is target-language neutral; HDL is only involved at export.
-- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the configurable I2C/SPI-programmable ZIO core with native replay witnesses), shared example design blocks in `blocks/`, and the `z80/` scaffold for the FOSSi Z80 port (Track D).
+- **`src/`**: Pure hardware construction library (`netlist.zig` IR, `lib.zig` conveniences like FSMs, register helpers, `muxLookup` and structural temporal helpers, `blocks.zig` reusable blocks including the 10BASE-T serializer, `backend/` renderers and artifact writers). The IR is target-language neutral; HDL is only involved at export.
+- **`examples/`**: Reference projects built on the library: `protocol_emulator/` (the configurable I2C/SPI-programmable ZIO core with replay witnesses) and shared example design blocks in `blocks/`. A Z80 port is proposed in the plan; it has no implementation yet.
 
-See [PLAN.md](PLAN.md) for full architecture details, roadmap, and next phases.
+See [PLAN.md](PLAN.md) for remaining work.
 See [docs/](docs/README.md) for [code structure](docs/code-structure.md),
 [migration guides](docs/migration.md), [competitor comparisons](docs/competitors.md)
 and the [API review](docs/api.md).
+
+The protocol emulator has host-assembled 10BASE-T, USB low-speed packet,
+SPI master (all four modes) and JTAG TAP microcode. The USB caller supplies
+payload and CRC bytes; SPI and JTAG capture four-bit pin samples with MISO/TDO
+in bit 3. Programs preload at most 16 TX FIFO words. Run `zig build protocols`
+for the direct ZIO RTL pin and capture witnesses; `zig build verify` includes
+them. The standalone 10BASE-T RTL serializer is a reusable library block under
+`src/blocks/`, with its witness under `examples/blocks/`.
 
 ## Artifacts
 
@@ -59,7 +71,7 @@ core expectations come from independent Zig models. Passing digital replay at a
 clock rate does not establish routed timing closure.
 
 When provenance is enabled, `design.json` also carries a `provenance` section
-(`js_asic.provenance/1`): per-module operation rows with deterministic integer
+(`zihdl.provenance/1`): per-module operation rows with deterministic integer
 ids, authored functional groups with explicit membership, and a source map of
 zero-based half-open byte ranges into the exact emitted RTL, anchored by the
 artifact SHA-256. Expressions folded during elaboration are reported as
@@ -67,7 +79,7 @@ artifact SHA-256. Expressions folded during elaboration are reported as
 identical with or without it. Schema: `src/backend/provenance.zig`.
 
 Declared input timing intent adds an optional `timing_intent` section
-(`js_asic.timing_intent/1`): per-input classification (synchronous,
+(`zihdl.timing_intent/1`): per-input classification (synchronous,
 asynchronous, unknown) and destination clock/domain, synchronizer stage
 identities as `(module, register, bit)`, reset polarity and assertion/release
 policy, and synchronous arrival windows with explicit units only where a real
@@ -90,25 +102,24 @@ hierarchical binding tests.
 
 ### Timing intent v2 (opt-in)
 
-`Options.timing_intent_version = 2` emits `js_asic.timing_intent/2`: the v1
+`Options.timing_intent_version = 2` emits `zihdl.timing_intent/2`: the v1
 section plus input slew, output load/required declarations and clock
-relationship/reset-release topology. The default stays v1 and v1 output is
-byte-for-byte unchanged, so products and existing consumers never see a new
-schema unless a runner asks for one. The fixture passes v2; product runners
-stay v1. New fields are additive under `/2` because consumers skip unknown
+relationship/reset-release topology. The default stays v1; requesting v2 does
+not change the v1 projection. The fixture passes v2; product runners stay v1.
+New fields are additive under `/2` because consumers skip unknown
 JSON fields and the version gate promises capabilities, not byte layout; a
-consumer that does not read a field keeps it unknown. The live `oasic`
-consumer reads and binds v2 (required windows, release topology, clock
-relationships) and reports unsupported timing checks; the timing equations,
-recovery/removal and relationship analysis remain its responsibility. `/3` is
-reserved for incompatible schema changes.
+consumer that does not read a field keeps it unknown. The `oasic` consumer
+binds v2 fields (required windows, release topology, clock relationships) but
+must accept the `zihdl.*` schema namespace before it can read freshly emitted
+metadata. The timing equations, recovery/removal and relationship analysis
+remain its responsibility. `/3` is reserved for incompatible schema changes.
 
 | Field | Meaning |
 |---|---|
 | `inputs[].slew.threshold.low_fraction` / `high_fraction` | Explicit fractions of the transition's low/high levels (for example `0.1` and `0.9` for a 10 %–90 % measurement). Always authored: the library never defaults a measurement basis. |
 | `inputs[].slew.rise` / `.fall` | Transition windows with `min`/`max` time values in explicit units (`ps`, `ns`, `us`, `ms`). A null bound is unknown, never zero. |
 | `outputs[].load.value` / `.unit` | Additional external load per port bit, `ff` or `pf` (exactly one unit per value). Excludes internal cell-pin and wire capacitance. A null load is unknown. |
-| `outputs[].required.clock` / `.edge` / `.min` / `.max` | Required arrival window relative to an explicit reference clock port and its active edge (`rising`/`falling`). A null bound is unknown, never zero. js_asic rejects a required window without a clock, so consumers must treat a missing clock as an error rather than infer one. |
+| `outputs[].required.clock` / `.edge` / `.min` / `.max` | Required arrival window relative to an explicit reference clock port and its active edge (`rising`/`falling`). A null bound is unknown, never zero. zihdl rejects a required window without a clock, so consumers must treat a missing clock as an error rather than infer one. |
 | `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first, declared by the module that owns the chain registers. A released domain's reset is the chain output (directly or through hierarchy), never the raw reset; empty when none is declared. |
 | `clocks[].relationship.relation` / `.related_to` / `.source_period` / `.jitter` | Relation to a reference clock (`synchronous`, `asynchronous`, `mesochronous`, `plesiochronous`), the related 1-bit input in the declaring module (`null` means an external reference), and explicit source period / jitter times. |
 
@@ -130,7 +141,7 @@ the `instances` connection table:
 - **Clock relationships:** parent and child rows describing the same connected
   clock pair must agree on relation, source period and jitter.
 
-`js_asic` enforces these rules itself in `Design.elaborate` (through
+`zihdl` enforces these rules itself in `Design.elaborate` (through
 `Design.validateTimingHierarchy`), so a contradiction written into one design
 fails elaboration with `error.InvalidTimingIntent` instead of reaching the
 consumer. Resolution and analysis still belong to the consumer; the build-time
@@ -156,7 +167,7 @@ Per-bit slew/load is authored as optional overrides next to the whole-port row
 (`inputs[].per_bit_slew` / `outputs[].per_bit_load`, emitted only when
 declared): a bit without an override keeps the whole-port value, and no live
 consumer acts on per-bit values yet. Required windows always name their
-reference clock (js_asic rejects a window without one). Hierarchy validation
+reference clock (zihdl rejects a window without one). Hierarchy validation
 joins rows through every instance level it can map back to a module signal and
 rejects contradictions between a descendant and its ancestor or between
 siblings sharing a net; consumers still perform the actual constraint
@@ -164,11 +175,15 @@ resolution.
 
 ## Quick Start
 
+Install Zig 0.16.0 for generation and unit tests. `zig build verify` also
+requires Verilator, Icarus Verilog and `vvp` on `PATH`. `oasic` is only needed
+for the separate replay commands above.
+
 ```bash
 # Run unit tests
 zig build test
 
-# Synthesize complete RTL plus metadata and constraints
+# Generate complete RTL plus metadata and constraints
 zig build run
 
 # Lint the generated Verilog-2001 / SystemVerilog with Verilator
@@ -212,8 +227,7 @@ holes matter for general-purpose use; the detailed review is in
 | Expressions | `add`/`sub`/`mul`/`div`/`mod`/bitwise/comparisons extend unequal-width operands explicitly and are verified end-to-end through oasic; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is declaration-level (`SignedSignal(W)`, `MemOpts.signed`, `SignedStream(W)`) and flows through lib register/synchronizer helpers, so `asSigned` is reinterpretation only; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
 | Parameterization | Widths/depths are comptime type arguments: block families declare a `Shape` schema and `instantiateShape` merges instance-site overrides, so a parent's comptime value parameter forwards into a child's shape (each distinct shape is its own checked module) and resolved shapes are recorded per instance in `design.json`; runtime `Param(W)` values stay 64-bit Verilog overrides and cannot size ports or memories, though a parent parameter or constant can be forwarded by name into a child override (`#(.CHILD(PARENT))`) |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
-| Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a quasi-static bundled-data crossing, single-slot and FIFO-backed mailboxes, a single-clock UART, SPI target and I2C target loader blocks and a structural CDC lint landed; the lint tracks domain ownership and structural first flops per data bit (first 64 bits, whole-signal fallbacks for unmappable shapes) and honors per-bit declared synchronizer stages; remaining: Phase 3 IP (AXI4-Lite, arbiter, crossbar, timers, ROM/RAM wrappers) and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
+| Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a quasi-static bundled-data crossing, single-slot and FIFO-backed mailboxes, a single-clock UART, SPI target and I2C target loader blocks and a structural CDC lint landed; the lint tracks domain ownership and structural first flops per data bit (first 64 bits, whole-signal fallbacks for unmappable shapes) and honors per-bit declared synchronizer stages; remaining: AXI4-Lite, arbiter, crossbar, timers, ROM/RAM wrappers and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
 | Timing / constraints | Output required times (with explicit clock and edge), clock relationships, reset-release topology and per-bit slew/load overrides are authored (v2), and hierarchy contradictions are rejected transitively through silent levels and siblings; per-bit values still have no consumer analysis and constraint resolution stays consumer-side; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
-| Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; package version is `0.0.0` with no `LICENSE` and docs not shipped in `build.zig.zon` paths |
-
+| Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; pre-release package version `0.0.0` |

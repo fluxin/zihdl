@@ -1,4 +1,4 @@
-// Behavioral replay for the js_asic CDC witness: a four-phase request/
+// Behavioral replay for the zihdl CDC witness: a four-phase request/
 // acknowledge bridge, a quasi-static bundled-data crossing, a single-slot
 // mailbox and a FIFO-backed mailbox, each crossing a 10 ns source clock and a
 // 6.2 ns destination clock. The bridge sends eight words and checks capture

@@ -2,9 +2,9 @@
 //! `examples/blocks/async_fifo_tb.v` with Icarus Verilog.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = arena.allocator();
 
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(js_asic.blocks.AsyncFifoBlock(16, 8));
+    _ = try design.elaborate(zihdl.blocks.AsyncFifoBlock(16, 8));
     const rtl = try verilog.emitDesign(alloc, &design, .{});
 
     const cwd = std.Io.Dir.cwd();

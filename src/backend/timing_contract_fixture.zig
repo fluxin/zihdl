@@ -1,4 +1,4 @@
-//! Contract fixture for `js_asic.timing_intent/1 + /2`: one child module with
+//! Contract fixture for `zihdl.timing_intent/1 + /2`: one child module with
 //! a synchronous input carrying both arrival bounds, an asynchronous input
 //! with a two-stage synchronizer, an asynchronous 2-bit bus with vector
 //! synchronizer stage identities (per-bit stage intent is unit-test covered;

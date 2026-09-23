@@ -75,7 +75,7 @@ test "design.json exports hierarchy, widths, enums, clocks, memories and asserti
     try std.testing.expectEqualStrings(json_again, json);
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
-    try std.testing.expectEqualStrings("js_asic.design/1", root.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.design/1", root.object.get("schema").?.string);
     try std.testing.expectEqualStrings("json_top", root.object.get("top").?.string);
     try std.testing.expectEqual(@as(usize, 2), root.object.get("modules").?.array.items.len);
 

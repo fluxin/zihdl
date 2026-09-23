@@ -1,4 +1,4 @@
-// Behavioral replay for the js_asic SPI target programmer witness: the bench
+// Behavioral replay for the zihdl SPI target programmer witness: the bench
 // acts as the SPI host and issues write/start/stop bursts on SCLK/MOSI with
 // CS_N low, then checks the decoded host word and control pulses. The host
 // pulse capture is registered so the checks see the one-cycle pulses without

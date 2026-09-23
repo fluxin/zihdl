@@ -36,7 +36,7 @@ test "sdc exports clock, uncertainty and reset false path" {
     _ = try design.elaborate(Clocked);
 
     const text = try sdc.emitDesignSdc(alloc, &design, .{});
-    try std.testing.expect(std.mem.indexOf(u8, text, "# js_asic SDC for sdc_top\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "# zihdl SDC for sdc_top\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "create_clock -name sys -period 8.333 -waveform {0.000 4.166} [get_ports {clk}]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "set_clock_uncertainty 0.250 [get_clocks {sys}]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "set_false_path -from [get_ports {rst_n}]\n") != null);

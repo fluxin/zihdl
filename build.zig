@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("js_asic", .{
+    const mod = b.addModule("zihdl", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("examples/blocks/blocks.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "js_asic", .module = mod },
+            .{ .name = "zihdl", .module = mod },
         },
     });
 
@@ -68,13 +68,13 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "js_asic",
+        .name = "zihdl",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/protocol_emulator/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
             },
         }),
@@ -105,13 +105,13 @@ pub fn build(b: *std.Build) void {
     // Generated testbench runner: builds the vector stimulus in Zig and emits
     // out/loader_read_tb.v + out/loader_read_tb_stim.hex.
     const tb_exe = b.addExecutable(.{
-        .name = "js_asic_tbgen",
+        .name = "zihdl_tbgen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/protocol_emulator/loader_read_tb.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
             },
         }),
@@ -121,13 +121,13 @@ pub fn build(b: *std.Build) void {
     // Partition testbench generator: reference-model vectors for the shared
     // 256x32 macro partition (arbiter, skid, ring, status).
     const part_tb_exe = b.addExecutable(.{
-        .name = "js_asic_partition_tbgen",
+        .name = "zihdl_partition_tbgen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/protocol_emulator/partition_tb.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
             },
         }),
@@ -135,12 +135,12 @@ pub fn build(b: *std.Build) void {
     const part_tb_gen = b.addRunArtifact(part_tb_exe);
 
     const core_witness = b.addExecutable(.{
-        .name = "js_asic_zio_core_witness",
+        .name = "zihdl_zio_core_witness",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/protocol_emulator/zio_core_witness.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "js_asic", .module = mod }},
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
         }),
     });
     const core_gen = b.addRunArtifact(core_witness);
@@ -149,13 +149,13 @@ pub fn build(b: *std.Build) void {
     // Ethernet 10BASE-T transmit testbench generator: cycle-accurate expected
     // waveform for the Manchester encoder, NLP generator and stream handshake.
     const eth_tb_exe = b.addExecutable(.{
-        .name = "js_asic_ethernet_10base_t_tbgen",
+        .name = "zihdl_ethernet_10base_t_tbgen",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/protocol_emulator/ethernet_10base_t_tb.zig"),
+            .root_source_file = b.path("examples/blocks/ethernet_10base_t_tb.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -164,13 +164,13 @@ pub fn build(b: *std.Build) void {
     // Dual-clock async FIFO witness: emits the gray-pointer FIFO RTL and
     // replays a handwritten iverilog bench that fills, overflows and wraps it.
     const async_fifo_exe = b.addExecutable(.{
-        .name = "js_asic_async_fifo_gen",
+        .name = "zihdl_async_fifo_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/async_fifo_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -190,13 +190,13 @@ pub fn build(b: *std.Build) void {
 
     // UART witness: single-clock TX/RX loopback replayed with Icarus.
     const uart_exe = b.addExecutable(.{
-        .name = "js_asic_uart_gen",
+        .name = "zihdl_uart_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/uart_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -216,13 +216,13 @@ pub fn build(b: *std.Build) void {
 
     // SPI target witness: host command decoding replayed with Icarus.
     const spi_exe = b.addExecutable(.{
-        .name = "js_asic_spi_gen",
+        .name = "zihdl_spi_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/spi_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -242,13 +242,13 @@ pub fn build(b: *std.Build) void {
 
     // I2C target witness: write/read transactions against a modeled host bus.
     const i2c_exe = b.addExecutable(.{
-        .name = "js_asic_i2c_gen",
+        .name = "zihdl_i2c_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/i2c_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -269,13 +269,13 @@ pub fn build(b: *std.Build) void {
     // CDC witness: request/acknowledge bridge and mailbox replayed across
     // asynchronous source/destination clocks.
     const cdc_exe = b.addExecutable(.{
-        .name = "js_asic_cdc_gen",
+        .name = "zihdl_cdc_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/cdc_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -296,13 +296,13 @@ pub fn build(b: *std.Build) void {
     // Division/remainder witness: signal-driven `/` and `%` plus folded
     // constants (including signed cases) replayed against the simulator.
     const divmod_exe = b.addExecutable(.{
-        .name = "js_asic_divmod_gen",
+        .name = "zihdl_divmod_gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/blocks/divmod_gen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -334,13 +334,13 @@ pub fn build(b: *std.Build) void {
     // Integrated ZIO witness bundles (RTL, design.json, SDC, microcode,
     // payload, harness, model-checked JSONL) for 60 and 120 MHz.
     const zio_wit_exe = b.addExecutable(.{
-        .name = "js_asic_zio_witness",
+        .name = "zihdl_zio_witness",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/protocol_emulator/zio_witness.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
                 .{ .name = "protocol_blocks", .module = blocks_mod },
             },
         }),
@@ -348,23 +348,35 @@ pub fn build(b: *std.Build) void {
     const zio_wit_gen = b.addRunArtifact(zio_wit_exe);
     zio_wit_gen.step.dependOn(&run_cmd.step);
 
+    const protocol_wit_exe = b.addExecutable(.{
+        .name = "zihdl_protocol_wave_witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/protocol_wave_witness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const protocol_wit_gen = b.addRunArtifact(protocol_wit_exe);
+
     const tb_step = b.step("tb", "Generate the loader read, partition, width, 10BASE-T and ZIO testbenches from Zig");
     tb_step.dependOn(&tb_gen.step);
     tb_step.dependOn(&part_tb_gen.step);
     tb_step.dependOn(&core_gen.step);
     tb_step.dependOn(&eth_tb_gen.step);
     tb_step.dependOn(&zio_wit_gen.step);
+    tb_step.dependOn(&protocol_wit_gen.step);
 
     // Timing-intent artifact contract fixture for consumers: RTL, design.json
     // (timing intent + provenance), model-derived stimulus and a hash manifest.
     const contract_exe = b.addExecutable(.{
-        .name = "js_asic_contract",
+        .name = "zihdl_contract",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/contract/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "js_asic", .module = mod },
+                .{ .name = "zihdl", .module = mod },
             },
         }),
     });
@@ -460,6 +472,18 @@ pub fn build(b: *std.Build) void {
         zio_step.dependOn(&fault.step);
     }
 
+    const protocols_step = b.step("protocols", "Simulate USB, SPI and JTAG microcode on the ZIO RTL");
+    inline for (.{ "usb", "spi0", "spi1", "spi2", "spi3", "jtag" }) |tag| {
+        const compile = b.addSystemCommand(&.{
+            "iverilog",                      "-g2001",              "-s",                              "protocol_wave_tb", "-o",
+            "out/protocol_" ++ tag ++ "_iv", "out/protocol_core.v", "out/protocol_" ++ tag ++ "_tb.v",
+        });
+        compile.step.dependOn(&protocol_wit_gen.step);
+        const run = b.addSystemCommand(&.{ "vvp", "out/protocol_" ++ tag ++ "_iv" });
+        run.step.dependOn(&compile.step);
+        protocols_step.dependOn(&run.step);
+    }
+
     const sim_step = b.step("sim", "Run transitional Icarus regressions on the emitted RTL");
     sim_step.dependOn(&i2c_run.step);
     sim_step.dependOn(&rx_run.step);
@@ -476,6 +500,7 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&divmod_run.step);
     sim_step.dependOn(&divmod_zero_run.step);
     sim_step.dependOn(zio_step);
+    sim_step.dependOn(protocols_step);
 
     const verify_step = b.step("verify", "Lint and simulate the emitted artifacts");
     verify_step.dependOn(&contract_gen.step);
@@ -506,6 +531,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&divmod_run.step);
     verify_step.dependOn(&divmod_zero_run.step);
     verify_step.dependOn(zio_step);
+    verify_step.dependOn(protocols_step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

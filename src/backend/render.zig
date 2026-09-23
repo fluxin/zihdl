@@ -192,7 +192,7 @@ pub const Renderer = struct {
             .sext => |n| {
                 try self.forceSelectBases(module, n.*);
                 // A sign extension over a non-select base must not lean on the
-                // assignment context to widen the base's evaluation: js_asic
+                // assignment context to widen the base's evaluation: zihdl
                 // folds and composes at the IR width, so hoist the base into a
                 // width-typed temp and extend that explicitly.
                 if (expr.width > n.width and !isSelectable(n.*)) try self.forceWholeExpr(module, n.*);
@@ -513,7 +513,7 @@ pub fn emitStmt(out: *std.ArrayList(u8), r: *Renderer, stmt: Stmt, indent: usize
             try appendStr(out, alloc, ";\n");
         },
         .assert_, .assume_, .cover_ => {
-            if (assertions) try appendStr(out, alloc, "`ifdef JS_ASIC_ASSERT\n");
+            if (assertions) try appendStr(out, alloc, "`ifdef ZIHDL_ASSERT\n");
             try emitIndent(out, alloc, indent);
             const prev = r.occurrence;
             r.occurrence = .assertion;

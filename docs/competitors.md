@@ -1,7 +1,7 @@
 # Competitors and alternatives
 
 This is a comparison for choosing a direction, not a scorecard. Every project
-listed here is more mature than js_asic in some dimension, and several are
+listed here is more mature than zihdl in some dimension, and several are
 better choices for most users. The comparison states what each tool optimizes
 for so you can decide.
 
@@ -15,7 +15,7 @@ There are two families:
   SpinalHDL (Scala), Clash (Haskell). The source is a program that elaborates
   an IR; "elaboration" is ordinary execution of the host language.
 
-js_asic is in the second family: a Zig library that elaborates typed handles
+zihdl is in the second family: a Zig library that elaborates typed handles
 and emits Verilog. Its distinguishing choices are (a) a compiled, statically
 typed host with explicit widths, (b) artifacts as the product — RTL plus
 `design.json`, SDC, provenance and timing intent — and (c) a deliberate split
@@ -25,7 +25,7 @@ from its checker, `oasic`, at a file/JSON boundary.
 
 | | Host language | Elaboration | Emits | Simulation / formal | Primary focus |
 |---|---|---|---|---|---|
-| **js_asic** | Zig (library) | compiled Zig program runs once | Verilog-2001, SystemVerilog, JSON/SDC/provenance | none in-tree; external `oasic`/Verilator/iverilog | typed ASIC authoring + machine-readable artifact contract |
+| **zihdl** | Zig (library) | compiled Zig program runs once | Verilog-2001, SystemVerilog, JSON/SDC/provenance | none in-tree; external `oasic`/Verilator/iverilog | typed ASIC authoring + machine-readable artifact contract |
 | Verilog / SystemVerilog | HDL | elaboration in the tool | itself | every commercial/OSS tool; SVA, UVM | universal interchange, verification |
 | VHDL | HDL | elaboration in the tool | itself | mature toolchains | strongly typed classical HDL |
 | Chisel | Scala (embedded DSL) | JVM program, FIRRTL IR | Verilog | chiseltest (Verilator); Treadle historically | parameterized generator libraries; Rocket Chip ecosystem |
@@ -36,16 +36,16 @@ from its checker, `oasic`, at a file/JSON boundary.
 | Spade | Spade (Rust-like HDL) | compiler | Verilog | testbench framework + simulation tooling | pipelines, explicit timing annotations |
 
 Licenses and maturity vary; check each project before adopting. None of these
-values are niche in the way js_asic is: outside this repository, js_asic has no
+values are niche in the way zihdl is: outside this repository, zihdl has no
 published package, no release process and no external user base.
 
-## Where js_asic differs technically
+## Where zihdl differs technically
 
 1. **Compiled host, explicit widths.** `Expr(W)` carries width in the Zig type;
    `Signal(W)` handles carry width in the type; `assign` is compile-time
    checked. You get IDE navigation, `zig test` and compile errors, but you also
    get no REPL and no runtime introspection.
-2. **No simulator, by design.** js_asic owns elaboration and reference intent;
+2. **No simulator, by design.** zihdl owns elaboration and reference intent;
    `oasic` owns simulation, SAT/BMC, STA and physical. The seam is files and
    JSON, not a library call, which keeps the checker independent.
 3. **Artifacts are first-class.** `design.json` carries hierarchy, widths,
@@ -71,17 +71,17 @@ published package, no release process and no external user base.
 - **You want Python or Scala productivity.** Amaranth/Migen and Chisel/
   SpinalHDL have years of libraries, simulators and community answers.
 - **You need a built-in simulator today.** Amaranth, SpinalHDL and Spade ship
-  one; js_asic does not, and `oasic` is still landing its Verilog front end.
+  one; zihdl does not, and `oasic` is still landing its Verilog front end.
 - **You need functional/system-level modeling (untimed, transactions,
   testbenches).** SystemC/SystemVerilog or a host-language testbench fits
-  better; js_asic is RTL-only.
+  better; zihdl is RTL-only.
 - **You need parameteric generators without recompiling a host program.**
   Classic HDL `parameter`/`generate` or Chisel's parameter system can be more
   ergonomic than comptime Zig for some suites.
 - **You want a real HDL with modern syntax.** Veryl or Spade are closer to
-  drop-in HDL replacements; js_asic is a generator library, not a language.
+  drop-in HDL replacements; zihdl is a generator library, not a language.
 
-## When js_asic is a good fit
+## When zihdl is a good fit
 
 - The design is authored as code with strong width/type checking and no
   runtime.
@@ -96,7 +96,7 @@ published package, no release process and no external user base.
 
 ## Non-goals
 
-js_asic intentionally does not own: SAT/BMC/reachability, STA or timing
+zihdl intentionally does not own: SAT/BMC/reachability, STA or timing
 closure, layout/extraction, RTL recovery, waveform analysis or cycle-accurate
 simulation. Those live in `oasic`. It also does not attempt SystemVerilog
 testbench/UVM support, vendor inference pragmas or mixed-signal modeling.

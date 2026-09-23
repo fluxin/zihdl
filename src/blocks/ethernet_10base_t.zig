@@ -14,8 +14,7 @@
 //! IEEE 802.3 delimiter.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
+const netlist = @import("../netlist.zig");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
@@ -295,8 +294,8 @@ test "ethernet 10base-t product timing defaults" {
 }
 
 test "ethernet 10base-t elaborates at 60 and 120 MHz and records timing in design.json" {
-    const metadata = js_asic.backend.metadata;
-    const verilog = js_asic.backend.verilog;
+    const metadata = @import("../backend/metadata.zig");
+    const verilog = @import("../backend/verilog.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

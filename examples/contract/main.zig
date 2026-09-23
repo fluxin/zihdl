@@ -5,11 +5,11 @@
 //! `zig build contract` writes everything under out/contract/.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const fixture = js_asic.backend.timing_contract;
-const verilog = js_asic.backend.verilog;
-const metadata = js_asic.backend.metadata;
-const provenance = js_asic.backend.provenance;
+const zihdl = @import("zihdl");
+const fixture = zihdl.backend.timing_contract;
+const verilog = zihdl.backend.verilog;
+const metadata = zihdl.backend.metadata;
+const provenance = zihdl.backend.provenance;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -57,9 +57,9 @@ fn buildManifest(alloc: std.mem.Allocator, rtl: []const u8, json: []const u8, js
     const stim_sha = try sha256Hex(alloc, stim);
     return std.fmt.allocPrint(
         alloc,
-        "# js_asic timing-intent contract fixture\n" ++
+        "# zihdl timing-intent contract fixture\n" ++
             "top: {s}\n" ++
-            "schema: js_asic.design/1 + js_asic.timing_intent/2 + js_asic.provenance/1\n" ++
+            "schema: zihdl.design/1 + zihdl.timing_intent/2 + zihdl.provenance/1\n" ++
             "rtl: out/contract/timing_contract.v bytes={d} sha256={s}\n" ++
             "design: out/contract/timing_contract.json bytes={d} sha256={s}\n" ++
             "design_v1: out/contract/timing_contract_v1.json bytes={d} sha256={s}\n" ++

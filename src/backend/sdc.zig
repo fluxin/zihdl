@@ -19,12 +19,12 @@ pub fn emitDesignSdc(allocator: std.mem.Allocator, design: *const ir.Design, opt
     defer out.deinit(allocator);
 
     const top = topModule(design, options) orelse {
-        try appendLine(&out, allocator, "# js_asic SDC: no top module elaborated\n");
+        try appendLine(&out, allocator, "# zihdl SDC: no top module elaborated\n");
         return out.toOwnedSlice(allocator);
     };
 
     var title_buf: [128]u8 = undefined;
-    const title = try std.fmt.bufPrint(&title_buf, "# js_asic SDC for {s}\n", .{top.name});
+    const title = try std.fmt.bufPrint(&title_buf, "# zihdl SDC for {s}\n", .{top.name});
     try out.appendSlice(allocator, title);
     try appendLine(&out, allocator, "# Generated constraints; wire into oasic timing/sta.odin\n");
 

@@ -7,11 +7,11 @@
 //! implementations or protocol state, and it never changes emitted RTL. RTL
 //! remains the executable contract.
 //!
-//! Schema `js_asic.provenance/1`:
+//! Schema `zihdl.provenance/1`:
 //!
 //! ```json
 //! {
-//!   "schema": "js_asic.provenance/1",
+//!   "schema": "zihdl.provenance/1",
 //!   "artifact": { "language": "verilog2001", "bytes": 31107, "sha256": "..." },
 //!   "modules": [{
 //!     "name": "child",
@@ -53,7 +53,7 @@
 const std = @import("std");
 const ir = @import("../netlist.zig");
 
-pub const schema = "js_asic.provenance/1";
+pub const schema = "zihdl.provenance/1";
 
 /// Where an operation occurrence was emitted.
 pub const Occurrence = enum { assign, process, assertion, hoisted_def, hoisted_use };
@@ -196,7 +196,7 @@ pub const Collector = struct {
             .occurrence = occurrence,
             .start = start,
             .end = end,
-        }) catch @panic("js_asic: provenance collector out of memory");
+        }) catch @panic("zihdl: provenance collector out of memory");
     }
 
     /// Selects the module whose artifact is being emitted.

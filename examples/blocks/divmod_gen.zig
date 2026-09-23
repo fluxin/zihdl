@@ -14,9 +14,9 @@
 //! model written here, never from folded IR values.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 const Signal = netlist.Signal;
 const SignedSignal = netlist.SignedSignal;
 const ModuleBuilder = netlist.ModuleBuilder;
@@ -546,7 +546,7 @@ fn emitManifest(alloc: std.mem.Allocator, probe_rtl: []const u8, probe_stim: []c
     const zero_stim_sha = try sha256Hex(alloc, zero_stim);
     return std.fmt.allocPrint(
         alloc,
-        "# js_asic division/remainder contract fixture\n" ++
+        "# zihdl division/remainder contract fixture\n" ++
             "top: {s}\n" ++
             "schema: oasic.stimulus/1 (verilog2001 target)\n" ++
             "rtl: out/divmod/probe.v bytes={d} sha256={s}\n" ++

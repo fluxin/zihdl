@@ -1,13 +1,13 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 const Signal = netlist.Signal;
 const ClockDomain = netlist.ClockDomain;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const i2c_loader = js_asic.blocks.i2c;
-const spi_loader = js_asic.blocks.spi;
+const i2c_loader = zihdl.blocks.i2c;
+const spi_loader = zihdl.blocks.spi;
 const timing_core = @import("zio_timing_unit.zig");
 const isa = @import("isa.zig");
 
@@ -591,7 +591,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             // The shared macro drives port 0 only in single mode; in split mode
             // that return is unused and the tied-off input needs no driver.
             if (partition == .single) {
-                _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_sram", .{
+                _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_sram", .{
                     .clk0 = domain.clk,
                     .csb0 = sram_csb0,
                     .web0 = sram_web0,
@@ -603,7 +603,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                     .addr1 = sram_addr1,
                 }, .{ .dout0 = sram_dout0, .dout1 = sram_dout1 }, .{});
             } else {
-                _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_sram", .{
+                _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_sram", .{
                     .clk0 = domain.clk,
                     .csb0 = sram_csb0,
                     .web0 = sram_web0,
@@ -615,7 +615,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                     .addr1 = sram_addr1,
                 }, .{ .dout1 = sram_dout1 }, .{});
                 if (capture) {
-                    _ = try mb.instantiate(js_asic.blocks.TtSramBlock, "u_rx_sram", .{
+                    _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_rx_sram", .{
                         .clk0 = domain.clk,
                         .csb0 = rx_csb0,
                         .web0 = rx_web0,
@@ -713,7 +713,7 @@ test "programmable asic block elaborates a non-default 128/128 program split" {
 }
 
 test "programmable asic design json records partition parameters" {
-    const metadata = js_asic.backend.metadata;
+    const metadata = zihdl.backend.metadata;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

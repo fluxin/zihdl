@@ -1,12 +1,12 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
 const blocks = @import("protocol_blocks");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
-const loader = js_asic.blocks.i2c;
+const loader = zihdl.blocks.i2c;
 const Vector = blocks.vector_tb.Vector;
 const VectorPlayer = blocks.vector_tb.VectorPlayer;
 

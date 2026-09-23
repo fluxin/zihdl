@@ -1,6 +1,4 @@
-//! Pure Elemental Hardware Building Blocks
-//! Protocol-agnostic, parameterized silicon blocks that can be composed
-//! into arbitrary digital circuits and controllers.
+//! Reusable parameterized hardware blocks, including protocol controllers.
 
 pub const sram = @import("blocks/sram.zig");
 pub const fifo = @import("blocks/fifo.zig");
@@ -9,6 +7,7 @@ pub const cdc = @import("blocks/cdc.zig");
 pub const uart = @import("blocks/uart.zig");
 pub const spi = @import("blocks/spi.zig");
 pub const i2c = @import("blocks/i2c.zig");
+pub const ethernet_10base_t = @import("blocks/ethernet_10base_t.zig");
 pub const shift_reg = @import("blocks/shift_reg.zig");
 pub const edge_det = @import("blocks/edge_det.zig");
 pub const counter = @import("blocks/counter.zig");
@@ -25,6 +24,7 @@ pub const ResetSyncBlock = cdc.ResetSyncBlock;
 pub const UartBlock = uart.UartBlock;
 pub const SpiSlaveProgrammerBlock = spi.SpiSlaveProgrammerBlock;
 pub const I2cSlaveLoaderBlock = i2c.I2cSlaveLoaderBlock;
+pub const Ethernet10BaseTBlock = ethernet_10base_t.Ethernet10BaseTBlock;
 pub const ShiftRegisterBlock = shift_reg.ShiftRegisterBlock;
 pub const ShiftDirection = shift_reg.ShiftDirection;
 pub const EdgeDetectorBlock = edge_det.EdgeDetectorBlock;
@@ -38,6 +38,7 @@ test {
     _ = uart;
     _ = spi;
     _ = i2c;
+    _ = ethernet_10base_t;
     _ = shift_reg;
     _ = edge_det;
     _ = counter;

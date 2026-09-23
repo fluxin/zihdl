@@ -1,13 +1,13 @@
-# Migrating to js_asic
+# Migrating to zihdl
 
-js_asic is not an HDL dialect and not an embedded Python/Scala DSL. It is a Zig
+zihdl is not an HDL dialect and not an embedded Python/Scala DSL. It is a Zig
 library: your design is a Zig program that runs at build time, elaborates typed
 handles into an IR, and exits after writing artifacts. If you are coming from
 another HDL or generator, this page maps the concepts and calls out the traps.
 
 ## The mental model shift
 
-| Old world | js_asic |
+| Old world | zihdl |
 |---|---|
 | A language interpreter/compiler reads your design | Your design is compiled by Zig and *runs*, then quits |
 | Signals are values with runtime behavior | Signals are nameless, width-typed handles into a `Scope`; only the emitter resolves names |
@@ -23,7 +23,7 @@ artifact or in the checker (`oasic`), not in the design.
 
 ## From Verilog / SystemVerilog
 
-| Verilog / SV | js_asic |
+| Verilog / SV | zihdl |
 |---|---|
 | `module m(...); ... endmodule` | `pub const M = struct { pub const name = "m"; pub const Inputs = ...; pub const Outputs = ...; pub fn build(mb: *ModuleBuilder) !void }` |
 | `input wire [7:0] a` | `a: Signal(8)` in `Inputs` + `mb.declareInputs(Inputs)` |
@@ -54,8 +54,8 @@ endmodule
 
 ```zig
 // counter.zig
-const js = @import("js_asic");
-const netlist = js.netlist;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
 const Signal = netlist.Signal;
 
 pub const Counter = struct {
@@ -80,7 +80,7 @@ pub const Counter = struct {
 // main.zig: elaborate and emit
 var design = netlist.Design.init(alloc);
 _ = try design.elaborate(Counter);
-const rtl = try js.backend.verilog.emitDesign(alloc, &design, .{});
+const rtl = try zihdl.backend.verilog.emitDesign(alloc, &design, .{});
 ```
 
 ### Reusing existing Verilog
@@ -94,7 +94,7 @@ generators.
 
 ## From VHDL
 
-| VHDL | js_asic |
+| VHDL | zihdl |
 |---|---|
 | `entity` / `architecture` pair | one block struct: `Inputs`, `Outputs`, `build` |
 | `std_logic_vector(7 downto 0)` | `Signal(8)` |
@@ -109,7 +109,7 @@ generators.
 
 ## From Chisel
 
-| Chisel / FIRRTL | js_asic |
+| Chisel / FIRRTL | zihdl |
 |---|---|
 | `class M extends Module` | `pub const M = struct { ... }` |
 | `val io = IO(new Bundle { ... })` | `Inputs` / `Outputs` structs of `Signal(W)` |
@@ -124,7 +124,7 @@ generators.
 | FIRRTL / `emitVerilog` | no intermediate IR exposed; emit Verilog-2001/SystemVerilog plus `design.json`, SDC, provenance, timing intent |
 | Treadle / Verilator via `chiseltest` | external: `oasic` (planned native), or generated iverilog benches |
 
-The big differences: js_asic has no `Clock`/`Reset` implicit context (a
+The big differences: zihdl has no `Clock`/`Reset` implicit context (a
 `ClockDomain` is passed explicitly), no implicit last-connect semantics
 (`finish()` rejects multiple drivers instead), and no Scala meta-programming.
 Compile-time generation is just Zig `inline for`, `comptime` and functions
@@ -132,7 +132,7 @@ returning handles.
 
 ## From Amaranth / Migen
 
-| Amaranth (migen) | js_asic |
+| Amaranth (migen) | zihdl |
 |---|---|
 | `class M(Elaboratable)` | block struct with `build` |
 | `Signal(8)` | `Signal(8)` |
@@ -146,13 +146,13 @@ returning handles.
 | `platform` / LiteX integration | none: physical integration belongs to `oasic` |
 
 The largest process difference: Amaranth's statements are Python-side objects
-built at elaboration, while js_asic statements are values returned by
+built at elaboration, while zihdl statements are values returned by
 `mb.exprs()` and assembled into arrays. There is no `+=` operator; call
 `mb.assign` (or `b.assign` for statement values).
 
 ## From SpinalHDL
 
-| SpinalHDL | js_asic |
+| SpinalHDL | zihdl |
 |---|---|
 | `class M extends Component` | block struct with `build` |
 | `val io = new Bundle { ... }` | `Inputs` / `Outputs` structs |
@@ -164,7 +164,7 @@ built at elaboration, while js_asic statements are values returned by
 | Verilog/VHDL generation | Verilog-2001 + SystemVerilog only |
 
 SpinalHDL's strongest parallel is the explicit clock domain plus stream
-helpers; the strongest difference is that js_asic emits no VHDL and has no
+helpers; the strongest difference is that zihdl emits no VHDL and has no
 simulator or waveform debugger of its own.
 
 ## Migration checklist

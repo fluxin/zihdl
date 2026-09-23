@@ -294,7 +294,7 @@ const ModuleLint = struct {
         for (self.domains.items, 0..) |existing, i| {
             if (existing.scope == clk.scope and existing.idx == clk.idx) return @intCast(i);
         }
-        self.domains.append(self.allocator, clk) catch @panic("js_asic: CDC lint out of memory");
+        self.domains.append(self.allocator, clk) catch @panic("zihdl: CDC lint out of memory");
         return @intCast(self.domains.items.len - 1);
     }
 

@@ -1,6 +1,6 @@
 # Code structure
 
-`js_asic` is a hardware construction library in pure Zig (0.16.0). There is no
+`zihdl` is a hardware construction library in pure Zig (0.16.0). There is no
 separate HDL, no compiler binary and no runtime: a design is a Zig program that
 elaborates typed handles into an IR and hands the IR to a backend. This document
 is the map of that code and the rules for extending it.
@@ -24,16 +24,16 @@ backend/             artifact writers and HDL targets
    sdc.zig              SDC constraints
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, shift reg, edge det, counter)
+blocks/              elemental reusable IP (SRAM, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter)
 lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
 root.zig             module root; exports netlist, lib, blocks, backend, cdc
 ```
 
-`src/root.zig` is the single import surface: examples import `js_asic` and use
-`js_asic.netlist`, `js_asic.lib`, `js_asic.blocks`, `js_asic.backend` and
-`js_asic.cdc`.
+`src/root.zig` is the single import surface: examples import `zihdl` and use
+`zihdl.netlist`, `zihdl.lib`, `zihdl.blocks`, `zihdl.backend` and
+`zihdl.cdc`.
 
 ## What each layer owns
 
@@ -124,13 +124,13 @@ These are load-bearing; tests and review should reject changes that break them.
 5. **DCE keeps declared identities.** Dead-code elimination prunes unreachable
    symbols, but anything referenced by authored intent (synchronizer stages,
    ports) stays live so the artifact always contains what the sidecar names.
-6. **Artifact schemas are versioned and opt-in.** `js_asic.design/1` and
-   `js_asic.timing_intent/1` are byte-stable for products; `/2` timing intent is
+6. **Artifact schemas are versioned and opt-in.** `zihdl.design/1` and
+   `zihdl.timing_intent/1` are byte-stable for products; `/2` timing intent is
    request-only. v1 output must not change when v2 is added.
 7. **Fixture models are independent.** A contract fixture's expected behavior
    comes from a hand-written cycle model, never from the emitted RTL or the
    simulator under test.
-8. **One direction across the seam.** js_asic emits Verilog/metadata; `oasic`
+8. **One direction across the seam.** zihdl emits Verilog/metadata; `oasic`
    parses, simulates, proves and places. No shared memory, no FFI, no oasic
    code in this repository.
 

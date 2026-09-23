@@ -8,11 +8,11 @@
 //! the product default is asserted by the block's unit tests.
 
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
-const metadata = js_asic.backend.metadata;
-const eth = @import("ethernet_10base_t.zig");
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
+const metadata = zihdl.backend.metadata;
+const eth = zihdl.blocks.ethernet_10base_t;
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 

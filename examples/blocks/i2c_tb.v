@@ -1,4 +1,4 @@
-// Behavioral replay for the js_asic I2C target loader witness: the bench acts
+// Behavioral replay for the zihdl I2C target loader witness: the bench acts
 // as the I2C host plus the loader's host-side memory and handshake, then runs
 // write transactions (program word + control registers), a wrong-address NACK,
 // and read transactions that stream the captured words back. The open-drain

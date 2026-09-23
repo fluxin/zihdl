@@ -1,11 +1,11 @@
 const std = @import("std");
-const js_asic = @import("js_asic");
-const netlist = js_asic.netlist;
-const verilog = js_asic.backend.verilog;
-const systemverilog = js_asic.backend.systemverilog;
-const metadata = js_asic.backend.metadata;
-const provenance = js_asic.backend.provenance;
-const sdc = js_asic.backend.sdc;
+const zihdl = @import("zihdl");
+const netlist = zihdl.netlist;
+const verilog = zihdl.backend.verilog;
+const systemverilog = zihdl.backend.systemverilog;
+const metadata = zihdl.backend.metadata;
+const provenance = zihdl.backend.provenance;
+const sdc = zihdl.backend.sdc;
 
 const programmable_asic = @import("programmable_asic.zig");
 
@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = arena.allocator();
 
     std.debug.print("=====================================================\n", .{});
-    std.debug.print("  Programmable ASIC Core Synthesizer (js_asic)       \n", .{});
+    std.debug.print("  Programmable ASIC RTL Generator (zihdl)          \n", .{});
     std.debug.print("=====================================================\n\n", .{});
 
     var design = netlist.Design.init(alloc);
@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
         .data = split_sdc,
     });
 
-    std.debug.print("Synthesized complete ASIC RTL to 'out/asic_core.v' ({d} bytes)\n", .{full_v.len});
+    std.debug.print("Generated complete ASIC RTL at 'out/asic_core.v' ({d} bytes)\n", .{full_v.len});
     std.debug.print("  - Metadata sidecar: out/design.json ({d} bytes)\n", .{design_json.len});
     std.debug.print("  - Timing constraints: out/asic_core.sdc ({d} bytes)\n", .{design_sdc.len});
     std.debug.print("  - A/B split composition: out/asic_core_split.v ({d} bytes)\n", .{split_v.len});
@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("  - SystemVerilog target: out/asic_core.sv ({d} bytes)\n", .{full_sv.len});
     }
 
-    std.debug.print("Ready for layout and SAT verification in ../oasic!\n\n", .{});
+    std.debug.print("Artifacts ready for downstream synthesis and verification.\n\n", .{});
 }
 
 test {
@@ -98,9 +98,12 @@ test {
     _ = @import("programmable_asic.zig");
     _ = @import("loader_read_tb.zig");
     _ = @import("partition_tb.zig");
-    _ = @import("ethernet_10base_t.zig");
-    _ = @import("ethernet_10base_t_tb.zig");
     _ = @import("eth_microcode.zig");
+    _ = @import("wave_microcode.zig");
+    _ = @import("usb_low_speed_microcode.zig");
+    _ = @import("spi_master_microcode.zig");
+    _ = @import("jtag_microcode.zig");
+    _ = @import("protocol_wave_witness.zig");
     _ = @import("zio_timing_unit.zig");
     _ = @import("zio_core_witness.zig");
     _ = @import("zio_witness.zig");

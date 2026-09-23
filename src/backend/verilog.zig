@@ -1,4 +1,4 @@
-//! Verilog-2001 backend: renders the elaborated js_asic IR (`netlist.zig`)
+//! Verilog-2001 backend: renders the elaborated zihdl IR (`netlist.zig`)
 //! into synthesizable Verilog. The IR itself stays source-language neutral;
 //! everything language-specific lives here. Shared rendering (subexpression
 //! hoisting, expression/statement text) comes from `render.zig`.
@@ -10,7 +10,7 @@ const provenance = @import("provenance.zig");
 
 /// Backend emission options.
 pub const Options = struct {
-    /// Wrap immediate assertions in `` `ifdef JS_ASIC_ASSERT `` so the default
+    /// Wrap immediate assertions in `` `ifdef ZIHDL_ASSERT `` so the default
     /// portable Verilog-2001 baseline and lint stay clean.
     assertions: bool = true,
     /// `` `timescale `` emitted ahead of each module; null suppresses it.
@@ -34,7 +34,7 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
 pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, module: *const ir.Module, options: Options) !void {
     if (module.foreign) |foreign| {
         if (foreign.language != .verilog) {
-            std.log.warn("js_asic: Verilog-2001 backend cannot emit '{s}' foreign body written in {s}", .{ module.name, @tagName(foreign.language) });
+            std.log.warn("zihdl: Verilog-2001 backend cannot emit '{s}' foreign body written in {s}", .{ module.name, @tagName(foreign.language) });
             return error.ForeignLanguageMismatch;
         }
         const src = foreign.text;
@@ -56,7 +56,7 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
 
     try render.appendStr(out, allocator, "// ============================================================================\n");
     try render.appendFmt(out, allocator, "// Hardware Module: {s}\n", .{module.name});
-    try render.appendStr(out, allocator, "// Synthesized from typed Zig AST (js_asic)\n");
+    try render.appendStr(out, allocator, "// Synthesized from typed Zig AST (zihdl)\n");
     try render.appendStr(out, allocator, "// ============================================================================\n");
     if (options.timescale) |ts| {
         try render.appendFmt(out, allocator, "`timescale {s} / {s}\n", .{ ts.unit, ts.precision });

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 // ============================================================================
-// js_asic typed hardware construction library
+// zihdl typed hardware construction library
 //
 //   * Scope owns the symbol table (names) of exactly one hardware module.
 //   * Signal(W)/Param(W)/Mem(W) are nameless, compile-time width-typed handles
@@ -105,7 +105,7 @@ pub const Scope = struct {
         depth: usize,
     ) !SymRef {
         if (self.find(name) != null) {
-            std.log.err("js_asic: duplicate signal '{s}' in one module scope", .{name});
+            std.log.err("zihdl: duplicate signal '{s}' in one module scope", .{name});
             return error.DuplicateSignal;
         }
         const idx: u32 = @intCast(self.symbols.items.len);
@@ -750,15 +750,15 @@ pub const ExprBuilder = struct {
         }
         if (self.intern_table) |table| {
             if (node.hash == 0) node.hash = computeHash(&node);
-            const gop = table.getOrPut(self.allocator, &node) catch @panic("js_asic: expression arena out of memory");
+            const gop = table.getOrPut(self.allocator, &node) catch @panic("zihdl: expression arena out of memory");
             if (gop.found_existing) return gop.key_ptr.*;
-            const p = self.allocator.create(AnyExpr) catch @panic("js_asic: expression arena out of memory");
+            const p = self.allocator.create(AnyExpr) catch @panic("zihdl: expression arena out of memory");
             p.* = node;
             gop.key_ptr.* = p;
             gop.value_ptr.* = {};
             return p;
         }
-        const p = self.allocator.create(AnyExpr) catch @panic("js_asic: expression arena out of memory");
+        const p = self.allocator.create(AnyExpr) catch @panic("zihdl: expression arena out of memory");
         p.* = node;
         return p;
     }
@@ -781,11 +781,11 @@ pub const ExprBuilder = struct {
             .replicate => |rep| event.count = rep.count,
             else => {},
         }
-        log.append(self.allocator, event) catch @panic("js_asic: expression arena out of memory");
+        log.append(self.allocator, event) catch @panic("zihdl: expression arena out of memory");
     }
 
     fn dupStmts(self: ExprBuilder, stmts: []const Stmt) []const Stmt {
-        return self.allocator.dupe(Stmt, stmts) catch @panic("js_asic: expression arena out of memory");
+        return self.allocator.dupe(Stmt, stmts) catch @panic("zihdl: expression arena out of memory");
     }
 
     pub fn lit(self: ExprBuilder, comptime W: usize, comptime val: u64) Expr(W) {
@@ -1020,7 +1020,7 @@ pub const ExprBuilder = struct {
 
     pub fn concat(self: ExprBuilder, items: anytype) Expr(tupleWidth(@TypeOf(items))) {
         const fields = @typeInfo(@TypeOf(items)).@"struct".fields;
-        const list = self.allocator.alloc(AnyExpr, fields.len) catch @panic("js_asic: expression arena out of memory");
+        const list = self.allocator.alloc(AnyExpr, fields.len) catch @panic("zihdl: expression arena out of memory");
         inline for (fields, 0..) |f, i| list[i] = self.dup(asAny(@field(items, f.name))).*;
         return .{ .e = .{
             .width = tupleWidth(@TypeOf(items)),
@@ -1220,7 +1220,7 @@ pub const ExprBuilder = struct {
     pub fn case_(self: ExprBuilder, sel: anytype, branches: []const CaseBranch, default_stmts: []const Stmt) Stmt {
         return .{ .case_block = .{
             .sel = self.intern(sel),
-            .cases = self.allocator.dupe(CaseBranch, branches) catch @panic("js_asic: expression arena out of memory"),
+            .cases = self.allocator.dupe(CaseBranch, branches) catch @panic("zihdl: expression arena out of memory"),
             .default_stmts = if (default_stmts.len > 0) self.dupStmts(default_stmts) else &.{},
         } };
     }
@@ -1864,7 +1864,7 @@ fn validateExpr(expr: AnyExpr) error{InvalidExpression}!void {
         .bit => |b| {
             try validateSelectBase(b.base);
             if (b.index >= selectBaseWidth(b.base)) {
-                std.log.err("js_asic: bit index {d} out of range for '{s}' ({d} bits)", .{ b.index, selectBaseName(b.base), selectBaseWidth(b.base) });
+                std.log.err("zihdl: bit index {d} out of range for '{s}' ({d} bits)", .{ b.index, selectBaseName(b.base), selectBaseWidth(b.base) });
                 return error.InvalidExpression;
             }
         },
@@ -1875,14 +1875,14 @@ fn validateExpr(expr: AnyExpr) error{InvalidExpression}!void {
         .slice => |s| {
             try validateSelectBase(s.base);
             if (s.hi >= selectBaseWidth(s.base) or s.lo > s.hi) {
-                std.log.err("js_asic: slice [{d}:{d}] out of range for '{s}' ({d} bits)", .{ s.hi, s.lo, selectBaseName(s.base), selectBaseWidth(s.base) });
+                std.log.err("zihdl: slice [{d}:{d}] out of range for '{s}' ({d} bits)", .{ s.hi, s.lo, selectBaseName(s.base), selectBaseWidth(s.base) });
                 return error.InvalidExpression;
             }
         },
         .concat => |items| for (items) |item| try validateExpr(item),
         .mem_read => |mr| {
             if (mr.mem.kind() != .mem) {
-                std.log.err("js_asic: read of '{s}' which is not a memory", .{mr.mem.name()});
+                std.log.err("zihdl: read of '{s}' which is not a memory", .{mr.mem.name()});
                 return error.InvalidExpression;
             }
             try validateExpr(mr.addr.*);
@@ -1913,7 +1913,7 @@ fn validateStmts(stmts: []const Stmt) !void {
                     else => unreachable,
                 };
                 if (cond.width != 1) {
-                    std.log.err("js_asic: assertion condition must be 1 bit", .{});
+                    std.log.err("zihdl: assertion condition must be 1 bit", .{});
                     return error.InvalidStatement;
                 }
                 try validateExpr(cond);
@@ -1921,11 +1921,11 @@ fn validateStmts(stmts: []const Stmt) !void {
             .assign => |a| {
                 const kind = a.dst.kind();
                 if (kind != .reg and kind != .output) {
-                    std.log.err("js_asic: procedural assignment to non-register '{s}'", .{a.dst.name()});
+                    std.log.err("zihdl: procedural assignment to non-register '{s}'", .{a.dst.name()});
                     return error.InvalidStatement;
                 }
                 if (a.src.width != a.dst.width()) {
-                    std.log.err("js_asic: width mismatch assigning {d} bits to '{s}' ({d} bits)", .{ a.src.width, a.dst.name(), a.dst.width() });
+                    std.log.err("zihdl: width mismatch assigning {d} bits to '{s}' ({d} bits)", .{ a.src.width, a.dst.name(), a.dst.width() });
                     return error.InvalidStatement;
                 }
                 try validateExpr(a.src);
@@ -1933,22 +1933,22 @@ fn validateStmts(stmts: []const Stmt) !void {
             .slice_assign => |a| {
                 const kind = a.dst.kind();
                 if (kind != .reg and kind != .output) {
-                    std.log.err("js_asic: procedural assignment to non-register '{s}'", .{a.dst.name()});
+                    std.log.err("zihdl: procedural assignment to non-register '{s}'", .{a.dst.name()});
                     return error.InvalidStatement;
                 }
                 if (a.hi >= a.dst.width() or a.lo > a.hi or a.src.width != a.hi - a.lo + 1) {
-                    std.log.err("js_asic: invalid slice assign to '{s}'", .{a.dst.name()});
+                    std.log.err("zihdl: invalid slice assign to '{s}'", .{a.dst.name()});
                     return error.InvalidStatement;
                 }
                 try validateExpr(a.src);
             },
             .mem_write => |a| {
                 if (a.mem.kind() != .mem) {
-                    std.log.err("js_asic: write to '{s}' which is not a memory", .{a.mem.name()});
+                    std.log.err("zihdl: write to '{s}' which is not a memory", .{a.mem.name()});
                     return error.InvalidStatement;
                 }
                 if (a.src.width != a.mem.width()) {
-                    std.log.err("js_asic: memory write width mismatch on '{s}'", .{a.mem.name()});
+                    std.log.err("zihdl: memory write width mismatch on '{s}'", .{a.mem.name()});
                     return error.InvalidStatement;
                 }
                 try validateExpr(a.addr);
@@ -1956,12 +1956,12 @@ fn validateStmts(stmts: []const Stmt) !void {
             },
             .mem_write_bytes => |a| {
                 if (a.mem.kind() != .mem) {
-                    std.log.err("js_asic: write to '{s}' which is not a memory", .{a.mem.name()});
+                    std.log.err("zihdl: write to '{s}' which is not a memory", .{a.mem.name()});
                     return error.InvalidStatement;
                 }
                 const bytes = (a.mem.width() + 7) / 8;
                 if (a.be.width != bytes or a.src.width != a.mem.width()) {
-                    std.log.err("js_asic: byte-enable memory write width mismatch on '{s}'", .{a.mem.name()});
+                    std.log.err("zihdl: byte-enable memory write width mismatch on '{s}'", .{a.mem.name()});
                     return error.InvalidStatement;
                 }
                 try validateExpr(a.addr);
@@ -2101,15 +2101,15 @@ fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
     if (!@hasDecl(BlockType, "Params")) return;
     inline for (@typeInfo(BlockType.Params).@"struct".fields) |field| {
         const sym = mb.scope.find(field.name) orelse {
-            std.log.err("js_asic: block '{s}' Params schema declares '{s}' but build never calls mb.moduleParam", .{ BlockType.name, field.name });
+            std.log.err("zihdl: block '{s}' Params schema declares '{s}' but build never calls mb.moduleParam", .{ BlockType.name, field.name });
             return error.MissingParameter;
         };
         if (sym.kind() != .module_param) {
-            std.log.err("js_asic: block '{s}' parameter '{s}' must be declared with mb.moduleParam, not mb.constant", .{ BlockType.name, field.name });
+            std.log.err("zihdl: block '{s}' parameter '{s}' must be declared with mb.moduleParam, not mb.constant", .{ BlockType.name, field.name });
             return error.InvalidParameter;
         }
         if (sym.width() != valWidth(field.type)) {
-            std.log.err("js_asic: block '{s}' parameter '{s}' schema width {d} does not match declaration width {d}", .{ BlockType.name, field.name, valWidth(field.type), sym.width() });
+            std.log.err("zihdl: block '{s}' parameter '{s}' schema width {d} does not match declaration width {d}", .{ BlockType.name, field.name, valWidth(field.type), sym.width() });
             return error.InvalidParameter;
         }
     }
@@ -2298,7 +2298,7 @@ fn findInputTiming(module: *const Module, signal: SymRef) ?InputTiming {
 }
 
 fn hierarchyConflict(parent: *const Module, inst: Instance, child: *const Module, signal: []const u8, what: []const u8) error{InvalidTimingIntent} {
-    std.log.warn("js_asic: conflicting {s} for input '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+    std.log.warn("zihdl: conflicting {s} for input '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
         what, signal, parent.name, child.name, inst.instance_name,
     });
     return error.InvalidTimingIntent;
@@ -2357,7 +2357,7 @@ fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Ins
             if (!hierarchySymEqual(mapped_clock, parent_clock.clk.ref)) continue;
             if (!hierarchySymEqual(mapped_related, parent_related)) continue;
             if (parent_rel.relation != child_rel.relation) {
-                std.log.warn("js_asic: conflicting clock relationship kind for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                std.log.warn("zihdl: conflicting clock relationship kind for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
                     parent_clock.name, parent.name, child.name, inst.instance_name,
                 });
                 return error.InvalidTimingIntent;
@@ -2365,7 +2365,7 @@ fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Ins
             if (parent_rel.source_period != null and child_rel.source_period != null and
                 !hierarchyTimeEqual(parent_rel.source_period.?, child_rel.source_period.?))
             {
-                std.log.warn("js_asic: conflicting clock source period for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                std.log.warn("zihdl: conflicting clock source period for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
                     parent_clock.name, parent.name, child.name, inst.instance_name,
                 });
                 return error.InvalidTimingIntent;
@@ -2373,7 +2373,7 @@ fn validateInstanceTiming(parent: *const Module, child: *const Module, inst: Ins
             if (parent_rel.jitter != null and child_rel.jitter != null and
                 !hierarchyTimeEqual(parent_rel.jitter.?, child_rel.jitter.?))
             {
-                std.log.warn("js_asic: conflicting clock jitter for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
+                std.log.warn("zihdl: conflicting clock jitter for '{s}' between module '{s}' and child '{s}' instance '{s}'", .{
                     parent_clock.name, parent.name, child.name, inst.instance_name,
                 });
                 return error.InvalidTimingIntent;
@@ -2562,7 +2562,7 @@ fn validateTimingTree(design: *const Design, root: *const Module) !void {
         for (inputs.items[i + 1 ..]) |b| {
             if (!hierarchySymEqual(a.signal, b.signal)) continue;
             if (inputRowsConflict(a, b)) |what| {
-                std.log.warn("js_asic: conflicting {s} for input '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
+                std.log.warn("zihdl: conflicting {s} for input '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
                     what, a.signal.name(), root.name, a.module_name, b.module_name,
                 });
                 return error.InvalidTimingIntent;
@@ -2573,7 +2573,7 @@ fn validateTimingTree(design: *const Design, root: *const Module) !void {
         for (relations.items[i + 1 ..]) |b| {
             if (!hierarchySymEqual(a.clk, b.clk) or !hierarchySymEqual(a.related, b.related)) continue;
             if (relationshipConflict(a, b)) |what| {
-                std.log.warn("js_asic: conflicting {s} for clock '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
+                std.log.warn("zihdl: conflicting {s} for clock '{s}' in module '{s}' resolved from '{s}' and '{s}'", .{
                     what, a.clock_name, root.name, a.module_name, b.module_name,
                 });
                 return error.InvalidTimingIntent;
@@ -3352,11 +3352,11 @@ pub const ModuleBuilder = struct {
         for (self.assigns.items) |a| {
             const kind = a.dst.kind();
             if (kind == .input or kind == .reg or kind == .mem or kind == .constant or kind == .module_param) {
-                std.log.err("js_asic: continuous assignment to non-net '{s}' in module '{s}'", .{ a.dst.name(), self.name });
+                std.log.err("zihdl: continuous assignment to non-net '{s}' in module '{s}'", .{ a.dst.name(), self.name });
                 return error.InvalidAssignment;
             }
             if (a.src.width != a.dst.width()) {
-                std.log.err("js_asic: continuous assignment width mismatch on '{s}' in module '{s}'", .{ a.dst.name(), self.name });
+                std.log.err("zihdl: continuous assignment width mismatch on '{s}' in module '{s}'", .{ a.dst.name(), self.name });
                 return error.InvalidAssignment;
             }
             try validateExpr(a.src);
@@ -3367,7 +3367,7 @@ pub const ModuleBuilder = struct {
             if (proc.sensitivity == .edge) {
                 const clk = proc.sensitivity.edge.clk;
                 if (clk.kind() != .input) {
-                    std.log.err("js_asic: clock '{s}' is not a module input in '{s}'", .{ clk.name(), self.name });
+                    std.log.err("zihdl: clock '{s}' is not a module input in '{s}'", .{ clk.name(), self.name });
                     return error.InvalidProcess;
                 }
             }
@@ -3377,7 +3377,7 @@ pub const ModuleBuilder = struct {
             try collectAssigned(self.allocator, proc.stmts, &assigned);
             for (assigned.items) |r| {
                 if (r.scope != self.scope) {
-                    std.log.err("js_asic: statement in module '{s}' references a signal from another scope", .{self.name});
+                    std.log.err("zihdl: statement in module '{s}' references a signal from another scope", .{self.name});
                     return error.ForeignSignal;
                 }
                 drivers[r.idx] += 1;
@@ -3392,7 +3392,7 @@ pub const ModuleBuilder = struct {
                 try definiteAssigned(self.allocator, proc.stmts, n, definite);
                 for (assigned.items) |r| {
                     if (!definite[r.idx]) {
-                        std.log.warn("js_asic: comb process assigns '{s}' on only some paths in module '{s}' (latch inferred)", .{ r.name(), self.name });
+                        std.log.warn("zihdl: comb process assigns '{s}' on only some paths in module '{s}' (latch inferred)", .{ r.name(), self.name });
                         return error.LatchInference;
                     }
                 }
@@ -3408,11 +3408,11 @@ pub const ModuleBuilder = struct {
         for (drivers, 0..) |count, i| {
             const sym = self.scope.symbols.items[i];
             if (count > 1) {
-                std.log.err("js_asic: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
+                std.log.err("zihdl: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
                 return error.MultipleDrivers;
             }
             if (sym.kind == .output and count == 0) {
-                std.log.warn("js_asic: output '{s}' is never driven in module '{s}'", .{ sym.name, self.name });
+                std.log.warn("zihdl: output '{s}' is never driven in module '{s}'", .{ sym.name, self.name });
                 return error.UndrivenOutput;
             }
         }
@@ -3483,7 +3483,7 @@ pub const ModuleBuilder = struct {
                 top.next += 1;
                 if (!comb_driven[dep]) continue;
                 if (color[dep] == 1) {
-                    std.log.warn("js_asic: combinational loop on '{s}' in module '{s}'", .{ self.scope.symbols.items[dep].name, self.name });
+                    std.log.warn("zihdl: combinational loop on '{s}' in module '{s}'", .{ self.scope.symbols.items[dep].name, self.name });
                     return error.CombinationalLoop;
                 }
                 if (color[dep] == 0) {
@@ -3496,7 +3496,7 @@ pub const ModuleBuilder = struct {
         for (self.instances.items, 0..) |inst, i| {
             for (self.instances.items[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, inst.instance_name, other.instance_name)) {
-                    std.log.err("js_asic: duplicate instance name '{s}' in module '{s}'", .{ inst.instance_name, self.name });
+                    std.log.err("zihdl: duplicate instance name '{s}' in module '{s}'", .{ inst.instance_name, self.name });
                     return error.DuplicateInstance;
                 }
             }
@@ -3515,73 +3515,73 @@ pub const ModuleBuilder = struct {
         try self.validateClockTiming();
         for (self.timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .input) {
-                std.log.warn("js_asic: timing intent for '{s}' in module '{s}' must reference an input port of this module", .{ intent.signal.name(), self.name });
+                std.log.warn("zihdl: timing intent for '{s}' in module '{s}' must reference an input port of this module", .{ intent.signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
             for (self.timing.items[0..i]) |other| {
                 if (other.signal.scope == intent.signal.scope and other.signal.idx == intent.signal.idx) {
-                    std.log.warn("js_asic: duplicate timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: duplicate timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
             }
             const width = intent.signal.width();
             if (intent.clock) |clk| {
                 if (clk.scope != self.scope or clk.kind() != .input or clk.width() != 1) {
-                    std.log.warn("js_asic: timing intent clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: timing intent clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
             }
             for (intent.stages, 0..) |stage, si| {
                 if (stage.signal.scope != self.scope) {
-                    std.log.warn("js_asic: synchronizer stage {d} for '{s}' in module '{s}' is not in this module", .{ si, intent.signal.name(), self.name });
+                    std.log.warn("zihdl: synchronizer stage {d} for '{s}' in module '{s}' is not in this module", .{ si, intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
                 const sym = stage.signal.symbol();
                 const is_reg = sym.kind == .reg or (sym.kind == .output and sym.is_reg);
                 if (!is_reg or sym.width != width) {
-                    std.log.warn("js_asic: synchronizer stage '{s}' for '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), intent.signal.name(), self.name, width });
+                    std.log.warn("zihdl: synchronizer stage '{s}' for '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), intent.signal.name(), self.name, width });
                     return error.InvalidTimingIntent;
                 }
                 if (stage.bit) |bit| {
                     if (bit >= sym.width) {
-                        std.log.warn("js_asic: synchronizer stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
+                        std.log.warn("zihdl: synchronizer stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
                 for (intent.stages[0..si]) |other| {
                     if (other.signal.scope == stage.signal.scope and other.signal.idx == stage.signal.idx and other.bit == stage.bit) {
-                        std.log.warn("js_asic: duplicate synchronizer stage '{s}' for '{s}' in module '{s}'", .{ stage.signal.name(), intent.signal.name(), self.name });
+                        std.log.warn("zihdl: duplicate synchronizer stage '{s}' for '{s}' in module '{s}'", .{ stage.signal.name(), intent.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
             }
             if (intent.classification != .synchronous and (intent.arrival_min != null or intent.arrival_max != null)) {
-                std.log.warn("js_asic: timing intent for '{s}' in module '{s}' declares arrival times but is not synchronous", .{ intent.signal.name(), self.name });
+                std.log.warn("zihdl: timing intent for '{s}' in module '{s}' declares arrival times but is not synchronous", .{ intent.signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
             inline for (.{ intent.arrival_min, intent.arrival_max }) |bound| {
                 if (bound) |value| {
                     if (!std.math.isFinite(value.value)) {
-                        std.log.warn("js_asic: timing intent arrival for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
+                        std.log.warn("zihdl: timing intent arrival for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
             }
             if (intent.arrival_min != null and intent.arrival_max != null) {
                 if (timeValueInPs(intent.arrival_min.?) > timeValueInPs(intent.arrival_max.?)) {
-                    std.log.warn("js_asic: timing intent arrival window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: timing intent arrival window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
             }
             if (intent.slew) |slew| try self.validateSlew(intent.signal, slew);
             for (intent.per_bit_slew, 0..) |entry, bi| {
                 if (entry.bit >= width) {
-                    std.log.warn("js_asic: per-bit slew bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
+                    std.log.warn("zihdl: per-bit slew bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
                 for (intent.per_bit_slew[0..bi]) |other| {
                     if (other.bit == entry.bit) {
-                        std.log.warn("js_asic: duplicate per-bit slew for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
+                        std.log.warn("zihdl: duplicate per-bit slew for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
@@ -3590,24 +3590,24 @@ pub const ModuleBuilder = struct {
         }
         for (self.output_timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .output) {
-                std.log.warn("js_asic: output timing intent for '{s}' in module '{s}' must reference an output port of this module", .{ intent.signal.name(), self.name });
+                std.log.warn("zihdl: output timing intent for '{s}' in module '{s}' must reference an output port of this module", .{ intent.signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
             for (self.output_timing.items[0..i]) |other| {
                 if (other.signal.scope == intent.signal.scope and other.signal.idx == intent.signal.idx) {
-                    std.log.warn("js_asic: duplicate output timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: duplicate output timing intent for '{s}' in module '{s}'", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
             }
             if (intent.load) |load| try self.validateLoad(intent.signal, load);
             for (intent.per_bit_load, 0..) |entry, bi| {
                 if (entry.bit >= intent.signal.width()) {
-                    std.log.warn("js_asic: per-bit load bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
+                    std.log.warn("zihdl: per-bit load bit {d} for '{s}' in module '{s}' is out of range", .{ entry.bit, intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
                 for (intent.per_bit_load[0..bi]) |other| {
                     if (other.bit == entry.bit) {
-                        std.log.warn("js_asic: duplicate per-bit load for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
+                        std.log.warn("zihdl: duplicate per-bit load for bit {d} of '{s}' in module '{s}'", .{ entry.bit, intent.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
@@ -3618,17 +3618,17 @@ pub const ModuleBuilder = struct {
                 // soon as a design has more than one clock; never emit one.
                 if (intent.required_clock) |clock| {
                     if (clock.scope != self.scope or clock.kind() != .input or clock.width() != 1) {
-                        std.log.warn("js_asic: output timing required clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
+                        std.log.warn("zihdl: output timing required clock for '{s}' in module '{s}' must be a 1-bit input of this module", .{ intent.signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 } else {
-                    std.log.warn("js_asic: output timing required window for '{s}' in module '{s}' must name its reference clock", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: output timing required window for '{s}' in module '{s}' must name its reference clock", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
                 inline for (.{ intent.required_min, intent.required_max }) |bound| {
                     if (bound) |value| {
                         if (!std.math.isFinite(value.value)) {
-                            std.log.warn("js_asic: output timing required time for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
+                            std.log.warn("zihdl: output timing required time for '{s}' in module '{s}' is not finite", .{ intent.signal.name(), self.name });
                             return error.InvalidTimingIntent;
                         }
                     }
@@ -3636,11 +3636,11 @@ pub const ModuleBuilder = struct {
                 if (intent.required_min != null and intent.required_max != null and
                     timeValueInPs(intent.required_min.?) > timeValueInPs(intent.required_max.?))
                 {
-                    std.log.warn("js_asic: output timing required window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
+                    std.log.warn("zihdl: output timing required window for '{s}' in module '{s}' has min > max", .{ intent.signal.name(), self.name });
                     return error.InvalidTimingIntent;
                 }
             } else if (intent.required_clock != null) {
-                std.log.warn("js_asic: output timing for '{s}' in module '{s}' names a required clock but declares no required bound", .{ intent.signal.name(), self.name });
+                std.log.warn("zihdl: output timing for '{s}' in module '{s}' names a required clock but declares no required bound", .{ intent.signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
         }
@@ -3655,30 +3655,30 @@ pub const ModuleBuilder = struct {
         for (self.clocks.items) |clock| {
             if (clock.release_synchronizer.len > 0) {
                 if (clock.reset.release != .synchronous) {
-                    std.log.warn("js_asic: clock domain '{s}' in module '{s}' declares a reset-release synchronizer but its release policy is not synchronous", .{ clock.name, self.name });
+                    std.log.warn("zihdl: clock domain '{s}' in module '{s}' declares a reset-release synchronizer but its release policy is not synchronous", .{ clock.name, self.name });
                     return error.InvalidTimingIntent;
                 }
                 const reset_width = clock.rst_n.ref.width();
                 for (clock.release_synchronizer, 0..) |stage, si| {
                     if (stage.signal.scope != self.scope) {
-                        std.log.warn("js_asic: reset-release stage {d} for clock domain '{s}' in module '{s}' is not in this module", .{ si, clock.name, self.name });
+                        std.log.warn("zihdl: reset-release stage {d} for clock domain '{s}' in module '{s}' is not in this module", .{ si, clock.name, self.name });
                         return error.InvalidTimingIntent;
                     }
                     const sym = stage.signal.symbol();
                     const is_reg = sym.kind == .reg or (sym.kind == .output and sym.is_reg);
                     if (!is_reg or sym.width != reset_width) {
-                        std.log.warn("js_asic: reset-release stage '{s}' for clock domain '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), clock.name, self.name, reset_width });
+                        std.log.warn("zihdl: reset-release stage '{s}' for clock domain '{s}' in module '{s}' must be a {d}-bit register", .{ stage.signal.name(), clock.name, self.name, reset_width });
                         return error.InvalidTimingIntent;
                     }
                     if (stage.bit) |bit| {
                         if (bit >= sym.width) {
-                            std.log.warn("js_asic: reset-release stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
+                            std.log.warn("zihdl: reset-release stage bit {d} out of range for '{s}' in module '{s}'", .{ bit, stage.signal.name(), self.name });
                             return error.InvalidTimingIntent;
                         }
                     }
                     for (clock.release_synchronizer[0..si]) |other| {
                         if (other.signal.scope == stage.signal.scope and other.signal.idx == stage.signal.idx and other.bit == stage.bit) {
-                            std.log.warn("js_asic: duplicate reset-release stage '{s}' for clock domain '{s}' in module '{s}'", .{ stage.signal.name(), clock.name, self.name });
+                            std.log.warn("zihdl: duplicate reset-release stage '{s}' for clock domain '{s}' in module '{s}'", .{ stage.signal.name(), clock.name, self.name });
                             return error.InvalidTimingIntent;
                         }
                     }
@@ -3687,18 +3687,18 @@ pub const ModuleBuilder = struct {
             if (clock.relationship) |rel| {
                 if (rel.related_to) |ref| {
                     if (ref.scope != self.scope or ref.kind() != .input or ref.width() != 1) {
-                        std.log.warn("js_asic: clock relationship target for domain '{s}' in module '{s}' must be a 1-bit input of this module", .{ clock.name, self.name });
+                        std.log.warn("zihdl: clock relationship target for domain '{s}' in module '{s}' must be a 1-bit input of this module", .{ clock.name, self.name });
                         return error.InvalidTimingIntent;
                     }
                     if (ref.scope == clock.clk.ref.scope and ref.idx == clock.clk.ref.idx) {
-                        std.log.warn("js_asic: clock domain '{s}' in module '{s}' relates to itself", .{ clock.name, self.name });
+                        std.log.warn("zihdl: clock domain '{s}' in module '{s}' relates to itself", .{ clock.name, self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
                 inline for (.{ rel.source_period, rel.jitter }) |bound| {
                     if (bound) |value| {
                         if (!std.math.isFinite(value.value) or value.value < 0) {
-                            std.log.warn("js_asic: clock relationship for domain '{s}' in module '{s}' must use finite, non-negative times", .{ clock.name, self.name });
+                            std.log.warn("zihdl: clock relationship for domain '{s}' in module '{s}' must use finite, non-negative times", .{ clock.name, self.name });
                             return error.InvalidTimingIntent;
                         }
                     }
@@ -3706,7 +3706,7 @@ pub const ModuleBuilder = struct {
                 if (rel.source_period != null and rel.jitter != null and
                     timeValueInPs(rel.jitter.?) > timeValueInPs(rel.source_period.?))
                 {
-                    std.log.warn("js_asic: clock relationship for domain '{s}' in module '{s}' declares jitter larger than the source period", .{ clock.name, self.name });
+                    std.log.warn("zihdl: clock relationship for domain '{s}' in module '{s}' declares jitter larger than the source period", .{ clock.name, self.name });
                     return error.InvalidTimingIntent;
                 }
             }
@@ -3717,7 +3717,7 @@ pub const ModuleBuilder = struct {
     /// is the whole-port or a per-bit override.
     fn validateLoad(self: *ModuleBuilder, signal: SymRef, load: LoadValue) !void {
         if (!std.math.isFinite(load.value) or load.value < 0) {
-            std.log.warn("js_asic: output timing load for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
+            std.log.warn("zihdl: output timing load for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
             return error.InvalidTimingIntent;
         }
     }
@@ -3732,7 +3732,7 @@ pub const ModuleBuilder = struct {
             slew.threshold.high_fraction > 1 or
             slew.threshold.low_fraction >= slew.threshold.high_fraction)
         {
-            std.log.warn("js_asic: timing intent slew thresholds for '{s}' in module '{s}' must satisfy 0 <= low < high <= 1", .{ signal.name(), self.name });
+            std.log.warn("zihdl: timing intent slew thresholds for '{s}' in module '{s}' must satisfy 0 <= low < high <= 1", .{ signal.name(), self.name });
             return error.InvalidTimingIntent;
         }
         var any_bound = false;
@@ -3741,7 +3741,7 @@ pub const ModuleBuilder = struct {
                 if (bound) |value| {
                     any_bound = true;
                     if (!std.math.isFinite(value.value) or value.value < 0) {
-                        std.log.warn("js_asic: timing intent slew bound for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
+                        std.log.warn("zihdl: timing intent slew bound for '{s}' in module '{s}' must be finite and non-negative", .{ signal.name(), self.name });
                         return error.InvalidTimingIntent;
                     }
                 }
@@ -3749,12 +3749,12 @@ pub const ModuleBuilder = struct {
             if (window.min != null and window.max != null and
                 timeValueInPs(window.min.?) > timeValueInPs(window.max.?))
             {
-                std.log.warn("js_asic: timing intent slew window for '{s}' in module '{s}' has min > max", .{ signal.name(), self.name });
+                std.log.warn("zihdl: timing intent slew window for '{s}' in module '{s}' has min > max", .{ signal.name(), self.name });
                 return error.InvalidTimingIntent;
             }
         }
         if (!any_bound) {
-            std.log.warn("js_asic: timing intent slew for '{s}' in module '{s}' declares thresholds but no rise/fall bound", .{ signal.name(), self.name });
+            std.log.warn("zihdl: timing intent slew for '{s}' in module '{s}' declares thresholds but no rise/fall bound", .{ signal.name(), self.name });
             return error.InvalidTimingIntent;
         }
     }

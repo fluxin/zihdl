@@ -14,7 +14,7 @@ const sdc = @import("sdc.zig");
 const golden_v =
     \\// ============================================================================
     \\// Hardware Module: golden_child
-    \\// Synthesized from typed Zig AST (js_asic)
+    \\// Synthesized from typed Zig AST (zihdl)
     \\// ============================================================================
     \\`timescale 1ns / 1ps
     \\`default_nettype none
@@ -62,7 +62,7 @@ const golden_v =
     \\            end else begin
     \\                state <= state_DONE;
     \\            end
-    \\            `ifdef JS_ASIC_ASSERT
+    \\            `ifdef ZIHDL_ASSERT
     \\            assert ((state != state_IDLE)) else $error("never idle");
     \\`endif
     \\        end
@@ -73,7 +73,7 @@ const golden_v =
     \\
     \\// ============================================================================
     \\// Hardware Module: golden_top
-    \\// Synthesized from typed Zig AST (js_asic)
+    \\// Synthesized from typed Zig AST (zihdl)
     \\// ============================================================================
     \\`timescale 1ns / 1ps
     \\`default_nettype none
@@ -112,7 +112,7 @@ const golden_v =
 const golden_sv =
     \\// ============================================================================
     \\// Hardware Module: golden_child
-    \\// Synthesized from typed Zig AST (js_asic, SystemVerilog target)
+    \\// Synthesized from typed Zig AST (zihdl, SystemVerilog target)
     \\// ============================================================================
     \\`timescale 1ns / 1ps
     \\`default_nettype none
@@ -157,7 +157,7 @@ const golden_sv =
     \\            end else begin
     \\                state <= state_DONE;
     \\            end
-    \\            `ifdef JS_ASIC_ASSERT
+    \\            `ifdef ZIHDL_ASSERT
     \\            assert ((state != state_IDLE)) else $error("never idle");
     \\`endif
     \\        end
@@ -168,7 +168,7 @@ const golden_sv =
     \\
     \\// ============================================================================
     \\// Hardware Module: golden_top
-    \\// Synthesized from typed Zig AST (js_asic, SystemVerilog target)
+    \\// Synthesized from typed Zig AST (zihdl, SystemVerilog target)
     \\// ============================================================================
     \\`timescale 1ns / 1ps
     \\`default_nettype none
@@ -251,5 +251,5 @@ test "artifact emission is deterministic" {
     try std.testing.expect(std.mem.indexOf(u8, json1, "\"encoding\": \"binary\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json1, "\"name\": \"frame\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json1, "\"message\": \"never idle\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sdc1, "# js_asic SDC for golden_top") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sdc1, "# zihdl SDC for golden_top") != null);
 }

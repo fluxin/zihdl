@@ -90,7 +90,7 @@ test "provenance is deterministic and binds ids to exact emitted bytes" {
 
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, first.json, .{});
     const prov = provRoot(root);
-    try std.testing.expectEqualStrings("js_asic.provenance/1", prov.object.get("schema").?.string);
+    try std.testing.expectEqualStrings("zihdl.provenance/1", prov.object.get("schema").?.string);
 
     // Artifact binding: language, exact byte length, SHA-256 of the RTL.
     const artifact = prov.object.get("artifact").?;

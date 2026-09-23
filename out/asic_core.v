@@ -1,6 +1,6 @@
 // ============================================================================
 // Hardware Module: i2c_slave_loader_42
-// Synthesized from typed Zig AST (js_asic)
+// Synthesized from typed Zig AST (zihdl)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
@@ -296,7 +296,7 @@ endmodule
 
 // ============================================================================
 // Hardware Module: sram_partition_single_64
-// Synthesized from typed Zig AST (js_asic)
+// Synthesized from typed Zig AST (zihdl)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
@@ -513,7 +513,7 @@ endmodule
 
 // ============================================================================
 // Hardware Module: zio_timing_unit_x16_f16
-// Synthesized from typed Zig AST (js_asic)
+// Synthesized from typed Zig AST (zihdl)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
@@ -796,7 +796,7 @@ endmodule
 
 // ============================================================================
 // Hardware Module: programmable_asic_i2c_42
-// Synthesized from typed Zig AST (js_asic)
+// Synthesized from typed Zig AST (zihdl)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
