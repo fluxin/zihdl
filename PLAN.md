@@ -4,22 +4,6 @@ This file tracks unfinished work. The current implementation and verification
 commands are in [README.md](README.md); API limits are in [docs/api.md](docs/api.md).
 Physical implementation and signoff are tracked in `../oasic`.
 
-## Consumer compatibility
-
-1. Update `../oasic/parsers/design_json.odin` to accept the renamed
-   `zihdl.design/1`, `zihdl.provenance/1`,
-   `zihdl.timing_intent/1`, and `zihdl.timing_intent/2` schemas. The parser still checks the former
-   namespace. After the change, generate the contract fixture with
-   `zig build contract` and replay both
-   `out/contract/timing_contract_v1.json` and
-   `out/contract/timing_contract.json` with `../oasic/oasic -sim-verilog`,
-   `-stimulus`, and `-design-json`.
-2. Add an `oasic` functional replay gate for the generated protocol emulator
-   when its Verilog front end can consume the emitted RTL and metadata. Check
-   the same 60/120 MHz Ethernet stimuli already exercised by the in-tree
-   witnesses. Keep the in-tree Icarus and Verilator checks as independent
-   regressions.
-
 ## Protocol emulator
 
 1. Complete the USB low-speed packet layer in

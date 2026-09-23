@@ -533,6 +533,23 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(zio_step);
     verify_step.dependOn(protocols_step);
 
+    // Consumer replay is an explicit cross-repository gate. It uses the
+    // generated metadata as well as RTL, so schema drift fails the build.
+    const oasic_bin = b.option([]const u8, "oasic-bin", "Path to the oasic executable for verify-oasic") orelse "../oasic/oasic";
+    const verify_oasic = b.step("verify-oasic", "Replay contract and 60/120 MHz ZIO artifacts through oasic");
+    const contract_v1_replay = b.addSystemCommand(&.{ oasic_bin, "-sim-verilog", "out/contract/timing_contract.v", "-stimulus", "out/contract/timing_contract.jsonl", "-design-json", "out/contract/timing_contract_v1.json" });
+    contract_v1_replay.step.dependOn(&contract_gen.step);
+    const contract_v2_replay = b.addSystemCommand(&.{ oasic_bin, "-sim-verilog", "out/contract/timing_contract.v", "-stimulus", "out/contract/timing_contract.jsonl", "-design-json", "out/contract/timing_contract.json" });
+    contract_v2_replay.step.dependOn(&contract_v1_replay.step);
+    var last_replay: *std.Build.Step = &contract_v2_replay.step;
+    inline for (.{ "60", "120" }) |tag| {
+        const replay = b.addSystemCommand(&.{ oasic_bin, "-sim-verilog", "out/zio_asic_" ++ tag ++ ".v", "-synth-top", "programmable_asic_i2c_42", "-stimulus", "out/zio_asic_" ++ tag ++ ".jsonl", "-design-json", "out/zio_asic_" ++ tag ++ ".json" });
+        replay.step.dependOn(zio_step);
+        replay.step.dependOn(last_replay);
+        last_replay = &replay.step;
+    }
+    verify_oasic.dependOn(last_replay);
+
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.
     run_cmd.step.dependOn(b.getInstallStep());

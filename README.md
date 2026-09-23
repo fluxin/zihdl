@@ -109,10 +109,10 @@ not change the v1 projection. The fixture passes v2; product runners stay v1.
 New fields are additive under `/2` because consumers skip unknown
 JSON fields and the version gate promises capabilities, not byte layout; a
 consumer that does not read a field keeps it unknown. The `oasic` consumer
-binds v2 fields (required windows, release topology, clock relationships) but
-must accept the `zihdl.*` schema namespace before it can read freshly emitted
-metadata. The timing equations, recovery/removal and relationship analysis
-remain its responsibility. `/3` is reserved for incompatible schema changes.
+binds v2 fields (required windows, release topology, clock relationships) and
+accepts both the former `js_asic.*` and current `zihdl.*` schema names. The
+timing equations, recovery/removal and relationship analysis remain its
+responsibility. `/3` is reserved for incompatible schema changes.
 
 | Field | Meaning |
 |---|---|
@@ -213,6 +213,9 @@ zig build divmod
 
 # Lint and simulate every emitted artifact
 zig build verify
+
+# Replay generated contract and ZIO RTL with metadata through the sibling oasic
+zig build verify-oasic
 ```
 
 ## Known gaps
