@@ -13,6 +13,7 @@ pub const edge_det = @import("blocks/edge_det.zig");
 pub const counter = @import("blocks/counter.zig");
 pub const timer = @import("blocks/timer.zig");
 pub const memory = @import("blocks/memory.zig");
+pub const arbiter = @import("blocks/arbiter.zig");
 
 pub const SramBlock = sram.SramBlock;
 pub const TtSramBlock = sram.TtSramBlock;
@@ -34,6 +35,8 @@ pub const CounterBlock = counter.CounterBlock;
 pub const TimerBlock = timer.TimerBlock;
 pub const RomBlock = memory.RomBlock;
 pub const RamBlock = memory.RamBlock;
+pub const RoundRobinArbiterBlock = arbiter.RoundRobinArbiterBlock;
+pub const StreamCrossbarBlock = arbiter.StreamCrossbarBlock;
 
 test {
     _ = sram;
@@ -49,4 +52,5 @@ test {
     _ = counter;
     _ = timer;
     _ = memory;
+    _ = arbiter;
 }

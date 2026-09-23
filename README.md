@@ -214,6 +214,9 @@ zig build cdc
 # Timer, initialized ROM and RAM read/write collision modes (iverilog)
 zig build timer-memory
 
+# Round-robin arbitration and ready/valid crossbar contention (iverilog)
+zig build arbiter
+
 # Division/remainder witness: operators and folded constants (iverilog)
 zig build divmod
 
@@ -236,7 +239,7 @@ holes matter for general-purpose use; the detailed review is in
 | Expressions | `add`/`sub`/`mul`/`div`/`mod`/bitwise/comparisons extend unequal-width operands explicitly and are verified end-to-end through oasic; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is declaration-level (`SignedSignal(W)`, `MemOpts.signed`, `SignedStream(W)`) and flows through lib register/synchronizer helpers, so `asSigned` is reinterpretation only; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
 | Parameterization | Widths/depths are comptime type arguments: block families declare a `Shape` schema and `instantiateShape` merges instance-site overrides, so a parent's comptime value parameter forwards into a child's shape (each distinct shape is its own checked module) and resolved shapes are recorded per instance in `design.json`; runtime `Param(W)` values stay 64-bit Verilog overrides and cannot size ports or memories, though a parent parameter or constant can be forwarded by name into a child override (`#(.CHILD(PARENT))`) |
 | Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
-| Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a quasi-static bundled-data crossing, single-slot and FIFO-backed mailboxes, a single-clock UART, SPI target, I2C target loader, timer, initialized ROM and synchronous RAM blocks and a structural CDC lint landed; the lint tracks domain ownership and structural first flops per data bit (first 64 bits, whole-signal fallbacks for unmappable shapes) and honors per-bit declared synchronizer stages; remaining: AXI4-Lite, arbiter, crossbar and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
+| Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a quasi-static bundled-data crossing, single-slot and FIFO-backed mailboxes, a single-clock UART, SPI target, I2C target loader, timer, initialized ROM, synchronous RAM, round-robin arbiter and ready/valid crossbar blocks and a structural CDC lint landed; the lint tracks domain ownership and structural first flops per data bit (first 64 bits, whole-signal fallbacks for unmappable shapes) and honors per-bit declared synchronizer stages; remaining: AXI4-Lite and a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
 | Timing / constraints | Output required times (with explicit clock and edge), clock relationships, reset-release topology and per-bit slew/load overrides are authored (v2), and hierarchy contradictions are rejected transitively through silent levels and siblings; per-bit values still have no consumer analysis and constraint resolution stays consumer-side; SDC has no IO delays, multicycle or generated clocks |
 | Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
 | Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; pre-release package version `0.0.0` |

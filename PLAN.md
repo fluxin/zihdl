@@ -8,8 +8,6 @@ Physical implementation and signoff are tracked in `../oasic`.
 
 1. Add AXI4-Lite interface blocks in `src/blocks/`, with typed ports and
    read/write handshake witnesses.
-2. Add a round-robin arbiter and crossbar, including contention and fairness
-   witnesses.
 
 Expose each block through `src/blocks.zig` and include its witness in
 `zig build verify` before marking it complete.
