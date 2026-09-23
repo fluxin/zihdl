@@ -15,11 +15,14 @@ See [docs/](docs/README.md) for [code structure](docs/code-structure.md),
 and the [API review](docs/api.md).
 
 The protocol emulator has host-assembled 10BASE-T, USB low-speed packet,
-SPI master (all four modes) and JTAG TAP microcode. The USB caller supplies
-payload and CRC bytes; SPI and JTAG capture four-bit pin samples with MISO/TDO
-in bit 3. Programs preload at most 16 TX FIFO words. Run `zig build protocols`
-for the direct ZIO RTL pin and capture witnesses; `zig build verify` includes
-them. The standalone 10BASE-T RTL serializer is a reusable library block under
+SPI master (all four modes) and JTAG TAP microcode. USB token/data constructors
+generate CRC5/CRC16; the decoder checks PID, CRC, NRZI, stuffing and EOP.
+SPI RX words unpack into bytes. SPI preloads up to 16 TX FIFO words and refills
+the remaining ordered stream whenever `tx_full` clears. `zig build protocols`
+checks USB data/token/ACK packets and 10 ms reset at 60/120 MHz, plus all four
+SPI modes with varied MISO and an eight-byte transfer that crosses the FIFO
+limit. `zig build verify` includes these direct ZIO RTL witnesses. The
+standalone 10BASE-T RTL serializer is a reusable library block under
 `src/blocks/`, with its witness under `examples/blocks/`.
 
 ## Artifacts

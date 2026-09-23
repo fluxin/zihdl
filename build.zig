@@ -473,7 +473,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const protocols_step = b.step("protocols", "Simulate USB, SPI and JTAG microcode on the ZIO RTL");
-    inline for (.{ "usb", "spi0", "spi1", "spi2", "spi3", "jtag" }) |tag| {
+    inline for (.{ "usb60", "usb120", "token60", "token120", "ack60", "ack120", "reset60", "reset120", "spi0", "spi1", "spi2", "spi3", "jtag" }) |tag| {
         const compile = b.addSystemCommand(&.{
             "iverilog",                      "-g2001",              "-s",                              "protocol_wave_tb", "-o",
             "out/protocol_" ++ tag ++ "_iv", "out/protocol_core.v", "out/protocol_" ++ tag ++ "_tb.v",
@@ -594,6 +594,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_blocks_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    const protocol_tests = b.addTest(.{ .root_module = protocol_wit_exe.root_module });
+    const run_protocol_tests = b.addRunArtifact(protocol_tests);
+    test_step.dependOn(&run_protocol_tests.step);
+    verify_step.dependOn(&run_protocol_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

@@ -4,21 +4,6 @@ This file tracks unfinished work. The current implementation and verification
 commands are in [README.md](README.md); API limits are in [docs/api.md](docs/api.md).
 Physical implementation and signoff are tracked in `../oasic`.
 
-## Protocol emulator
-
-1. Complete the USB low-speed packet layer in
-   `examples/protocol_emulator/usb_low_speed_microcode.zig`: generate and check
-   CRC bytes, assemble transactions, and decode received packets. Add an RTL
-   witness for the reset program; the current witness covers packet output and
-   the unit test checks reset duration from the instructions. Verify packet
-   and reset timing at 60 and 120 MHz.
-2. Complete SPI receive handling in
-   `examples/protocol_emulator/spi_master_microcode.zig`: unpack MISO samples
-   into bytes and define a long-transfer strategy beyond the preloaded
-   16-word TX FIFO. Verify all four CPOL/CPHA modes with varied input bits and
-   a transfer longer than the current FIFO limit, without underrun or lost RX
-   words.
-
 ## Reusable block library
 
 1. Add AXI4-Lite interface blocks in `src/blocks/`, with typed ports and

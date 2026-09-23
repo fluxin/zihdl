@@ -11,15 +11,23 @@ pub fn packSymbols(alloc: std.mem.Allocator, symbols: []const u4, bits_per_symbo
 
 /// Use when one loop iteration consumes several pin symbols (SPI and JTAG).
 pub fn packSymbolsWithIterations(alloc: std.mem.Allocator, symbols: []const u4, bits_per_symbol: u5, iterations: usize) ![]u32 {
+    return pack(alloc, symbols, bits_per_symbol, iterations, 16);
+}
+
+/// Return the full ordered stream for a host that refills TX while the core
+/// runs. The first 16 words are preloaded; later words are sent on !tx_full.
+pub fn packSymbolsForRefill(alloc: std.mem.Allocator, symbols: []const u4, bits_per_symbol: u5, iterations: usize) ![]u32 {
+    return pack(alloc, symbols, bits_per_symbol, iterations, null);
+}
+
+fn pack(alloc: std.mem.Allocator, symbols: []const u4, bits_per_symbol: u5, iterations: usize, max_words: ?usize) ![]u32 {
     if (bits_per_symbol != 2 and bits_per_symbol != 4) return error.InvalidSymbolWidth;
     if (symbols.len == 0 or iterations == 0) return error.EmptyStream;
     if (symbols.len % iterations != 0) return error.InvalidSymbolCount;
     if (iterations > 65_536) return error.TooManySymbols;
     const per_word: usize = 32 / @as(usize, bits_per_symbol);
-    // The default ZIO TX FIFO has 16 entries. These programs preload their
-    // whole stream before start; a longer transfer needs host refill support.
     const count = 1 + (symbols.len + per_word - 1) / per_word;
-    if (count > 16) return error.StreamTooLong;
+    if (max_words) |limit| if (count > limit) return error.StreamTooLong;
     const words = try alloc.alloc(u32, count);
     @memset(words, 0);
     errdefer alloc.free(words);
@@ -52,4 +60,7 @@ test "pin symbols pack across word boundaries with a count header" {
     defer alloc.free(pair);
     try std.testing.expectEqualSlices(u32, &.{ 16, 0x39393939, 2 }, pair);
     try std.testing.expectError(error.StreamTooLong, packSymbols(alloc, &([_]u4{1} ** 121), 4));
+    const refilled = try packSymbolsForRefill(alloc, &([_]u4{1} ** 121), 4, 121);
+    defer alloc.free(refilled);
+    try std.testing.expectEqual(@as(usize, 17), refilled.len);
 }

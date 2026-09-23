@@ -10,7 +10,23 @@ pub const Transfer = struct {
     symbols: []u4,
     half_cycles: u32,
     bit_count: usize,
+    preload_words: usize,
 };
+
+/// Each ZIO RX word contains eight four-bit pin samples, oldest in bits 31:28.
+/// SPI MISO is pin 3 and is sampled MSB first for each transfer byte.
+pub fn unpackRx(alloc: std.mem.Allocator, words: []const u32, byte_count: usize) ![]u8 {
+    if (words.len != byte_count) return error.InvalidRxWordCount;
+    const bytes = try alloc.alloc(u8, byte_count);
+    for (words, bytes) |word, *byte| {
+        byte.* = 0;
+        for (0..8) |i| {
+            const sample: u4 = @truncate(word >> @intCast(28 - 4 * i));
+            byte.* = (byte.* << 1) | @as(u8, sample >> 3);
+        }
+    }
+    return bytes;
+}
 
 /// Bytes are sent MSB first. Each received bit is captured as a four-bit pin
 /// sample, with MISO in bit 3. Eight samples fill one RX FIFO word.
@@ -41,7 +57,7 @@ pub fn assemble(alloc: std.mem.Allocator, bytes: []const u8, clk_hz: u64, baud_h
     }
     const owned_symbols = try symbols.toOwnedSlice(alloc);
     errdefer alloc.free(owned_symbols);
-    const stream = try wave.packSymbolsWithIterations(alloc, owned_symbols, 4, bytes.len * 8);
+    const stream = try wave.packSymbolsForRefill(alloc, owned_symbols, 4, bytes.len * 8);
     errdefer alloc.free(stream);
     const first = try wave.delayForInterval(1);
     const sample_hold = try wave.delayForInterval(@intCast(half - (if (cpha) @as(u64, 3) else 1)));
@@ -53,7 +69,7 @@ pub fn assemble(alloc: std.mem.Allocator, bytes: []const u8, clk_hz: u64, baud_h
         (if (cpha) isa.out(.PINS, 4, first) else isa.in(.PINS, 4, sample_hold)).toU32(), (if (cpha) isa.in(.PINS, 4, sample_hold) else isa.out(.PINS, 4, trailing_hold)).toU32(), isa.jmp(.Y_DEC, 6, 0).toU32(),    isa.set(.PINS, 0b0100 | idle_clk, 0).toU32(),
         isa.jmp(.ALWAYS, 12, 0).toU32(),
     });
-    return .{ .stream = stream, .program = program, .symbols = owned_symbols, .half_cycles = @intCast(half), .bit_count = bytes.len * 8 };
+    return .{ .stream = stream, .program = program, .symbols = owned_symbols, .half_cycles = @intCast(half), .bit_count = bytes.len * 8, .preload_words = @min(stream.len, 16) };
 }
 
 test "SPI four modes emit expected edges and sample slots" {
@@ -76,4 +92,18 @@ test "SPI four modes emit expected edges and sample slots" {
             @as(u32, isa.Instruction.fromU32(t.program[8]).delay + 1) +
             @as(u32, isa.Instruction.fromU32(t.program[9]).delay + 1) + 1);
     };
+}
+
+test "SPI RX words unpack to bytes and long transfer uses refill" {
+    const alloc = std.testing.allocator;
+    const rx = try unpackRx(alloc, &.{ 0x80008008, 0x08880880 }, 2);
+    defer alloc.free(rx);
+    try std.testing.expectEqualSlices(u8, &.{ 0x89, 0x76 }, rx);
+    try std.testing.expectError(error.InvalidRxWordCount, unpackRx(alloc, &.{0}, 2));
+    const transfer = try assemble(alloc, &([_]u8{0x5a} ** 8), 120_000_000, 10_000_000, false, false);
+    defer alloc.free(transfer.stream);
+    defer alloc.free(transfer.program);
+    defer alloc.free(transfer.symbols);
+    try std.testing.expect(transfer.stream.len > 16);
+    try std.testing.expectEqual(@as(usize, 16), transfer.preload_words);
 }
