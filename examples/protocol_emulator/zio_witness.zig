@@ -308,15 +308,19 @@ pub const Bundle = struct {
 };
 
 pub fn buildBundle(alloc: std.mem.Allocator, comptime clk_hz: u64) !Bundle {
+    return buildBundleForTechnology(alloc, clk_hz, .sky130);
+}
+
+pub fn buildBundleForTechnology(alloc: std.mem.Allocator, comptime clk_hz: u64, comptime technology: zihdl.blocks.sram.SramTechnology) !Bundle {
     const half: u32 = @intCast((clk_hz / 10_000_000) / 2);
     const frame = try eth_mc.assembleZioPayload(alloc, &default_payload, .{ .half_cycles = half, .nlp_period_cycles = short_nlp_period });
     var design = netlist.Design.init(alloc);
-    _ = try design.elaborate(asic.ProgrammableAsicBlock(.{ .clock_hz = clk_hz }));
+    _ = try design.elaborate(asic.ProgrammableAsicBlock(.{ .clock_hz = clk_hz, .sram_technology = technology }));
     var prov = try provenance.Collector.init(alloc, &design);
     const rtl = try verilog.emitDesign(alloc, &design, .{ .provenance = &prov });
     prov.bindArtifact(rtl, "verilog2001");
     const sdc_text = try sdc.emitDesignSdc(alloc, &design, .{});
-    const json_text = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &prov });
+    const json_text = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &prov, .timing_intent_version = 2 });
     return .{
         .clk_hz = clk_hz,
         .half_cycles = half,
@@ -480,7 +484,7 @@ pub fn buildHostImage(alloc: std.mem.Allocator, clk_hz: u64, program: []const u3
     return .{ .bytes = bytes, .cycles = bytes.len };
 }
 
-fn hexBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
+pub fn hexBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     for (bytes) |byte| {
@@ -491,7 +495,7 @@ fn hexBytes(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, cycles: usize) ![]u8 {
+pub fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, cycles: usize) ![]u8 {
     return trace_harness.source(alloc, .{
         .name = "zio_witness_tb",
         .dut = "programmable_asic_i2c_42",
@@ -687,8 +691,18 @@ test "bundle emits integrated RTL with the macro and FIFO routing" {
     try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
     try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "module zio_timing_unit_x16_f16") != null);
     try std.testing.expect(std.mem.indexOf(u8, bundle.json, "TX_FIFO_HOST_ADDR") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bundle.sdc, "create_clock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.sdc, "-period 16.666") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.sdc, "set_false_path") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.json, "zihdl.timing_intent/2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "reset_sync_2_60000000hz u_reset_release") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bundle.rtl, "i2c_slave_loader_42_60000000hz_synchronous") != null);
     try std.testing.expectEqual(@as(usize, 13), bundle.program.len);
+}
+
+fn sha256Hex(bytes: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -770,6 +784,7 @@ pub fn main(init: std.process.Init) !void {
             "# ZIO witness bundle {s} MHz\n" ++
                 "top: programmable_asic_i2c_42\n" ++
                 "clk_hz: {d}\nhalf_cycles: {d}\nprogram_words: {d}\npayload_words: {d}\n" ++
+                "rtl_sha256: {s}\nmetadata_sha256: {s}\nsdc_sha256: {s}\n" ++
                 "generate: zig build tb (emits this bundle)\n" ++
                 "model: examples/protocol_emulator/zio_witness.zig (interpreter + checker)\n" ++
                 "microcode: examples/protocol_emulator/eth_microcode.zig\n" ++
@@ -778,7 +793,7 @@ pub fn main(init: std.process.Init) !void {
                 "check+jsonl: zig build zio (model check + out/zio_asic_{s}.jsonl)\n" ++
                 "replay: ../oasic/oasic -sim-verilog out/zio_asic_{s}.v -synth-top programmable_asic_i2c_42 -stimulus out/zio_asic_{s}.jsonl\n" ++
                 "fault: zig build zio (injected run 3 must report the exact cycle)\n",
-            .{ tag, clk_hz, bundle.half_cycles, bundle.program.len, bundle.payload.len, tag, tag, tag, tag, tag, tag, tag },
+            .{ tag, clk_hz, bundle.half_cycles, bundle.program.len, bundle.payload.len, sha256Hex(bundle.rtl), sha256Hex(bundle.json), sha256Hex(bundle.sdc), tag, tag, tag, tag, tag, tag, tag },
         );
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "out/zio_asic_{s}_manifest.txt", .{tag}), .data = manifest });
         std.debug.print("Emitted ZIO bundle {s} MHz: {d} program words, {d} payload words\n", .{ tag, bundle.program.len, bundle.payload.len });

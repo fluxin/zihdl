@@ -114,7 +114,7 @@ hierarchical binding tests.
 `Options.timing_intent_version = 2` emits `zihdl.timing_intent/2`: the v1
 section plus input slew, output load/required declarations and clock
 relationship/reset-release topology. The default stays v1; requesting v2 does
-not change the v1 projection. The fixture passes v2; product runners stay v1.
+not change the v1 projection. The contract fixture and protocol emulator runners request v2.
 New fields are additive under `/2` because consumers skip unknown
 JSON fields and the version gate promises capabilities, not byte layout; a
 consumer that does not read a field keeps it unknown. The `oasic` consumer
@@ -131,6 +131,22 @@ responsibility. `/3` is reserved for incompatible schema changes.
 | `outputs[].required.clock` / `.edge` / `.min` / `.max` | Required arrival window relative to an explicit reference clock port and its active edge (`rising`/`falling`). A null bound is unknown, never zero. zihdl rejects a required window without a clock, so consumers must treat a missing clock as an error rather than infer one. |
 | `clocks[].reset.release_synchronizer` | `[{ module, signal, bit }]` reset-release chain, first stage first, declared by the module that owns the chain registers. A released domain's reset is the chain output (directly or through hierarchy), never the raw reset; empty when none is declared. |
 | `clocks[].relationship.relation` / `.related_to` / `.source_period` / `.jitter` | Relation to a reference clock (`synchronous`, `asynchronous`, `mesochronous`, `plesiochronous`), the related 1-bit input in the declaring module (`null` means an external reference), and explicit source period / jitter times. |
+
+The integrated protocol emulator uses a two-stage `ResetSyncBlockWithClock`
+release chain. Only that chain receives raw reset; the core and both loader
+variants use its output. `I2cSlaveLoaderBlockWithTiming` carries the enclosing
+frequency and reset-release policy into child metadata. Existing constructors
+retain their 120 MHz defaults.
+
+SDC export no longer cuts reset paths by default. `reset_false_paths = true`
+is an explicit input-wide waiver and is rejected for internal reset nets or
+synchronous reset assertion. Physical consumers must still check released-reset
+recovery/removal and clock distribution; declaring a chain is not timing closure.
+
+The `zio_asic_60_manifest.txt` and `zio_asic_120_manifest.txt` bundles record
+SHA-256 hashes of their RTL, metadata and SDC. Use all three files from the same
+bundle. For the 60 MHz target, pass `-sdc out/zio_asic_60.sdc` explicitly to OASIC:
+the filename alone does not select the timing period (16.666 ns, 250 ps uncertainty).
 
 #### Hierarchy resolution
 

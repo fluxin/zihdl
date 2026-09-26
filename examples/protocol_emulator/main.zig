@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     var design_prov = try provenance.Collector.init(alloc, &design);
     const full_v = try verilog.emitDesign(alloc, &design, .{ .provenance = &design_prov });
     design_prov.bindArtifact(full_v, "verilog2001");
-    const design_json = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &design_prov });
+    const design_json = try metadata.emitDesignJson(alloc, &design, .{ .provenance = &design_prov, .timing_intent_version = 2 });
     const design_sdc = try sdc.emitDesignSdc(alloc, &design, .{});
 
     // The same core can use shared or separate program/capture macros.
@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     var split_prov = try provenance.Collector.init(alloc, &split_design);
     const split_v = try verilog.emitDesign(alloc, &split_design, .{ .provenance = &split_prov });
     split_prov.bindArtifact(split_v, "verilog2001");
-    const split_json = try metadata.emitDesignJson(alloc, &split_design, .{ .provenance = &split_prov });
+    const split_json = try metadata.emitDesignJson(alloc, &split_design, .{ .provenance = &split_prov, .timing_intent_version = 2 });
     const split_sdc = try sdc.emitDesignSdc(alloc, &split_design, .{});
 
     const cwd = std.Io.Dir.cwd();

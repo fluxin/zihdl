@@ -343,6 +343,7 @@ pub const Config = struct {
     loader: LoaderKind = .i2c,
     i2c_addr: u7 = 0x42,
     partition: SramPartition = .single,
+    sram_technology: zihdl.blocks.sram.SramTechnology = .sky130,
     program_words: usize = default_program_words,
     capture_enabled: bool = true,
     clock_hz: u64 = 120_000_000,
@@ -411,7 +412,18 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
-            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = config.clock_hz };
+            // Only the release chain receives raw reset. Every functional child
+            // shares its asynchronously asserted, synchronously released output.
+            const release = try mb.instantiate(zihdl.blocks.cdc.ResetSyncBlockWithClock(2, config.clock_hz), "u_reset_release", .{
+                .clk = ins.clk,
+                .rst_n = ins.rst_n,
+            }, .{}, .{});
+            const domain = ClockDomain{
+                .clk = ins.clk,
+                .rst_n = release.rst_n_sync,
+                .freq_hz = config.clock_hz,
+                .reset = .{ .release = .synchronous },
+            };
             try mb.addClockDomain(domain);
             try mb.addEnumType("opcode", isa.Opcode);
 
@@ -463,9 +475,9 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
 
             // Host loader submodule
             if (loader == .i2c) {
-                _ = try mb.instantiate(i2c_loader.I2cSlaveLoaderBlock(i2c_addr), "u_i2c_loader", .{
+                _ = try mb.instantiate(i2c_loader.I2cSlaveLoaderBlockWithTiming(i2c_addr, .{ .clock_hz = config.clock_hz, .reset_release = .synchronous }), "u_i2c_loader", .{
                     .clk = ins.clk,
-                    .rst_n = ins.rst_n,
+                    .rst_n = domain.rst_n,
                     .i2c_scl = ins.i2c_scl,
                     .i2c_sda_in = ins.i2c_sda_in,
                     .host_rdata = host_rdata,
@@ -489,7 +501,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                 try mb.assign(host_raddr, 0);
                 _ = try mb.instantiate(spi_loader.SpiSlaveProgrammerBlock, "u_spi_prog", .{
                     .clk = ins.clk,
-                    .rst_n = ins.rst_n,
+                    .rst_n = domain.rst_n,
                     .prog_sclk = ins.prog_sclk,
                     .prog_mosi = ins.prog_mosi,
                     .prog_cs_n = ins.prog_cs_n,
@@ -591,7 +603,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             // The shared macro drives port 0 only in single mode; in split mode
             // that return is unused and the tied-off input needs no driver.
             if (partition == .single) {
-                _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_sram", .{
+                _ = try mb.instantiate(zihdl.blocks.sram.PhysicalSramBlock(config.sram_technology), "u_sram", .{
                     .clk0 = domain.clk,
                     .csb0 = sram_csb0,
                     .web0 = sram_web0,
@@ -603,7 +615,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                     .addr1 = sram_addr1,
                 }, .{ .dout0 = sram_dout0, .dout1 = sram_dout1 }, .{});
             } else {
-                _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_sram", .{
+                _ = try mb.instantiate(zihdl.blocks.sram.PhysicalSramBlock(config.sram_technology), "u_sram", .{
                     .clk0 = domain.clk,
                     .csb0 = sram_csb0,
                     .web0 = sram_web0,
@@ -615,7 +627,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                     .addr1 = sram_addr1,
                 }, .{ .dout1 = sram_dout1 }, .{});
                 if (capture) {
-                    _ = try mb.instantiate(zihdl.blocks.TtSramBlock, "u_rx_sram", .{
+                    _ = try mb.instantiate(zihdl.blocks.sram.PhysicalSramBlock(config.sram_technology), "u_rx_sram", .{
                         .clk0 = domain.clk,
                         .csb0 = rx_csb0,
                         .web0 = rx_web0,

@@ -1,11 +1,42 @@
 // ============================================================================
-// Hardware Module: i2c_slave_loader_42
+// Hardware Module: reset_sync_2
 // Synthesized from typed Zig AST (zihdl)
 // ============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
 
-module i2c_slave_loader_42 (
+module reset_sync_2 (
+    input  wire        clk,
+    input  wire        rst_n,
+    output wire        rst_n_sync
+);
+
+    reg         sync0;
+    reg         sync1;
+
+    assign rst_n_sync = sync1;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sync0 <= 1'b0;
+            sync1 <= 1'b0;
+        end else begin
+            sync0 <= 1'b1;
+            sync1 <= sync0;
+        end
+    end
+
+endmodule
+`default_nettype wire
+
+// ============================================================================
+// Hardware Module: i2c_slave_loader_42_120000000hz_synchronous
+// Synthesized from typed Zig AST (zihdl)
+// ============================================================================
+`timescale 1ns / 1ps
+`default_nettype none
+
+module i2c_slave_loader_42_120000000hz_synchronous (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        i2c_scl,
@@ -826,6 +857,7 @@ module programmable_asic_i2c_42 (
     localparam [7:0] TX_FIFO_HOST_ADDR = 8'd248;
     localparam [15:0] TX_FIFO_DEPTH = 16'd16;
 
+    wire        u_reset_release_rst_n_sync;
     wire        host_we;
     wire [7:0]  host_addr;
     wire [31:0]  host_wdata;
@@ -877,9 +909,15 @@ module programmable_asic_i2c_42 (
     assign part_we = (host_we && (!tmp0));
     assign host_ack = (tmp0 ? tmp1 : part_ack);
 
-    i2c_slave_loader_42 u_i2c_loader (
+    reset_sync_2 u_reset_release (
         .clk(clk),
         .rst_n(rst_n),
+        .rst_n_sync(u_reset_release_rst_n_sync)
+    );
+
+    i2c_slave_loader_42_120000000hz_synchronous u_i2c_loader (
+        .clk(clk),
+        .rst_n(u_reset_release_rst_n_sync),
         .i2c_scl(i2c_scl),
         .i2c_sda_in(i2c_sda_in),
         .host_rdata(host_rdata),
@@ -899,7 +937,7 @@ module programmable_asic_i2c_42 (
 
     sram_partition_single_64 u_partition (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(u_reset_release_rst_n_sync),
         .core_running(core_running),
         .core_pc(core_pc),
         .op_fault(op_fault),
@@ -955,7 +993,7 @@ module programmable_asic_i2c_42 (
 
     zio_timing_unit_x16_f16 u_core (
         .clk(clk),
-        .rst_n(rst_n),
+        .rst_n(u_reset_release_rst_n_sync),
         .inst(inst_word),
         .ctrl_start(ctrl_start),
         .ctrl_stop(ctrl_stop),

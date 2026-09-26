@@ -397,6 +397,22 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const competition_exe = b.addExecutable(.{
+        .name = "zihdl_competition",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/competition.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zihdl", .module = mod },
+                .{ .name = "protocol_blocks", .module = blocks_mod },
+                .{ .name = "trace_harness", .module = trace_harness_mod },
+            },
+        }),
+    });
+    const competition_gen = b.addRunArtifact(competition_exe);
+    const competition_step = b.step("competition", "Emit IHP CMOS5L Tiny Tapeout 6x4 composition and witness");
+    competition_step.dependOn(&competition_gen.step);
     const zio_wit_gen = b.addRunArtifact(zio_wit_exe);
     zio_wit_gen.step.dependOn(&run_cmd.step);
 
@@ -802,6 +818,11 @@ pub fn build(b: *std.Build) void {
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     test_step.dependOn(&run_protocol_tests.step);
     verify_step.dependOn(&run_protocol_tests.step);
+
+    const zio_tests = b.addTest(.{ .root_module = zio_wit_exe.root_module });
+    const run_zio_tests = b.addRunArtifact(zio_tests);
+    test_step.dependOn(&run_zio_tests.step);
+    verify_step.dependOn(&run_zio_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
