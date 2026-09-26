@@ -113,7 +113,7 @@ generators.
 |---|---|
 | `class M extends Module` | `pub const M = struct { ... }` |
 | `val io = IO(new Bundle { ... })` | `Inputs` / `Outputs` structs of `Signal(W)` |
-| `UInt(8.W)` / `SInt(8.W)` | `Expr(8)` / `Expr(8)` + `asSigned`; signedness is expression-level, not a type |
+| `UInt(8.W)` / `SInt(8.W)` | `Signal(8)` / `SignedSignal(8)` declare unsigned/signed signals; expressions inherit declaration signedness, and `asSigned` reinterprets an expression |
 | `Wire(UInt(8.W))` | `try mb.wire("w", 8)` |
 | `RegNext(x)` / `RegInit(0.U)` | `lib.regNext(mb, "name", x, domain)` / `mb.reg("name", W, 0)` |
 | `when (cond) { ... } .otherwise { ... }` | `b.when(cond, &.{...}, &.{...})` |
@@ -122,7 +122,7 @@ generators.
 | `Mux(sel, a, b)` | `b.mux(sel, a, b)` / `b.ternary(...)` |
 | `Bundle` / `DecoupledIO` | plain structs of handles, recursive flattening, `dirs` metadata; `lib.Stream(W)` for ready/valid |
 | FIRRTL / `emitVerilog` | no intermediate IR exposed; emit Verilog-2001/SystemVerilog plus `design.json`, SDC, provenance, timing intent |
-| Treadle / Verilator via `chiseltest` | external: `oasic` (planned native), or generated iverilog benches |
+| Treadle / Verilator via `chiseltest` | external: `oasic` replay (`zig build verify-oasic`), or generated iverilog benches (`zig build verify`) |
 
 The big differences: zihdl has no `Clock`/`Reset` implicit context (a
 `ClockDomain` is passed explicitly), no implicit last-connect semantics

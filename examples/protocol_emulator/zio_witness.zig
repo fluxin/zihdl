@@ -520,15 +520,15 @@ fn harnessText(alloc: std.mem.Allocator, tag: []const u8, half_ns: []const u8, c
             .{ .name = "pc_oob" },
         },
         .trace_inputs = &.{
-            .{ .name = "rst_n" }, .{ .name = "scl" },
+            .{ .name = "rst_n" },  .{ .name = "scl" },
             .{ .name = "sda_in" }, .{ .name = "gpio_in", .width = 4 },
         },
         .trace_outputs = &.{
-            .{ .name = "pc_oob" }, .{ .name = "op_fault" },
-            .{ .name = "underrun" }, .{ .name = "tx_empty" },
-            .{ .name = "tx_full" }, .{ .name = "gpio_out", .width = 4 },
+            .{ .name = "pc_oob" },              .{ .name = "op_fault" },
+            .{ .name = "underrun" },            .{ .name = "tx_empty" },
+            .{ .name = "tx_full" },             .{ .name = "gpio_out", .width = 4 },
             .{ .name = "gpio_oe", .width = 4 }, .{ .name = "core_running" },
-            .{ .name = "i2c_sda_out" }, .{ .name = "i2c_sda_oe" },
+            .{ .name = "i2c_sda_out" },         .{ .name = "i2c_sda_oe" },
         },
     });
 }

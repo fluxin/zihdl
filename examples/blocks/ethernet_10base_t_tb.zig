@@ -369,7 +369,6 @@ pub fn WavePlayer(comptime init_file: []const u8, comptime depth: usize) type {
 }
 
 /// Simulation-only physical layer: clock, reset, VCD dump and verdict glue.
-
 const EthTb = struct {
     pub const name = "ethernet_10base_t_tb";
     pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
@@ -421,8 +420,10 @@ fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(EthTb);
     return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
-        .name = "ethernet_10base_t_tb_harness", .module = "ethernet_10base_t_tb",
-        .half_ns = "8.333", .fail_width = 11,
+        .name = "ethernet_10base_t_tb_harness",
+        .module = "ethernet_10base_t_tb",
+        .half_ns = "8.333",
+        .fail_width = 11,
         .vcd = "out/ethernet_10base_t_tb.vcd",
         .pass_message = "SUCCESS: Manchester preamble/SFD/data, NLP width/spacing and tx backpressure verified",
     });

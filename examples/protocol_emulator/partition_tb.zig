@@ -363,7 +363,6 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(PartitionVector) {
 
 /// Simulation-only physical layer: clock, reset, waveform dump and verdict
 /// glue. Every drive and expectation is generated above.
-
 const PartitionTb = struct {
     pub const name = "partition_tb";
     pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
@@ -504,8 +503,11 @@ fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(PartitionTb);
     return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
-        .name = "partition_tb_harness", .module = "partition_tb", .half_ns = "4.167",
-        .fail_width = 17, .vcd = "out/partition_tb.vcd",
+        .name = "partition_tb_harness",
+        .module = "partition_tb",
+        .half_ns = "4.167",
+        .fail_width = 17,
+        .vcd = "out/partition_tb.vcd",
         .pass_message = "SUCCESS: partition arbiter, skid, ring and status words verified",
     });
 }

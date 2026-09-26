@@ -730,11 +730,11 @@ pub fn build(b: *std.Build) void {
         .dependOn(&jane_puzzle_check.step);
 
     for ([_]*std.Build.Step{
-        &async_fifo_compile.step,   &uart_compile.step,        &spi_compile.step,
-        &i2c_wit_compile.step,      &cdc_compile.step,         &divmod_compile.step,
-        &divmod_zero_compile.step,  &i2c_compile.step,         &rx_compile.step,
-        &i2c_split_compile.step,    &rx_split_compile.step,    &sv_compile.step,
-        &timer_memory_compile.step, &arbiter_compile.step,     &axi_compile.step,
+        &async_fifo_compile.step,   &uart_compile.step,     &spi_compile.step,
+        &i2c_wit_compile.step,      &cdc_compile.step,      &divmod_compile.step,
+        &divmod_zero_compile.step,  &i2c_compile.step,      &rx_compile.step,
+        &i2c_split_compile.step,    &rx_split_compile.step, &sv_compile.step,
+        &timer_memory_compile.step, &arbiter_compile.step,  &axi_compile.step,
     }) |compile_step| compile_step.dependOn(&testbench_sources_gen.step);
 
     // Consumer replay is an explicit cross-repository gate. It uses the

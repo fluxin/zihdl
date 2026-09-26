@@ -170,7 +170,6 @@ pub fn buildStim(alloc: std.mem.Allocator) !std.ArrayList(u64) {
 /// Simulation-only physical layer: clock, reset, open-drain combine, waveform
 /// dump and verdict glue. Everything protocol- or expectation-related is
 /// generated above.
-
 const LoaderReadTb = struct {
     pub const name = "loader_read_tb";
     pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), sda_in: Signal(1) };
@@ -259,8 +258,12 @@ fn emitDesign(alloc: std.mem.Allocator) ![]u8 {
     var design = netlist.Design.init(alloc);
     _ = try design.elaborate(LoaderReadTb);
     return wrapper.append(alloc, try verilog.emitDesign(alloc, &design, .{}), .{
-        .name = "loader_read_tb_harness", .module = "loader_read_tb", .half_ns = "4.167",
-        .fail_width = 14, .fail_port = "fail_addr", .open_drain = true,
+        .name = "loader_read_tb_harness",
+        .module = "loader_read_tb",
+        .half_ns = "4.167",
+        .fail_width = 14,
+        .fail_port = "fail_addr",
+        .open_drain = true,
         .vcd = "out/loader_read_tb.vcd",
         .pass_message = "SUCCESS: loader latches read words, honors NACK, commits on ACK",
     });
