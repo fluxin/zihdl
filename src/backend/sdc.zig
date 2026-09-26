@@ -1,6 +1,7 @@
 //! SDC constraints sidecar for oasic's `timing/sta.odin`: one clock per
 //! registered clock domain (period derived from `ClockDomain.freq_hz`), clock
-//! uncertainty, and false paths from asynchronous resets.
+//! uncertainty, and explicitly requested reset exceptions. Reset release is
+//! timed by default; declaring a reset is not permission to cut its paths.
 
 const std = @import("std");
 const ir = @import("../netlist.zig");
@@ -10,8 +11,9 @@ pub const Options = struct {
     top: ?[]const u8 = null,
     /// Clock uncertainty in picoseconds; null omits `set_clock_uncertainty`.
     uncertainty_ps: ?u64 = 250,
-    /// Emit `set_false_path` constraints for declared reset ports.
-    reset_false_paths: bool = true,
+    /// Explicitly waive timing from asynchronous reset input ports.
+    /// Default false: reset assertion/release policy is not a timing exception.
+    reset_false_paths: bool = false,
 };
 
 pub fn emitDesignSdc(allocator: std.mem.Allocator, design: *const ir.Design, options: Options) ![]u8 {
@@ -43,6 +45,8 @@ pub fn emitDesignSdc(allocator: std.mem.Allocator, design: *const ir.Design, opt
             try appendFmt(&out, allocator, "set_clock_uncertainty {s} [get_clocks {{{s}}}]\n", .{ uncertainty, clock.name });
         }
         if (options.reset_false_paths) {
+            if (clock.rst_n.ref.kind() != .input or clock.reset.assertion != .asynchronous)
+                return error.InvalidResetFalsePath;
             try appendFmt(&out, allocator, "set_false_path -from [get_ports {{{s}}}]\n", .{clock.rst_n.name()});
         }
     }
