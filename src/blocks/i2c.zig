@@ -18,9 +18,20 @@ const ModuleBuilder = netlist.ModuleBuilder;
 /// latch the whole word on `host_rvalid` before serializing it.
 pub const I2cState = enum(u3) { idle = 0, dev_addr = 1, reg_addr = 2, data = 3, read = 4 };
 
+pub const LoaderTiming = struct {
+    clock_hz: u64 = 120_000_000,
+    reset_release: netlist.ResetRelease = .asynchronous,
+};
+
 pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
+    return I2cSlaveLoaderBlockWithTiming(device_addr, .{});
+}
+
+/// Declare the actual enclosing clock and reset policy without changing the
+/// loader implementation. Synchronous release requires a real upstream chain.
+pub fn I2cSlaveLoaderBlockWithTiming(comptime device_addr: u7, comptime timing: LoaderTiming) type {
     return struct {
-        pub const name = std.fmt.comptimePrint("i2c_slave_loader_{x}", .{@as(u32, device_addr)});
+        pub const name = if (timing.clock_hz == 120_000_000 and timing.reset_release == .asynchronous) std.fmt.comptimePrint("i2c_slave_loader_{x}", .{@as(u32, device_addr)}) else std.fmt.comptimePrint("i2c_slave_loader_{x}_{d}hz_{s}", .{ @as(u32, device_addr), timing.clock_hz, @tagName(timing.reset_release) });
 
         pub const Inputs = struct {
             clk: Signal(1),
@@ -48,7 +59,7 @@ pub fn I2cSlaveLoaderBlock(comptime device_addr: u7) type {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
-            const domain = netlist.ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 120_000_000 };
+            const domain = netlist.ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = timing.clock_hz, .reset = .{ .release = timing.reset_release } };
             try mb.addClockDomain(domain);
 
             // I2C is an asynchronous external bus: each line gets a two-flop

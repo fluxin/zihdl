@@ -339,11 +339,16 @@ pub fn FifoMailboxBlock(comptime depth: usize, comptime data_width: usize) type 
 /// the released signal, which is what lets structural consumers bind the
 /// domain's reset policy to real RTL.
 pub fn ResetSyncBlock(comptime stage_count: usize) type {
+    return ResetSyncBlockWithClock(stage_count, 120_000_000);
+}
+
+/// Same reset-release primitive with an explicit destination clock frequency.
+pub fn ResetSyncBlockWithClock(comptime stage_count: usize, comptime clock_hz: u64) type {
     comptime {
         if (stage_count < 2) @compileError("ResetSyncBlock requires stage_count >= 2");
     }
     return struct {
-        pub const name = std.fmt.comptimePrint("reset_sync_{d}", .{stage_count});
+        pub const name = if (clock_hz == 120_000_000) std.fmt.comptimePrint("reset_sync_{d}", .{stage_count}) else std.fmt.comptimePrint("reset_sync_{d}_{d}hz", .{ stage_count, clock_hz });
         pub const stages_val = stage_count;
 
         pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
@@ -373,6 +378,7 @@ pub fn ResetSyncBlock(comptime stage_count: usize) type {
             }
             try mb.addClockDomain(.{
                 .name = "reset",
+                .freq_hz = clock_hz,
                 .clk = ins.clk,
                 .rst_n = ins.rst_n,
                 .reset = .{ .polarity = .active_low, .assertion = .asynchronous, .release = .synchronous },
