@@ -4,9 +4,10 @@
 //! model decodes with them, and the ISA document is generated from them.
 //!
 //! The enums list exactly the encodings the core implements: an instruction is
-//! valid iff its opcode is declared, every enum field holds a declared tag and
-//! every `rules` entry of its payload holds. The core faults on anything else
-//! before any side effect.
+//! valid iff its opcode is declared, every enum field holds a declared tag,
+//! every `reserved` field is zero and every `rules` entry of its payload holds.
+//! The core faults on anything else before any side effect. `Config` is the
+//! per-core configuration word; its defaults reproduce the original core.
 const std = @import("std");
 
 /// [31:28] opcode, [27:16] payload, [15:0] delay: the instruction occupies
@@ -36,6 +37,7 @@ pub const Opcode = enum(u4) {
     WAIT = 1,
     IN = 2,
     OUT = 3,
+    PUSH = 4,
     PULL = 5,
     MOV = 6,
     SET = 7,
@@ -47,8 +49,9 @@ pub const JmpCondition = enum(u3) {
     X_DEC = 2, // X != 0, then X -= 1
     NOT_Y = 3, // Y == 0
     Y_DEC = 4, // Y != 0, then Y -= 1
-    PIN_HIGH = 5, // pin 0 is high
-    OSR_NOT_FULL = 6, // OSR or the TX FIFO still holds data
+    PIN = 5, // pin `Config.jmp_pin` is high
+    TX_PENDING = 6, // OSR or the TX FIFO still holds data
+    X_NE_Y = 7,
 };
 
 pub const WaitCondition = enum(u2) {
@@ -59,12 +62,20 @@ pub const WaitCondition = enum(u2) {
 
 pub const InSource = enum(u3) {
     PINS = 0,
+    X = 1,
+    Y = 2,
+    NULL = 3, // zeros
+    ISR = 4,
+    OSR = 5,
 };
 
 pub const OutTarget = enum(u3) {
     PINS = 0,
+    PIN_DIRS = 1,
     X = 2,
+    Y = 3,
     NULL = 4, // discard bits
+    ISR = 5, // also sets the ISR count to the bit count
 };
 
 pub const SetTarget = enum(u3) {
@@ -92,10 +103,30 @@ pub const MovSrc = enum(u3) {
     OSR = 5,
 };
 
-pub const MovOp = enum(u1) {
+pub const MovOp = enum(u2) {
     NONE = 0,
     INVERT = 1,
+    REVERSE = 2, // bit-reverse all 32 bits
 };
+
+/// Per-core configuration word (host address `config_host_addr` in the
+/// programmable ASIC). Defaults reproduce the original core: JMP PIN reads pin
+/// 0, IN shifts left, OUT shifts right, and the ISR autopushes at 32 bits.
+pub const Config = packed struct(u16) {
+    jmp_pin: u2 = 0,
+    /// IN shifts toward bit 0 and new bits enter at bit 31 (LSB-first data).
+    in_shift_right: bool = false,
+    /// OUT takes the low bits and shifts right; false takes the high bits.
+    out_shift_right: bool = true,
+    autopush: bool = true,
+    /// ISR bit count that triggers an autopush; 0 means 32.
+    push_threshold: u5 = 0,
+    reserved: u6 = 0,
+};
+
+comptime {
+    std.debug.assert(@as(usize, 1) << @bitSizeOf(@FieldType(Config, "jmp_pin")) == pin_count);
+}
 
 /// Inclusive range on a raw payload field, waived while `unless` holds.
 pub const Rule = struct {
@@ -125,16 +156,22 @@ pub const In = packed struct(u12) {
     count: u5,
     source: InSource,
     reserved: u4 = 0,
-    pub const summary = "Shift one four-pin sample into the ISR; every eighth sample writes an RX word.";
-    pub const rules = [_]Rule{.{ .field = "count", .min = pin_count, .max = pin_count }};
+    pub const summary = "Shift `count` bits (0 means 32) of `source` into the ISR in the configured direction; autopush writes an RX word at the threshold.";
+    pub const rules = [_]Rule{};
 };
 
 pub const Out = packed struct(u12) {
     count: u5,
     target: OutTarget,
     reserved: u4 = 0,
-    pub const summary = "Shift `count` bits (0 means 16) out of the OSR, LSB first, autopulling an empty OSR.";
-    pub const rules = [_]Rule{.{ .field = "count", .min = 0, .max = 16 }};
+    pub const summary = "Shift `count` bits (0 means 32) out of the OSR in the configured direction, autopulling an empty OSR from the TX FIFO.";
+    pub const rules = [_]Rule{};
+};
+
+pub const Push = packed struct(u12) {
+    reserved: u12 = 0,
+    pub const summary = "Write the ISR as one RX word and clear it.";
+    pub const rules = [_]Rule{};
 };
 
 pub const Pull = packed struct(u12) {
@@ -148,8 +185,8 @@ pub const Mov = packed struct(u12) {
     src: MovSrc,
     dest: MovDest,
     op: MovOp,
-    reserved: u5 = 0,
-    pub const summary = "Copy `src` to `dest`, optionally bit-inverted.";
+    reserved: u4 = 0,
+    pub const summary = "Copy `src` to `dest`, optionally inverted or bit-reversed. MOV ISR empties the ISR count; MOV OSR fills the OSR count.";
     pub const rules = [_]Rule{};
 };
 
@@ -167,6 +204,7 @@ pub fn Payload(comptime op: Opcode) type {
         .WAIT => Wait,
         .IN => In,
         .OUT => Out,
+        .PUSH => Push,
         .PULL => Pull,
         .MOV => Mov,
         .SET => Set,
@@ -199,6 +237,7 @@ pub const Decoded = union(Opcode) {
     WAIT: Wait,
     IN: In,
     OUT: Out,
+    PUSH: Push,
     PULL: Pull,
     MOV: Mov,
     SET: Set,
@@ -221,6 +260,7 @@ pub fn decode(word: u32) ?Decoded {
 fn payloadValid(comptime P: type, word: u32) bool {
     inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |name, T| {
         if (@typeInfo(T) == .@"enum" and !enumHas(T, raw(word, P, name))) return false;
+        if (comptime std.mem.eql(u8, name, "reserved")) if (raw(word, P, name) != 0) return false;
     }
     inline for (P.rules) |rule| {
         const waived = if (rule.unless) |u| raw(word, P, u.field) == u.value else false;
@@ -252,6 +292,14 @@ pub fn out(target: OutTarget, bit_count: u5, delay: u16) Instruction {
 
 pub fn in(source: InSource, bit_count: u5, delay: u16) Instruction {
     return encode(.IN, .{ .count = bit_count, .source = source }, delay);
+}
+
+pub fn push(delay: u16) Instruction {
+    return encode(.PUSH, .{}, delay);
+}
+
+pub fn movRev(dest: MovDest, src: MovSrc, delay: u16) Instruction {
+    return encode(.MOV, .{ .src = src, .dest = dest, .op = .REVERSE }, delay);
 }
 
 pub fn pull(block_if_empty: bool, delay: u16) Instruction {
@@ -286,7 +334,7 @@ pub fn document(alloc: std.mem.Allocator) ![]u8 {
         }
     }.f;
     try text.appendSlice(alloc, "# ZIO instruction set\n\nGenerated by `zig build isa-doc` from `examples/protocol_emulator/isa.zig`; do not edit.\n\n");
-    try print(&text, alloc, "Every instruction is 32 bits: opcode `[31:28]`, payload `[27:16]`, delay `[15:0]`; it occupies delay + 1 cycles. The core has {d} GPIO pins. An encoding outside these tables faults before any side effect. Reserved fields are ignored.\n", .{pin_count});
+    try print(&text, alloc, "Every instruction is 32 bits: opcode `[31:28]`, payload `[27:16]`, delay `[15:0]`; it occupies delay + 1 cycles. The core has {d} GPIO pins. An encoding outside these tables, or with a nonzero reserved field, faults before any side effect.\n", .{pin_count});
     inline for (@typeInfo(Opcode).@"enum".field_names, @typeInfo(Opcode).@"enum".field_values) |name, value| {
         const P = Payload(@field(Opcode, name));
         try print(&text, alloc, "\n## {s} (opcode {d})\n\n{s}\n\n| Field | Bits | Values |\n|---|---|---|\n", .{ name, value, P.summary });
@@ -327,11 +375,13 @@ test "encodings keep the historical bit layout" {
 
 test "decode refuses undeclared encodings and enforces rules" {
     try std.testing.expect(decode(in(.PINS, 4, 0).toU32()) != null);
-    try std.testing.expect(decode(in(.PINS, 1, 0).toU32()) == null);
-    try std.testing.expect(decode(out(.PINS, 16, 0).toU32()) != null);
-    try std.testing.expect(decode(out(.PINS, 17, 0).toU32()) == null);
+    try std.testing.expect(decode(in(.PINS, 1, 0).toU32()) != null);
+    try std.testing.expect(decode(out(.PINS, 17, 0).toU32()) != null);
     try std.testing.expect(decode(0x3000_0000 | (6 << 21) | (4 << 16)) == null); // OUT target 6
-    try std.testing.expect(decode(0x4000_0000) == null); // opcode 4
+    try std.testing.expect(decode(0x8000_0000) == null); // opcode 8
+    try std.testing.expect(decode(push(0).toU32()) != null);
+    try std.testing.expect(decode(push(0).toU32() | (1 << 16)) == null); // reserved bit
+    try std.testing.expect(decode(jmp(.ALWAYS, 0, 0).toU32() | (1 << 27)) == null); // reserved bit
     try std.testing.expect(decode(waitPin(4, 1, 0).toU32()) == null);
     try std.testing.expect(decode(waitCycles(7).toU32() | (9 << 16)) != null); // pin index waived for CYCLES
     const d = decode(jmp(.Y_DEC, 6, 3).toU32()).?;

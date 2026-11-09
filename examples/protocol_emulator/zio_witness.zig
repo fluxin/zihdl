@@ -24,6 +24,7 @@ const sdc = zihdl.backend.sdc;
 const eth_mc = @import("eth_microcode.zig");
 const asic = @import("programmable_asic.zig");
 const isa = @import("isa.zig");
+const zio_model = @import("zio_model.zig");
 const trace_harness = @import("trace_harness");
 
 pub const default_payload = [_]u8{ 0x00, 0xFF, 0xAA, 0x55, 0x01, 0x80, 0xA5, 0x5A };
@@ -31,7 +32,7 @@ pub const short_nlp_period: u32 = 240;
 pub const nlp_pulses_checked: usize = 2;
 
 // ============================================================================
-// Independent microcode interpreter
+// Reference model runs (zio_model.zig)
 // ============================================================================
 
 pub const Run = struct {
@@ -40,155 +41,18 @@ pub const Run = struct {
     min: bool = false,
 };
 
-const Interp = struct {
-    program: []const u32,
-    fifo: [(asic.Config{}).fifo_depth]u32 = @splat(0),
-    fifo_rd: usize = 0,
-    fifo_cnt: usize = 0,
-    pc_exec: u8 = 0,
-    ir_valid: bool = false,
-    running: bool = false,
-    halt: bool = false,
-    delay: u16 = 0,
-    x: u16 = 0,
-    y: u16 = 0,
-    osr: u32 = 0,
-    osr_cnt: u6 = 0,
-    isr: u32 = 0,
-    pin: u4 = 0,
-    underrun: bool = false,
+/// The reference model with the TX FIFO preloaded before start.
+fn startModel(program: []const u32, stream: []const u32) zio_model.System {
+    var sys = zio_model.System{ .program = program };
+    for (stream) |word| sys.step(.{ .tx_we = true, .tx_wdata = word });
+    sys.step(.{ .ctrl_start = true });
+    return sys;
+}
 
-    const Inputs = struct {
-        ctrl_start: u1 = 0,
-        ctrl_stop: u1 = 0,
-        tx_we: u1 = 0,
-        tx_wdata: u32 = 0,
-    };
-
-    fn push(self: *Interp, word: u32) void {
-        if (self.fifo_cnt < self.fifo.len) {
-            self.fifo[(self.fifo_rd + self.fifo_cnt) % self.fifo.len] = word;
-            self.fifo_cnt += 1;
-        }
-    }
-
-    /// One clock edge; returns the pin visible after it. Decoding is the ISA
-    /// table's (`isa.decode`); the behavior below is written independently of
-    /// the RTL. The model has no input pins: WAIT PIN_LOW never releases and
-    /// JMP PIN_HIGH is never taken.
-    fn step(self: *Interp, s: Inputs) u4 {
-        const word = self.program[self.pc_exec];
-        const d = isa.decode(word) orelse @panic("ZIO model: the program holds an invalid instruction");
-        const osr_empty = self.osr_cnt == 0;
-        const fifo_empty = self.fifo_cnt == 0;
-        const data_avail = !osr_empty or !fifo_empty;
-        const wait_pin_blocked = d == .WAIT and d.WAIT.cond == .PIN_LOW;
-        const pull_blocked = d == .PULL and d.PULL.block and fifo_empty;
-        const hold_fetch = !self.ir_valid or self.halt or self.delay > 0 or wait_pin_blocked or pull_blocked;
-        const executing = self.running and !hold_fetch and s.ctrl_start == 0 and s.ctrl_stop == 0;
-        const branch_taken = switch (d) {
-            .JMP => |j| switch (j.cond) {
-                .ALWAYS => true,
-                .NOT_X => self.x == 0,
-                .X_DEC => self.x != 0,
-                .NOT_Y => self.y == 0,
-                .Y_DEC => self.y != 0,
-                .PIN_HIGH => false,
-                .OSR_NOT_FULL => data_avail,
-            },
-            else => false,
-        };
-        const fetch_addr: u8 = if (hold_fetch) self.pc_exec else if (branch_taken) d.JMP.target else self.pc_exec +% 1;
-        const fifo_head = self.fifo[self.fifo_rd];
-        const consumes = d == .PULL or (d == .OUT and osr_empty);
-
-        if (executing and !fifo_empty and consumes) {
-            self.fifo_rd = (self.fifo_rd + 1) % self.fifo.len;
-            self.fifo_cnt -= 1;
-        }
-
-        if (s.ctrl_start == 1) {
-            self.pc_exec = 0;
-            self.ir_valid = false;
-            self.running = true;
-            self.halt = false;
-            self.delay = 0;
-            self.osr = 0;
-            self.osr_cnt = 0;
-            self.underrun = false;
-        } else if (s.ctrl_stop == 1) {
-            self.running = false;
-            self.pc_exec = fetch_addr;
-        } else if (self.running) {
-            self.pc_exec = fetch_addr;
-            if (!self.ir_valid) {
-                self.ir_valid = true;
-            } else if (self.delay > 0) {
-                self.delay -= 1;
-            } else if (!wait_pin_blocked and !pull_blocked and !self.halt) {
-                self.delay = isa.Instruction.fromU32(word).delay;
-                switch (d) {
-                    .OUT => |o| {
-                        const count: u6 = if (o.count == 0) 16 else o.count;
-                        if (osr_empty and fifo_empty) {
-                            self.underrun = true;
-                        } else {
-                            const src: u32 = if (osr_empty) fifo_head else self.osr;
-                            const src_cnt: u6 = if (osr_empty) 32 else self.osr_cnt;
-                            switch (o.target) {
-                                .PINS => for (0..isa.pin_count) |i| if (i < count) {
-                                    const bit: u4 = @intCast((src >> @intCast(i)) & 1);
-                                    self.pin = (self.pin & ~(@as(u4, 1) << @intCast(i))) | (bit << @intCast(i));
-                                },
-                                .X => self.x = @truncate(src & ((@as(u32, 1) << @intCast(count)) - 1)),
-                                .NULL => {},
-                            }
-                            self.osr = src >> @intCast(count);
-                            self.osr_cnt = src_cnt - count;
-                        }
-                    },
-                    .PULL => {
-                        self.osr = fifo_head;
-                        self.osr_cnt = 32;
-                    },
-                    .MOV => |m| {
-                        const value: u32 = switch (m.src) {
-                            .PINS, .NULL => 0,
-                            .X => self.x,
-                            .Y => self.y,
-                            .ISR => self.isr,
-                            .OSR => self.osr,
-                        };
-                        const moved = if (m.op == .INVERT) ~value else value;
-                        switch (m.dest) {
-                            .PINS => self.pin = @truncate(moved),
-                            .PIN_DIRS => {},
-                            .X => self.x = @truncate(moved),
-                            .Y => self.y = @truncate(moved),
-                            .ISR => self.isr = moved,
-                            .OSR => self.osr = moved,
-                        }
-                    },
-                    .SET => |set| switch (set.target) {
-                        .PINS => self.pin = @truncate(set.value),
-                        .PIN_DIRS => {},
-                        .X => self.x = set.value,
-                        .Y => self.y = set.value,
-                    },
-                    .JMP => |j| {
-                        if (j.cond == .X_DEC and self.x != 0) self.x -%= 1;
-                        if (j.cond == .Y_DEC and self.y != 0) self.y -%= 1;
-                    },
-                    .WAIT, .IN => {},
-                }
-            }
-        }
-        return self.pin;
-    }
-};
-
-fn preload(interp: *Interp, words: []const u32) void {
-    for (words) |w| interp.push(w);
+/// Pin 0 after one clock edge.
+fn stepPin(sys: *zio_model.System) u1 {
+    sys.step(.{});
+    return @intCast(sys.core.pin_out & 1);
 }
 
 /// Interpreter run list for the frame plus the requested number of following
@@ -199,9 +63,7 @@ pub fn frameNlpRuns(
     stream: []const u32,
     pulses: usize,
 ) ![]Run {
-    var interp = Interp{ .program = program };
-    preload(&interp, stream);
-    _ = interp.step(.{ .ctrl_start = 1 });
+    var sys = startModel(program, stream);
 
     var runs = std.ArrayList(Run).empty;
     errdefer runs.deinit(alloc);
@@ -212,7 +74,7 @@ pub fn frameNlpRuns(
     var frame_done = false;
     var cycles: u32 = 0;
     while (cycles < 200_000) : (cycles += 1) {
-        const pin: u1 = @intCast(interp.step(.{}) & 1);
+        const pin = stepPin(&sys);
         if (!started) {
             if (pin == 1) {
                 started = true;
@@ -223,7 +85,7 @@ pub fn frameNlpRuns(
         }
         if (pin != prev) {
             try runs.append(alloc, .{ .level = prev, .cycles = len });
-            if (!frame_done and interp.pc_exec >= 9 and interp.y == 0) {
+            if (!frame_done and sys.core.pc_exec >= 9 and sys.core.y == 0) {
                 frame_done = true;
                 target = runs.items.len + (if (pulses == 0) 0 else 1 + 2 * pulses);
             }
@@ -243,15 +105,14 @@ pub fn frameNlpRuns(
 /// and sets `underrun`), through idle.
 pub fn emptyStartRuns(alloc: std.mem.Allocator, program: []const u32, opts: eth_mc.ZioOptions) ![]Run {
     _ = opts;
-    var interp = Interp{ .program = program };
-    _ = interp.step(.{ .ctrl_start = 1 });
+    var sys = startModel(program, &.{});
     var runs = std.ArrayList(Run).empty;
     errdefer runs.deinit(alloc);
     var prev: u1 = 0;
     var len: u32 = 0;
     var cycles: u32 = 0;
     while (cycles < 12) : (cycles += 1) {
-        const pin: u1 = @intCast(interp.step(.{}) & 1);
+        const pin = stepPin(&sys);
         if (pin != prev) {
             if (len > 0) try runs.append(alloc, .{ .level = prev, .cycles = len });
             prev = pin;
@@ -766,7 +627,7 @@ pub fn main(init: std.process.Init) !void {
                 "clk_hz: {d}\nhalf_cycles: {d}\nprogram_words: {d}\npayload_words: {d}\n" ++
                 "rtl_sha256: {s}\nmetadata_sha256: {s}\nsdc_sha256: {s}\n" ++
                 "generate: zig build tb (emits this bundle)\n" ++
-                "model: examples/protocol_emulator/zio_witness.zig (interpreter + checker)\n" ++
+                "model: examples/protocol_emulator/zio_model.zig (reference) + zio_witness.zig (checker)\n" ++
                 "microcode: examples/protocol_emulator/eth_microcode.zig\n" ++
                 "compile: iverilog -g2001 -s zio_witness_tb -o out/zio_asic_{s}_iv out/zio_asic_{s}.v out/zio_asic_{s}_tb.v\n" ++
                 "run: vvp out/zio_asic_{s}_iv\n" ++

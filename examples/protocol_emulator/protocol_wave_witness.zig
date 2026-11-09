@@ -11,6 +11,7 @@ const jtag = @import("jtag_microcode.zig");
 const uart = @import("uart_microcode.zig");
 const i2c = @import("i2c_microcode.zig");
 const protocol_harness = @import("protocol_harness");
+const isa = @import("isa.zig");
 
 const Case = struct {
     tag: []const u8,
@@ -32,6 +33,7 @@ const Case = struct {
     /// symbol offset. Input-only cases run until the line model has finished.
     last_offset: ?u32 = null,
     observe: protocol_harness.Observe = .pin_out,
+    cfg: isa.Config = .{},
 };
 
 fn hexWords(alloc: std.mem.Allocator, words: []const u32) ![]u8 {
@@ -87,6 +89,7 @@ fn emitCase(alloc: std.mem.Allocator, io: std.Io, case: Case) !void {
         .clock_half_ns = case.half_period_ns,
         .line = case.line,
         .observe = case.observe,
+        .cfg = @bitCast(case.cfg),
     });
     try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(alloc, "{s}_tb.v", .{stem}), .data = harness });
 }

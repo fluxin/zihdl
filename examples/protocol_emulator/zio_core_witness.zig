@@ -7,10 +7,11 @@ const core = @import("zio_timing_unit.zig");
 const isa = @import("isa.zig");
 const Field = struct { name: []const u8, width: usize };
 const inputs = [_]Field{
-    .{ .name = "rst_n", .width = 1 },      .{ .name = "inst", .width = 32 },
-    .{ .name = "ctrl_start", .width = 1 }, .{ .name = "ctrl_stop", .width = 1 },
-    .{ .name = "start_pc", .width = 8 },   .{ .name = "pin_in", .width = 4 },
-    .{ .name = "tx_we", .width = 1 },      .{ .name = "tx_wdata", .width = 32 },
+    .{ .name = "rst_n", .width = 1 },                    .{ .name = "inst", .width = 32 },
+    .{ .name = "ctrl_start", .width = 1 },               .{ .name = "ctrl_stop", .width = 1 },
+    .{ .name = "start_pc", .width = 8 },                 .{ .name = "pin_in", .width = 4 },
+    .{ .name = "tx_we", .width = 1 },                    .{ .name = "tx_wdata", .width = 32 },
+    .{ .name = "cfg", .width = @bitSizeOf(isa.Config) },
 };
 const outputs = [_]Field{
     .{ .name = "pc", .width = 8 },        .{ .name = "pin_out", .width = 4 },
@@ -36,6 +37,7 @@ const Row = struct {
     pins: u4 = 0,
     tx_we: u1 = 0,
     tx_word: u32 = 0,
+    cfg: u16 = @bitCast(isa.Config{}),
     running: u1 = 1,
     fault: u1 = 0,
     empty: u1 = 1,
@@ -46,7 +48,8 @@ const Row = struct {
 fn row(w: *zihdl.backend.stimulus.Writer, v: Row) !void {
     const drive = @as(u128, v.reset) | (@as(u128, v.inst) << 1) |
         (@as(u128, v.start) << 33) | (@as(u128, v.stop) << 34) |
-        (@as(u128, v.pins) << 43) | (@as(u128, v.tx_we) << 47) | (@as(u128, v.tx_word) << 48);
+        (@as(u128, v.pins) << 43) | (@as(u128, v.tx_we) << 47) | (@as(u128, v.tx_word) << 48) |
+        (@as(u128, v.cfg) << 80);
     const expect = (@as(u64, v.pin_out) << 8) | (@as(u64, v.running) << 16) |
         (@as(u64, v.fault) << 17) | (@as(u64, v.empty) << 20) |
         (@as(u64, v.rx_we) << 22) | (@as(u64, v.rx_word) << 23);
@@ -92,9 +95,9 @@ fn schedule(a: std.mem.Allocator) ![]u8 {
         try row(&w, .{ .inst = isa.in(.PINS, 4, 1).toU32(), .pins = @intCast(15 - i), .rx_we = @intFromBool(i == 7), .rx_word = word });
         try row(&w, .{ .inst = sample, .pins = 0, .rx_word = word });
     }
-    // Unsupported IN width must fault instead of treating it as four samples.
+    // An IN with a reserved bit set must fault instead of sampling.
     for (0..7) |_| try row(&w, .{ .inst = sample, .pins = 5, .rx_word = 0xFEDCBA98 });
-    try row(&w, .{ .inst = isa.in(.PINS, 1, 0).toU32(), .running = 0, .fault = 1, .rx_word = 0xFEDCBA98 });
+    try row(&w, .{ .inst = isa.in(.PINS, 4, 0).toU32() | (1 << 24), .running = 0, .fault = 1, .rx_word = 0xFEDCBA98 });
     try row(&w, .{ .reset = 0, .running = 0 });
     // A queued TX word survives invalid OUT and stop-coincident PULL.
     try row(&w, .{ .running = 0, .tx_we = 1, .tx_word = 0x1234567F, .empty = 0 });
@@ -109,11 +112,11 @@ fn schedule(a: std.mem.Allocator) ![]u8 {
     try row(&w, .{ .empty = 0 });
     try row(&w, .{ .inst = isa.pull(true, 0).toU32() });
     try row(&w, .{ .inst = isa.out(.PINS, 4, 0).toU32(), .pin_out = 15 });
-    // Invalid MOV destination and JMP condition have no architectural effects.
+    // An invalid MOV destination and a JMP reserved bit have no architectural effects.
     try row(&w, .{ .inst = 0x60380000, .pin_out = 15, .running = 0, .fault = 1 });
     try row(&w, .{ .start = 1, .pin_out = 15 });
     try row(&w, .{ .pin_out = 15 });
-    try row(&w, .{ .inst = 0x07000000, .pin_out = 15, .running = 0, .fault = 1 });
+    try row(&w, .{ .inst = 0x08000000, .pin_out = 15, .running = 0, .fault = 1 });
     // WAIT selects the encoded pin, not always GPIO 0. An invalid selector
     // faults instead of hanging forever on an unavailable pin.
     try row(&w, .{ .reset = 0, .running = 0 });

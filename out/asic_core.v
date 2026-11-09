@@ -559,6 +559,7 @@ module zio_timing_unit_x16_f16 (
     input  wire [3:0]  pin_in,
     input  wire        tx_we,
     input  wire [31:0]  tx_wdata,
+    input  wire [15:0]  cfg,
     output wire [7:0]  pc,
     output reg  [3:0]  pin_out,
     output reg  [3:0]  pin_oe,
@@ -573,9 +574,9 @@ module zio_timing_unit_x16_f16 (
 );
 
     wire [3:0]  tmp0;
-    wire [4:0]  tmp1;
+    wire [3:0]  tmp1;
     wire [31:0]  tmp2;
-    wire [31:0]  tmp3;
+    wire [6:0]  tmp3;
     wire [31:0]  tmp4;
     wire [7:0]  tmp5;
     wire        tmp6;
@@ -585,16 +586,26 @@ module zio_timing_unit_x16_f16 (
     wire        tmp10;
     wire        tmp11;
     wire        tmp12;
-    wire [15:0]  tmp13;
-    wire        tmp14;
+    wire [3:0]  tmp13;
+    wire [15:0]  tmp14;
     wire        tmp15;
     wire        tmp16;
-    wire [4:0]  tmp17;
+    wire        tmp17;
     wire        tmp18;
-    wire [31:0]  tmp19;
-    wire [31:0]  tmp20;
-    wire [3:0]  tmp21;
-    wire [15:0]  tmp22;
+    wire        tmp19;
+    wire        tmp20;
+    wire        tmp21;
+    wire        tmp22;
+    wire [15:0]  tmp23;
+    wire [5:0]  tmp24;
+    wire [31:0]  tmp25;
+    wire [5:0]  tmp26;
+    wire [5:0]  tmp27;
+    wire [5:0]  tmp28;
+    wire [31:0]  tmp29;
+    wire [31:0]  tmp30;
+    wire [3:0]  tmp31;
+    wire [15:0]  tmp32;
 
     reg [7:0]  pc_exec;
     reg         ir_valid;
@@ -607,7 +618,7 @@ module zio_timing_unit_x16_f16 (
     reg [31:0]  osr;
     reg [5:0]  osr_cnt;
     reg [31:0]  isr;
-    reg [2:0]  sample_cnt;
+    reg [5:0]  isr_cnt;
     reg [3:0]  fifo_wr;
     reg [3:0]  fifo_rd;
     reg [4:0]  fifo_cnt;
@@ -616,28 +627,38 @@ module zio_timing_unit_x16_f16 (
     reg [31:0]  tx_fifo [0:15];
 
     assign tmp0 = (pin_in >> inst[19:16]);
-    assign tmp1 = inst[20:16];
-    assign tmp2 = (tmp18 ? tmp20 : osr);
-    assign tmp3 = (tmp2 & ((32'd1 << tmp17) - 32'd1));
-    assign tmp4 = ((inst[22:22] == 1'b1) ? (~((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr)))))) : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr))))));
-    assign tmp5 = ((((!ir_valid) || (halt || tmp10)) || tmp11) ? pc_exec : (((inst[31:28] == 4'd0) && ((inst[26:24] == 3'd0) || (((inst[26:24] == 3'd1) && (x_reg == 16'd0)) || (tmp14 || (((inst[26:24] == 3'd3) && (y_reg == 16'd0)) || (tmp15 || (((inst[26:24] == 3'd5) && pin_in[0]) || ((inst[26:24] == 3'd6) && ((osr_cnt != 6'd0) || (!tmp7)))))))))) ? inst[23:16] : (pc_exec + 8'd1)));
+    assign tmp1 = (pin_in >> cfg[1:0]);
+    assign tmp2 = (cfg[3:3] ? (tmp25 & (32'd4294967295 >> (6'd32 - tmp24))) : (tmp25 >> (6'd32 - tmp24)));
+    assign tmp3 = ({{1{1'b0}}, isr_cnt} + {{1{1'b0}}, tmp24});
+    assign tmp4 = ((inst[23:22] == 2'd1) ? (~((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0))))))) : ((inst[23:22] == 2'd2) ? (((((((((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) >> 5'd4) & 32'd252645135) | ((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) & 32'd252645135) << 5'd4)) >> 5'd8) & 32'd16711935) | (((((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) >> 5'd4) & 32'd252645135) | ((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) & 32'd252645135) << 5'd4)) & 32'd16711935) << 5'd8)) >> 5'd16) & 32'd65535) | ((((((((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) >> 5'd4) & 32'd252645135) | ((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) & 32'd252645135) << 5'd4)) >> 5'd8) & 32'd16711935) | (((((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) >> 5'd4) & 32'd252645135) | ((((((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) >> 5'd2) & 32'd858993459) | (((((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) >> 5'd1) & 32'd1431655765) | ((((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & 32'd1431655765) << 5'd1)) & 32'd858993459) << 5'd2)) & 32'd252645135) << 5'd4)) & 32'd16711935) << 5'd8)) & 32'd65535) << 5'd16)) : ((inst[18:16] == 3'd5) ? osr : ((inst[18:16] == 3'd4) ? isr : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0))))))));
+    assign tmp5 = ((((!ir_valid) || (halt || tmp10)) || tmp11) ? pc_exec : (tmp15 ? inst[23:16] : (pc_exec + 8'd1)));
     assign tmp6 = (fifo_cnt == 5'd16);
     assign tmp7 = (fifo_cnt == 5'd0);
     assign tmp8 = (tx_we && (!tmp6));
-    assign tmp9 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && tmp12) && ((!tmp7) && (tmp16 || (inst[31:28] == 4'd5))));
+    assign tmp9 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && tmp12) && ((!tmp7) && (tmp18 || ((inst[31:28] == 4'd5) && (1'b1 && (inst[27:17] == 11'd0))))));
     assign tmp10 = (delay_cnt > 16'd0);
-    assign tmp11 = ((((((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3))))) && (inst[27:26] == 2'd2)) && (!tmp0[0])) || ((((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3))))) && (inst[27:26] == 2'd1)) && tmp0[0])) || (((inst[31:28] == 4'd5) && inst[16:16]) && tmp7));
-    assign tmp12 = (((((((1'b0 || ((inst[31:28] == 4'd0) && (1'b1 && (inst[26:24] <= 3'd6)))) || ((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3)))))) || ((inst[31:28] == 4'd2) && ((1'b1 && (inst[23:21] <= 3'd0)) && ((tmp1 >= 5'd4) && (tmp1 <= 5'd4))))) || ((inst[31:28] == 4'd3) && ((1'b1 && (((1'b0 || (inst[23:21] == 3'd0)) || (inst[23:21] == 3'd2)) || (inst[23:21] == 3'd4))) && (1'b1 && (tmp1 <= 5'd16))))) || ((inst[31:28] == 4'd5) && 1'b1)) || ((inst[31:28] == 4'd6) && (((1'b1 && (inst[18:16] <= 3'd5)) && (inst[21:19] <= 3'd5)) && 1'b1))) || ((inst[31:28] == 4'd7) && (1'b1 && (inst[23:21] <= 3'd3))));
-    assign tmp13 = {{11{1'b0}}, tmp1};
-    assign tmp14 = ((inst[26:24] == 3'd2) && (!(x_reg == 16'd0)));
-    assign tmp15 = ((inst[26:24] == 3'd4) && (!(y_reg == 16'd0)));
-    assign tmp16 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && (inst[31:28] == 4'd3)) && tmp18);
-    assign tmp17 = ((tmp1 == 5'd0) ? 5'd16 : tmp1);
-    assign tmp18 = (osr_cnt == 6'd0);
-    assign tmp19 = {isr[27:0], pin_in};
-    assign tmp20 = tx_fifo[fifo_rd];
-    assign tmp21 = tmp4[3:0];
-    assign tmp22 = tmp4[15:0];
+    assign tmp11 = ((((inst[31:28] == 4'd1) && (((1'b1 && (inst[25:20] == 6'd0)) && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3))))) && (((inst[27:26] == 2'd2) && (!tmp0[0])) || ((inst[27:26] == 2'd1) && tmp0[0]))) || ((((inst[31:28] == 4'd5) && (1'b1 && (inst[27:17] == 11'd0))) && inst[16:16]) && tmp7));
+    assign tmp12 = ((((((((1'b0 || ((inst[31:28] == 4'd0) && (1'b1 && (inst[27:27] == 1'b0)))) || ((inst[31:28] == 4'd1) && (((1'b1 && (inst[25:20] == 6'd0)) && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3)))))) || ((inst[31:28] == 4'd2) && ((1'b1 && (inst[23:21] <= 3'd5)) && (inst[27:24] == 4'd0)))) || ((inst[31:28] == 4'd3) && ((1'b1 && (inst[23:21] <= 3'd5)) && (inst[27:24] == 4'd0)))) || ((inst[31:28] == 4'd4) && (1'b1 && (inst[27:16] == 12'd0)))) || ((inst[31:28] == 4'd5) && (1'b1 && (inst[27:17] == 11'd0)))) || ((inst[31:28] == 4'd6) && ((((1'b1 && (inst[18:16] <= 3'd5)) && (inst[21:19] <= 3'd5)) && (inst[23:22] <= 2'd2)) && (inst[27:24] == 4'd0)))) || ((inst[31:28] == 4'd7) && ((1'b1 && (inst[23:21] <= 3'd3)) && (inst[27:24] == 4'd0))));
+    assign tmp13 = inst[19:16];
+    assign tmp14 = {{11{1'b0}}, inst[20:16]};
+    assign tmp15 = (((inst[31:28] == 4'd0) && (1'b1 && (inst[27:27] == 1'b0))) && ((((((((1'b0 || ((inst[26:24] == 3'd0) && 1'b1)) || ((inst[26:24] == 3'd1) && (x_reg == 16'd0))) || (tmp16 && (!(x_reg == 16'd0)))) || ((inst[26:24] == 3'd3) && (y_reg == 16'd0))) || (tmp17 && (!(y_reg == 16'd0)))) || ((inst[26:24] == 3'd5) && tmp1[0])) || ((inst[26:24] == 3'd6) && ((!(osr_cnt == 6'd0)) || (!tmp7)))) || ((inst[26:24] == 3'd7) && (x_reg != y_reg))));
+    assign tmp16 = (inst[26:24] == 3'd2);
+    assign tmp17 = (inst[26:24] == 3'd4);
+    assign tmp18 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && ((inst[31:28] == 4'd3) && ((1'b1 && (inst[23:21] <= 3'd5)) && (inst[27:24] == 4'd0)))) && (osr_cnt == 6'd0));
+    assign tmp19 = (6'd0 < tmp24);
+    assign tmp20 = (6'd1 < tmp24);
+    assign tmp21 = (6'd2 < tmp24);
+    assign tmp22 = (6'd3 < tmp24);
+    assign tmp23 = tmp2[15:0];
+    assign tmp24 = ((inst[20:16] == 5'd0) ? 6'd32 : {{1{1'b0}}, inst[20:16]});
+    assign tmp25 = ((osr_cnt == 6'd0) ? tmp30 : osr);
+    assign tmp26 = (tmp24 - 6'd1);
+    assign tmp27 = ((osr_cnt == 6'd0) ? 6'd32 : osr_cnt);
+    assign tmp28 = ((tmp3 > 7'd32) ? 6'd32 : tmp3[5:0]);
+    assign tmp29 = (cfg[2:2] ? (((isr >> tmp26) >> 5'd1) | ((((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24))) << (6'd32 - tmp24))) : (((isr << tmp26) << 5'd1) | (((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24)))));
+    assign tmp30 = tx_fifo[fifo_rd];
+    assign tmp31 = tmp4[3:0];
+    assign tmp32 = tmp4[15:0];
 
     assign pc = tmp5;
     assign core_running = running;
@@ -664,7 +685,7 @@ module zio_timing_unit_x16_f16 (
             osr <= 32'd0;
             osr_cnt <= 6'd0;
             isr <= 32'd0;
-            sample_cnt <= 3'd0;
+            isr_cnt <= 6'd0;
             fifo_wr <= 4'd0;
             fifo_rd <= 4'd0;
             fifo_cnt <= 5'd0;
@@ -691,7 +712,7 @@ module zio_timing_unit_x16_f16 (
                 osr <= 32'd0;
                 osr_cnt <= 6'd0;
                 isr <= 32'd0;
-                sample_cnt <= 3'd0;
+                isr_cnt <= 6'd0;
             end else begin
                 if ((ctrl_stop == 1'b1)) begin
                     running <= 1'b0;
@@ -718,63 +739,93 @@ module zio_timing_unit_x16_f16 (
                                                 7: begin
                                                     case (inst[23:21])
                                                         0: begin
-                                                            pin_out <= tmp1[3:0];
+                                                            pin_out <= tmp13;
                                                         end
                                                         1: begin
-                                                            pin_oe <= tmp1[3:0];
+                                                            pin_oe <= tmp13;
                                                         end
                                                         2: begin
-                                                            x_reg <= tmp13;
+                                                            x_reg <= tmp14;
                                                         end
                                                         3: begin
-                                                            y_reg <= tmp13;
+                                                            y_reg <= tmp14;
                                                         end
                                                     endcase
                                                 end
                                                 0: begin
-                                                    if (tmp14) begin
+                                                    if ((tmp15 && tmp16)) begin
                                                         x_reg <= (x_reg - 16'd1);
                                                     end
-                                                    if (tmp15) begin
+                                                    if ((tmp15 && tmp17)) begin
                                                         y_reg <= (y_reg - 16'd1);
                                                     end
                                                 end
                                                 3: begin
-                                                    if ((tmp16 && tmp7)) begin
+                                                    if ((tmp18 && tmp7)) begin
                                                         underrun_r <= 1'b1;
                                                     end else begin
                                                         case (inst[23:21])
                                                             0: begin
-                                                                if ((5'd0 < tmp17)) begin
+                                                                if (tmp19) begin
                                                                     pin_out[0:0] <= tmp2[0];
                                                                 end
-                                                                if ((5'd1 < tmp17)) begin
+                                                                if (tmp20) begin
                                                                     pin_out[1:1] <= tmp2[1];
                                                                 end
-                                                                if ((5'd2 < tmp17)) begin
+                                                                if (tmp21) begin
                                                                     pin_out[2:2] <= tmp2[2];
                                                                 end
-                                                                if ((5'd3 < tmp17)) begin
+                                                                if (tmp22) begin
                                                                     pin_out[3:3] <= tmp2[3];
                                                                 end
                                                             end
+                                                            1: begin
+                                                                if (tmp19) begin
+                                                                    pin_oe[0:0] <= tmp2[0];
+                                                                end
+                                                                if (tmp20) begin
+                                                                    pin_oe[1:1] <= tmp2[1];
+                                                                end
+                                                                if (tmp21) begin
+                                                                    pin_oe[2:2] <= tmp2[2];
+                                                                end
+                                                                if (tmp22) begin
+                                                                    pin_oe[3:3] <= tmp2[3];
+                                                                end
+                                                            end
                                                             2: begin
-                                                                x_reg <= tmp3[15:0];
+                                                                x_reg <= tmp23;
+                                                            end
+                                                            3: begin
+                                                                y_reg <= tmp23;
                                                             end
                                                             4: begin
                                                             end
+                                                            5: begin
+                                                                isr <= tmp2;
+                                                                isr_cnt <= tmp24;
+                                                            end
                                                         endcase
-                                                        osr <= (tmp2 >> tmp17);
-                                                        osr_cnt <= ((tmp18 ? 6'd32 : osr_cnt) - {{1{1'b0}}, tmp17});
+                                                        osr <= (cfg[3:3] ? ((tmp25 >> tmp26) >> 5'd1) : ((tmp25 << tmp26) << 5'd1));
+                                                        osr_cnt <= ((tmp27 > tmp24) ? (tmp27 - tmp24) : 6'd0);
                                                     end
                                                 end
                                                 2: begin
-                                                    isr <= tmp19;
-                                                    sample_cnt <= (sample_cnt + 3'd1);
-                                                    if ((sample_cnt == 3'd7)) begin
+                                                    if ((cfg[4:4] && (tmp28 >= ((cfg[9:5] == 5'd0) ? 6'd32 : {{1{1'b0}}, cfg[9:5]})))) begin
                                                         rx_we <= 1'b1;
-                                                        rx_wdata <= tmp19;
+                                                        rx_wdata <= tmp29;
+                                                        isr <= 32'd0;
+                                                        isr_cnt <= 6'd0;
+                                                    end else begin
+                                                        isr <= tmp29;
+                                                        isr_cnt <= tmp28;
                                                     end
+                                                end
+                                                4: begin
+                                                    rx_we <= 1'b1;
+                                                    rx_wdata <= isr;
+                                                    isr <= 32'd0;
+                                                    isr_cnt <= 6'd0;
                                                 end
                                                 5: begin
                                                     if (tmp7) begin
@@ -782,29 +833,31 @@ module zio_timing_unit_x16_f16 (
                                                             underrun_r <= 1'b1;
                                                         end
                                                     end else begin
-                                                        osr <= tmp20;
+                                                        osr <= tmp30;
                                                         osr_cnt <= 6'd32;
                                                     end
                                                 end
                                                 6: begin
                                                     case (inst[21:19])
                                                         0: begin
-                                                            pin_out <= tmp21;
+                                                            pin_out <= tmp31;
                                                         end
                                                         1: begin
-                                                            pin_oe <= tmp21;
+                                                            pin_oe <= tmp31;
                                                         end
                                                         2: begin
-                                                            x_reg <= tmp22;
+                                                            x_reg <= tmp32;
                                                         end
                                                         3: begin
-                                                            y_reg <= tmp22;
+                                                            y_reg <= tmp32;
                                                         end
                                                         4: begin
                                                             isr <= tmp4;
+                                                            isr_cnt <= 6'd0;
                                                         end
                                                         5: begin
                                                             osr <= tmp4;
+                                                            osr_cnt <= 6'd32;
                                                         end
                                                     endcase
                                                 end
@@ -855,6 +908,7 @@ module programmable_asic_i2c_42 (
     localparam SRAM_PARTITION_MODE = 1'b0;
     localparam CAPTURE_ENABLED = 1'b1;
     localparam [7:0] TX_FIFO_HOST_ADDR = 8'd248;
+    localparam [7:0] CONFIG_HOST_ADDR = 8'd244;
     localparam [15:0] TX_FIFO_DEPTH = 16'd16;
 
     wire        u_reset_release_rst_n_sync;
@@ -900,14 +954,18 @@ module programmable_asic_i2c_42 (
 
     wire        tmp0;
     wire        tmp1;
+    wire        tmp2;
+
+    reg [15:0]  core_cfg;
 
     assign tmp0 = (host_we && (host_addr >= 8'd248));
     assign tmp1 = (!tx_full);
+    assign tmp2 = (host_we && (host_addr == 8'd244));
 
     assign rx_dout1 = 32'd0;
     assign tx_we = (tmp0 && tmp1);
-    assign part_we = (host_we && (!tmp0));
-    assign host_ack = (tmp0 ? tmp1 : part_ack);
+    assign part_we = ((host_we && (!tmp0)) && (!tmp2));
+    assign host_ack = (tmp0 ? tmp1 : (tmp2 ? 1'b1 : part_ack));
 
     reset_sync_2 u_reset_release (
         .clk(clk),
@@ -1001,6 +1059,7 @@ module programmable_asic_i2c_42 (
         .pin_in(gpio_in),
         .tx_we(tx_we),
         .tx_wdata(host_wdata),
+        .cfg(core_cfg),
         .pc(core_pc),
         .pin_out(gpio_out),
         .pin_oe(gpio_oe),
@@ -1013,6 +1072,16 @@ module programmable_asic_i2c_42 (
         .rx_we(rx_we),
         .rx_wdata(rx_wdata)
     );
+
+    always @(posedge clk or negedge u_reset_release_rst_n_sync) begin
+        if (!u_reset_release_rst_n_sync) begin
+            core_cfg <= 16'd24;
+        end else begin
+            if (tmp2) begin
+                core_cfg <= host_wdata[15:0];
+            end
+        end
+    end
 
 endmodule
 `default_nettype wire

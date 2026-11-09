@@ -101,6 +101,35 @@ test "width inference and width-checked assignment" {
     try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + {{4{1'b0}}, b});") != null);
 }
 
+test "truncating a part-select folds into one part-select" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const T = struct {
+        pub const Inputs = struct { word: Signal(32) };
+        pub const Outputs = struct { low: Signal(4), mid: Signal(3) };
+        pub const name = "trunc_slice";
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            try mb.assign(outs.low, b.trunc(ins.word.slice(20, 16), 4));
+            try mb.assign(outs.mid, b.resize(b.slice(ins.word.slice(27, 8), 9, 4), 3));
+        }
+    };
+
+    var design = Design.init(alloc);
+    var top = try ModuleBuilder.init(alloc, &design, "top");
+    const word = try top.input("word", 32);
+    _ = try top.instantiate(T, "u_t", .{ .word = word }, .{}, .{});
+    _ = try top.finish();
+
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign low = word[19:16];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "][") == null);
+}
+
 test "add, subtract, multiply and bitwise normalize unequal widths explicitly" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

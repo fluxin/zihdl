@@ -352,6 +352,8 @@ pub const Config = struct {
 };
 
 pub const tx_fifo_host_addr: u8 = 0xF8;
+/// Host word write: the core's `isa.Config` in bits 15:0 (reset: defaults).
+pub const config_host_addr: u8 = 0xF4;
 
 /// One composition and one execution core for all emitted products/witnesses.
 pub fn ProgrammableAsicBlock(comptime config: Config) type {
@@ -448,6 +450,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             _ = try mb.constant("CAPTURE_ENABLED", 1, if (capture) 1 else 0);
 
             _ = try mb.constant("TX_FIFO_HOST_ADDR", 8, tx_fifo_host_addr);
+            _ = try mb.constant("CONFIG_HOST_ADDR", 8, config_host_addr);
             _ = try mb.constant("TX_FIFO_DEPTH", 16, config.fifo_depth);
 
             // Internal interconnect
@@ -553,9 +556,13 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             const part_we = try mb.wire("part_we", 1);
             const part_ack = try mb.wire("part_ack", 1);
             const fifo_hit = b.and_(host_we, b.ge(host_addr, b.lit(8, tx_fifo_host_addr)));
+            const cfg_hit = b.and_(host_we, b.eq(host_addr, b.lit(8, config_host_addr)));
+            const cfg_bits = @bitSizeOf(isa.Config);
+            const core_cfg = try mb.reg("core_cfg", cfg_bits, @as(u16, @bitCast(isa.Config{})));
+            try mb.seq(domain, &.{b.when(cfg_hit, &.{b.assign(core_cfg, b.trunc(host_wdata, cfg_bits))}, &.{})});
             try mb.assign(tx_we, b.and_(fifo_hit, b.not(outs.tx_full)));
-            try mb.assign(part_we, b.and_(host_we, b.not(fifo_hit)));
-            try mb.assign(host_ack, b.ternary(fifo_hit, b.not(outs.tx_full), part_ack));
+            try mb.assign(part_we, b.and_(b.and_(host_we, b.not(fifo_hit)), b.not(cfg_hit)));
+            try mb.assign(host_ack, b.ternary(fifo_hit, b.not(outs.tx_full), b.ternary(cfg_hit, b.lit(1, 1), part_ack)));
 
             _ = try mb.instantiate(SramPartitionBlock(partition, program_words, capture), "u_partition", .{
                 .clk = domain.clk,
@@ -652,6 +659,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                 .pin_in = ins.gpio_in,
                 .tx_we = tx_we,
                 .tx_wdata = host_wdata,
+                .cfg = core_cfg,
             }, .{
                 .pc = core_pc,
                 .tx_full = outs.tx_full,

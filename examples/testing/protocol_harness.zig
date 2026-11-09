@@ -40,6 +40,8 @@ pub const Spec = struct {
     clock_half_ns: []const u8,
     line: Line = .miso,
     observe: Observe = .pin_out,
+    /// The core's `cfg` input (an `isa.Config` bit pattern) for the whole run.
+    cfg: u16,
 };
 
 fn add(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
@@ -61,7 +63,9 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
     try out.appendSlice(alloc, "  integer i, next_tx = 0, elapsed = 0, origin = 0, index = 0, rx_count = 0;\n");
     try out.appendSlice(alloc, "  reg saw_idle = 0, started = 0, finished_wave = 0;\n");
     switch (spec.line) {
-        .miso => try add(&out, alloc, "  wire [3:0] pin_in = {{miso[rx_count < {d} ? rx_count : 0][7 - dut.sample_cnt], 3'b000}};\n", .{spec.rx_words}),
+        // The SPI master samples with IN PINS,4, so the sample index is the
+        // core's ISR bit count / 4.
+        .miso => try add(&out, alloc, "  wire [3:0] pin_in = {{miso[rx_count < {d} ? rx_count : 0][7 - (dut.isr_cnt >> 2)], 3'b000}};\n", .{spec.rx_words}),
         .uart => |u| {
             if (u.bytes == 0 or u.bit_cycles == 0) return error.InvalidProtocolCase;
             try out.appendSlice(alloc, "  reg uart_line = 1'b1;\n  integer line_byte, line_bit;\n");
@@ -116,8 +120,9 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
             "    .tx_we(tx_we), .tx_wdata(tx_wdata), .pc(pc), .pin_out(pin_out),\n" ++
             "    .pin_oe(pin_oe), .core_running(running), .op_fault(fault),\n" ++
             "    .fetch(fetch), .tx_full(full), .tx_empty(empty),\n" ++
-            "    .underrun(underrun), .rx_we(rx_we), .rx_wdata(rx_wdata));\n",
+            "    .underrun(underrun), .rx_we(rx_we), .rx_wdata(rx_wdata),\n",
     );
+    try add(&out, alloc, "    .cfg(16'h{x:0>4}));\n", .{spec.cfg});
     try out.appendSlice(alloc, "  always @(posedge clk) inst <= program[pc];\n  initial begin\n");
     try add(&out, alloc, "    $readmemh(\"{s}_program.hex\", program, 0, {d});\n", .{ spec.stem, spec.program_words - 1 });
     try add(&out, alloc, "    $readmemh(\"{s}_stream.hex\", stream, 0, {d});\n", .{ spec.stem, spec.stream_words - 1 });

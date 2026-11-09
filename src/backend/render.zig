@@ -822,7 +822,15 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
             // their direct part-select, every other expression is hoisted by
             // `prepare` into a width-typed temp so the narrowing is explicit.
             switch (n.*.node) {
-                .ref, .bit, .slice, .bit_dyn => {
+                // A narrowed part-select folds into one part-select; Verilog
+                // has no chained selects such as `x[20:16][3:0]`.
+                .slice => |s| {
+                    var folded = n.*;
+                    folded.width = expr.width;
+                    folded.node.slice.hi = s.lo + expr.width - 1;
+                    try emitExprTo(out, r, folded);
+                },
+                .ref, .bit, .bit_dyn => {
                     try emitExprTo(out, r, n.*);
                     try appendFmt(out, alloc, "[{d}:0]", .{expr.width - 1});
                 },

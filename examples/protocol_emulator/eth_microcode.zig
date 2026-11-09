@@ -161,7 +161,7 @@ pub fn assembleZioFrame(alloc: std.mem.Allocator, payload: []const u8, opts: Zio
     const low_delay = zioDelayFor(opts.nlp_period_cycles - half - 1);
     const program = try alloc.alloc(u32, 6);
     program[0] = isa.out(.PINS, 1, out_delay).toU32();
-    program[1] = isa.jmp(.OSR_NOT_FULL, 0, 0).toU32();
+    program[1] = isa.jmp(.TX_PENDING, 0, 0).toU32();
     program[2] = isa.set(.PINS, 0, 0).toU32();
     program[3] = isa.set(.PINS, 1, zioDelayFor(half)).toU32();
     program[4] = isa.set(.PINS, 0, low_delay).toU32();
@@ -229,7 +229,7 @@ test "zio stream bit order is LSB-first half-bits" {
 
 /// Raw payload image plus the microcode that Manchester-encodes it with the
 /// generic ZIO transfers (`OUT X,1` moves a data bit, `MOV PINS,!X` and
-/// `MOV PINS,X` emit the two half-bits, `JMP OSR_NOT_FULL` ends on the last
+/// `MOV PINS,X` emit the two half-bits, `JMP TX_PENDING` ends on the last
 /// bit). No opcode is Ethernet-specific.
 pub const ZioPayloadFrame = struct {
     /// Raw frame octets (preamble, SFD, payload) packed LSB-first into FIFO
