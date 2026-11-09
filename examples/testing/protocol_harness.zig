@@ -3,6 +3,30 @@
 //! This module owns only simulation timing, FIFO handshakes, and verdict I/O.
 const std = @import("std");
 
+/// What drives the core's input pins.
+pub const Line = union(enum) {
+    /// SPI target: pin 3 presents `miso` bits MSB first, advanced by the core's
+    /// own sample counter (the master owns the clock).
+    miso,
+    /// Free-running 8N1 UART transmitter on `pin`, independent of the core:
+    /// idle high, `bytes` frames from `{stem}_line.hex` at `bit_cycles` per
+    /// bit, first start edge `start_cycle` cycles after ctrl_start. Every
+    /// other pin reads 0. Levels change on the falling clock edge.
+    uart: struct { pin: u2, bit_cycles: u32, start_cycle: u32, bytes: usize },
+    /// Open-drain I2C bus with pull-ups: a line is low while the core enables
+    /// its output (driving pin_out low) or the `target` module pulls it. The
+    /// target's host side reads `{stem}_target_mem.hex` (256 words) one cycle
+    /// after each request and accepts writes at once; each write must match
+    /// the next `{addr, data}` entry of `{stem}_writes.hex`, and exactly
+    /// `writes` of them must occur. With `stretch_every > 0`, the bus holds
+    /// SCL low for `stretch_cycles` after every `stretch_every`-th SCL fall.
+    i2c: struct { sda_pin: u2, scl_pin: u2, target: []const u8, writes: usize, stretch_every: u32 = 0, stretch_cycles: u32 = 0 },
+};
+
+/// Which output the expected symbols describe. The other output must hold
+/// `Spec.output_enable` throughout (open-drain lines keep pin_out at 0).
+pub const Observe = enum { pin_out, pin_oe };
+
 pub const Spec = struct {
     stem: []const u8,
     tag: []const u8,
@@ -14,6 +38,8 @@ pub const Spec = struct {
     idle: u4,
     last_offset: u32,
     clock_half_ns: []const u8,
+    line: Line = .miso,
+    observe: Observe = .pin_out,
 };
 
 fn add(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
@@ -34,7 +60,53 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
     try out.appendSlice(alloc, "  wire running, fault, fetch, full, empty, underrun, rx_we;\n  wire [31:0] rx_wdata;\n");
     try out.appendSlice(alloc, "  integer i, next_tx = 0, elapsed = 0, origin = 0, index = 0, rx_count = 0;\n");
     try out.appendSlice(alloc, "  reg saw_idle = 0, started = 0, finished_wave = 0;\n");
-    try add(&out, alloc, "  wire [3:0] pin_in = {{miso[rx_count < {d} ? rx_count : 0][7 - dut.sample_cnt], 3'b000}};\n", .{spec.rx_words});
+    switch (spec.line) {
+        .miso => try add(&out, alloc, "  wire [3:0] pin_in = {{miso[rx_count < {d} ? rx_count : 0][7 - dut.sample_cnt], 3'b000}};\n", .{spec.rx_words}),
+        .uart => |u| {
+            if (u.bytes == 0 or u.bit_cycles == 0) return error.InvalidProtocolCase;
+            try out.appendSlice(alloc, "  reg uart_line = 1'b1;\n  integer line_byte, line_bit;\n");
+            try add(&out, alloc, "  reg [7:0] line_bytes [0:{d}];\n", .{u.bytes - 1});
+            try add(&out, alloc, "  wire [3:0] pin_in = {{3'b000, uart_line}} << {d};\n", .{u.pin});
+            try add(&out, alloc, "  initial begin\n    $readmemh(\"{s}_line.hex\", line_bytes);\n", .{spec.stem});
+            try add(&out, alloc, "    @(posedge ctrl_start);\n    repeat ({d}) @(negedge clk);\n", .{u.start_cycle});
+            try add(&out, alloc, "    for (line_byte = 0; line_byte < {d}; line_byte = line_byte + 1) begin\n", .{u.bytes});
+            try add(&out, alloc, "      uart_line = 1'b0; repeat ({d}) @(negedge clk);\n", .{u.bit_cycles});
+            try out.appendSlice(alloc, "      for (line_bit = 0; line_bit < 8; line_bit = line_bit + 1) begin\n");
+            try add(&out, alloc, "        uart_line = line_bytes[line_byte][line_bit]; repeat ({d}) @(negedge clk);\n      end\n", .{u.bit_cycles});
+            try add(&out, alloc, "      uart_line = 1'b1; repeat ({d}) @(negedge clk);\n    end\n  end\n", .{u.bit_cycles});
+        },
+        .i2c => |bus| {
+            if (bus.sda_pin == bus.scl_pin) return error.InvalidProtocolCase;
+            try out.appendSlice(alloc, "  wire target_sda_out, target_sda_oe, host_we, host_req;\n  wire [7:0] host_addr, host_raddr;\n  wire [31:0] host_wdata;\n");
+            try out.appendSlice(alloc, "  reg host_rvalid = 1'b0, stretch = 1'b0, scl_prev = 1'b1;\n  reg [31:0] host_rdata = 0;\n");
+            try out.appendSlice(alloc, "  reg [31:0] target_mem [0:255];\n  integer write_count = 0, scl_falls = 0, stretch_left = 0;\n");
+            try add(&out, alloc, "  reg [39:0] expected_writes [0:{d}];\n", .{@max(bus.writes, 1) - 1});
+            try add(&out, alloc, "  wire scl_bus = !(pin_oe[{d}] && !pin_out[{d}]) && !stretch;\n", .{ bus.scl_pin, bus.scl_pin });
+            try add(&out, alloc, "  wire sda_bus = !(pin_oe[{d}] && !pin_out[{d}]) && !(target_sda_oe && !target_sda_out);\n", .{ bus.sda_pin, bus.sda_pin });
+            try add(&out, alloc, "  wire [3:0] pin_in = ({{3'b000, sda_bus}} << {d}) | ({{3'b000, scl_bus}} << {d});\n", .{ bus.sda_pin, bus.scl_pin });
+            try add(&out, alloc, "  {s} target (\n", .{bus.target});
+            try out.appendSlice(
+                alloc,
+                "    .clk(clk), .rst_n(rst_n), .i2c_scl(scl_bus), .i2c_sda_in(sda_bus),\n" ++
+                    "    .host_rdata(host_rdata), .host_ack(host_we), .host_rvalid(host_rvalid),\n" ++
+                    "    .i2c_sda_out(target_sda_out), .i2c_sda_oe(target_sda_oe), .host_we(host_we),\n" ++
+                    "    .host_addr(host_addr), .host_wdata(host_wdata), .host_req(host_req),\n" ++
+                    "    .host_raddr(host_raddr), .ctrl_start(), .ctrl_stop(), .start_pc());\n",
+            );
+            try add(&out, alloc, "  initial begin\n    $readmemh(\"{s}_target_mem.hex\", target_mem);\n", .{spec.stem});
+            if (bus.writes > 0) try add(&out, alloc, "    $readmemh(\"{s}_writes.hex\", expected_writes);\n", .{spec.stem});
+            try out.appendSlice(alloc, "  end\n  always @(posedge clk) begin\n    host_rvalid <= host_req && !host_rvalid;\n    host_rdata <= target_mem[host_raddr];\n");
+            try out.appendSlice(alloc, "    if (host_we) begin\n");
+            try add(&out, alloc, "      if (write_count >= {d} || {{host_addr, host_wdata}} !== expected_writes[write_count])\n", .{bus.writes});
+            try add(&out, alloc, "        $fatal(1, \"{s}: target write %0d got %h:%h\", write_count, host_addr, host_wdata);\n", .{spec.tag});
+            try out.appendSlice(alloc, "      write_count = write_count + 1;\n    end\n  end\n");
+            if (bus.stretch_every > 0) {
+                try out.appendSlice(alloc, "  always @(negedge clk) begin\n    if (scl_prev && !scl_bus) begin\n      scl_falls = scl_falls + 1;\n");
+                try add(&out, alloc, "      if (scl_falls % {d} == 0) stretch_left = {d};\n    end\n", .{ bus.stretch_every, bus.stretch_cycles });
+                try out.appendSlice(alloc, "    scl_prev = scl_bus;\n    stretch = stretch_left > 0;\n    if (stretch_left > 0) stretch_left = stretch_left - 1;\n  end\n");
+            }
+        },
+    }
     try add(&out, alloc, "  always #{s} clk = ~clk;\n", .{spec.clock_half_ns});
     try out.appendSlice(
         alloc,
@@ -61,21 +133,28 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
     try add(&out, alloc, "      if (next_tx < {d} && !full) begin\n", .{spec.stream_words});
     try out.appendSlice(alloc, "        tx_we = 1; tx_wdata = stream[next_tx]; next_tx = next_tx + 1;\n      end\n    end\n  end\n");
     try out.appendSlice(alloc, "  always @(posedge clk) begin\n    #0.001;\n    elapsed = elapsed + 1;\n");
-    try add(&out, alloc, "    if (elapsed > {d}) $fatal(1, \"{s}: timeout\");\n", .{ spec.last_offset + 500, spec.tag });
+    // The same bound applies before the first symbol and after it, so a
+    // program that idles before its wave (UART at low baud rates) still fits.
+    try add(&out, alloc, "    if ((started ? elapsed - origin : elapsed) > {d}) $fatal(1, \"{s}: timeout\");\n", .{ spec.last_offset + 500, spec.tag });
     try out.appendSlice(alloc, "    if (rx_we) begin\n      rx_count = rx_count + 1;\n");
     try add(&out, alloc, "      if (rx_wdata !== expected_rx[rx_count-1]) $fatal(1, \"{s}: RX word %h expected %h\", rx_wdata, expected_rx[rx_count-1]);\n", .{spec.tag});
     try out.appendSlice(alloc, "    end\n");
     try add(&out, alloc, "    if (started && (fault || underrun)) $fatal(1, \"{s}: core fault or underrun\");\n", .{spec.tag});
-    try add(&out, alloc, "    if (running && pin_oe == 4'h{x} && pin_out == 4'h{x}) saw_idle = 1;\n", .{ spec.output_enable, spec.idle });
-    try add(&out, alloc, "    if (!started && saw_idle && running && pin_oe == 4'h{x} && pin_out == expected[0][3:0]) begin\n", .{spec.output_enable});
+    const observed, const held = switch (spec.observe) {
+        .pin_out => .{ "pin_out", "pin_oe" },
+        .pin_oe => .{ "pin_oe", "pin_out" },
+    };
+    try add(&out, alloc, "    if (running && {s} == 4'h{x} && {s} == 4'h{x}) saw_idle = 1;\n", .{ held, spec.output_enable, observed, spec.idle });
+    try add(&out, alloc, "    if (!started && saw_idle && running && {s} == 4'h{x} && {s} == expected[0][3:0]) begin\n", .{ held, spec.output_enable, observed });
     try out.appendSlice(alloc, "      started = 1; origin = elapsed;\n    end\n    if (started && !finished_wave) begin\n");
     try add(&out, alloc, "      if (index + 1 < {d} && elapsed - origin == expected[index+1][31:4]) index = index + 1;\n", .{spec.symbols});
-    try add(&out, alloc, "      if (pin_out !== expected[index][3:0] || pin_oe !== 4'h{x})\n", .{spec.output_enable});
-    try add(&out, alloc, "        $fatal(1, \"{s}: pin mismatch at cycle %0d symbol %0d: got %h oe %h, expected %h\", elapsed-origin, index, pin_out, pin_oe, expected[index][3:0]);\n", .{spec.tag});
+    try add(&out, alloc, "      if ({s} !== expected[index][3:0] || {s} !== 4'h{x})\n", .{ observed, held, spec.output_enable });
+    try add(&out, alloc, "        $fatal(1, \"{s}: pin mismatch at cycle %0d symbol %0d: got out %h oe %h, expected {s} %h\", elapsed-origin, index, pin_out, pin_oe, expected[index][3:0]);\n", .{ spec.tag, observed });
     try add(&out, alloc, "      if (index == {d}) finished_wave = 1;\n", .{spec.symbols - 1});
     try out.appendSlice(alloc, "    end\n");
     try add(&out, alloc, "    if (finished_wave && elapsed - origin > {d}) begin\n", .{spec.last_offset + 25});
     try add(&out, alloc, "      if (rx_count != {d}) $fatal(1, \"{s}: RX count %0d expected {d}\", rx_count);\n", .{ spec.rx_words, spec.tag, spec.rx_words });
+    if (spec.line == .i2c) try add(&out, alloc, "      if (write_count != {d}) $fatal(1, \"{s}: target writes %0d expected {d}\", write_count);\n", .{ spec.line.i2c.writes, spec.tag, spec.line.i2c.writes });
     try add(&out, alloc, "      $display(\"PROTOCOL {s} PASS: {d} symbols, %0d RX words\", rx_count);\n", .{ spec.tag, spec.symbols });
     try out.appendSlice(alloc, "      $finish;\n    end\n  end\nendmodule\n");
     return out.toOwnedSlice(alloc);

@@ -27,7 +27,20 @@ SPI RX words unpack into bytes. SPI preloads up to 16 TX FIFO words and refills
 the remaining ordered stream whenever `tx_full` clears. `zig build protocols`
 checks USB data/token/ACK packets and 10 ms reset at 60/120 MHz, plus all four
 SPI modes with varied MISO and an eight-byte transfer that crosses the FIFO
-limit. `zig build verify` includes these direct ZIO RTL witnesses. The
+limit.
+
+The core also runs a firmware UART (`uart_microcode.zig`, 8N1): TX frames
+bytes from the OSR itself (count header, four bytes per word) and RX takes one
+mid-bit sample per data bit, one RX word per byte. Rates must round to within
+1/34 of the bit time, half of the 8N1 frame budget. An I2C controller
+(`i2c_microcode.zig`, standard/fast/fast-mode plus, open drain on pins 0/1)
+plans START, repeated START, ACK/NACK and STOP as slots, waits for SCL to rise
+(clock stretching) and samples mid-high; SCL low/high times come from the
+UM10204 minimums. `zig build protocols` checks UART TX bit edges to the cycle
+at 1 Mbaud and 115200, RX at both rates and with the far end 2.9% fast and
+slow, and I2C writes and a repeated-START read against zihdl's own I2C target
+RTL at all three speeds (every SDA/SCL transition to the cycle) and with clock
+stretching. `zig build verify` includes these direct ZIO RTL witnesses. The
 standalone 10BASE-T RTL serializer is a reusable library block under
 `src/blocks/`, with its witness under `examples/blocks/`.
 

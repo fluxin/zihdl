@@ -543,11 +543,22 @@ pub fn build(b: *std.Build) void {
         zio_step.dependOn(&fault.step);
     }
 
-    const protocols_step = b.step("protocols", "Simulate USB, SPI and JTAG microcode on the ZIO RTL");
-    inline for (.{ "usb60", "usb120", "token60", "token120", "ack60", "ack120", "reset60", "reset120", "spi0", "spi1", "spi2", "spi3", "jtag" }) |tag| {
+    const protocols_step = b.step("protocols", "Simulate USB, SPI, JTAG, UART and I2C microcode on the ZIO RTL");
+    inline for (.{ "usb60", "usb120", "token60", "token120", "ack60", "ack120", "reset60", "reset120", "spi0", "spi1", "spi2", "spi3", "jtag", "uart_tx1m", "uart_tx115k", "uart_rx1m", "uart_rx115k", "uart_rx115k_fast", "uart_rx115k_slow" }) |tag| {
         const compile = b.addSystemCommand(&.{
             "iverilog",                      "-g2001",              "-s",                              "protocol_wave_tb", "-o",
             "out/protocol_" ++ tag ++ "_iv", "out/protocol_core.v", "out/protocol_" ++ tag ++ "_tb.v",
+        });
+        compile.step.dependOn(&protocol_wit_gen.step);
+        const run = b.addSystemCommand(&.{ "vvp", "out/protocol_" ++ tag ++ "_iv" });
+        run.step.dependOn(&compile.step);
+        protocols_step.dependOn(&run.step);
+    }
+    // The I2C controller cases also compile zihdl's I2C target onto the bus.
+    inline for (.{ "i2c_std", "i2c_fast", "i2c_fastplus", "i2c_fast_stretch" }) |tag| {
+        const compile = b.addSystemCommand(&.{
+            "iverilog",                      "-g2001",              "-s",                        "protocol_wave_tb",                "-o",
+            "out/protocol_" ++ tag ++ "_iv", "out/protocol_core.v", "out/protocol_i2c_target.v", "out/protocol_" ++ tag ++ "_tb.v",
         });
         compile.step.dependOn(&protocol_wit_gen.step);
         const run = b.addSystemCommand(&.{ "vvp", "out/protocol_" ++ tag ++ "_iv" });
