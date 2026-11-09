@@ -1912,3 +1912,27 @@ test "a reserved keyword cannot name a signal" {
     std.testing.log_level = .err;
     try std.testing.expectError(error.ReservedIdentifier, design.elaborate(K));
 }
+
+test "typed Zig integers such as enum backing values assign as literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Mode = enum(u2) { idle = 0, busy = 2 };
+    const T = struct {
+        pub const name = "typed_literals";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1) };
+        pub const Outputs = struct { mode: Signal(2), hit: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{b.assign(outs.mode, @backingInt(Mode.busy))});
+            try mb.assign(outs.hit, b.eq(outs.mode, @backingInt(Mode.idle)));
+        }
+    };
+    var design = Design.init(alloc);
+    _ = try design.elaborate(T);
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, v, "mode <= 2'd2;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "(mode == 2'd0)") != null);
+}

@@ -270,6 +270,12 @@ fn typeIsSigned(comptime T: type) bool {
     return false;
 }
 
+/// A plain Zig integer operand (comptime or typed) that adopts its context's
+/// width instead of carrying one.
+fn isBareInt(comptime T: type) bool {
+    return T == comptime_int or @typeInfo(T) == .int;
+}
+
 fn asAny(x: anytype) AnyExpr {
     const T = @TypeOf(x);
     if (T == AnyExpr) return x;
@@ -286,10 +292,11 @@ fn asRef(x: anytype) SymRef {
     return x.ref;
 }
 
-/// Width of a hardware value type, or null for bare comptime integers and
-/// erased `AnyExpr` values (whose width is runtime data).
+/// Width of a hardware value type, or null for bare integers (comptime or
+/// typed Zig integers, which adopt the operand's width) and erased `AnyExpr`
+/// values (whose width is runtime data).
 fn widthOfType(comptime T: type) ?usize {
-    if (T == comptime_int or T == AnyExpr) return null;
+    if (T == comptime_int or T == AnyExpr or @typeInfo(T) == .int) return null;
     return T.width;
 }
 
@@ -815,11 +822,30 @@ pub const ExprBuilder = struct {
         return .{ .e = .{ .width = W, .is_signed = false, .known = val, .node = .{ .lit = val } } };
     }
 
-    /// Materializes a bare comptime integer as a width-typed literal in
-    /// contexts that know the intended width; hardware values pass through.
+    /// Materializes a bare integer as a width-typed literal in contexts that
+    /// know the intended width; hardware values pass through.
     fn coerce(self: ExprBuilder, x: anytype, comptime W: usize) AnyExpr {
         if (@TypeOf(x) == comptime_int) return self.lit(W, x).e;
+        if (comptime isZigInt(@TypeOf(x))) return self.typedLit(W, x);
         return asAny(x);
+    }
+
+    fn isZigInt(comptime T: type) bool {
+        return @typeInfo(T) == .int;
+    }
+
+    /// A typed unsigned Zig integer (for example `@backingInt(tag)`, which
+    /// `zig fmt` writes for enum values) as a literal of width W. A type wider
+    /// than W is a compile error, so nothing truncates silently.
+    fn typedLit(self: ExprBuilder, comptime W: usize, value: anytype) AnyExpr {
+        _ = self;
+        const T = @TypeOf(value);
+        comptime {
+            if (@typeInfo(T).int.signedness == .signed) @compileError("signed integer " ++ @typeName(T) ++ " used as a literal; use a hardware value or a comptime integer");
+            if (@bitSizeOf(T) > W) @compileError(std.fmt.comptimePrint("integer of type {s} does not fit {d} bits", .{ @typeName(T), W }));
+        }
+        const v: u64 = value;
+        return .{ .width = W, .is_signed = false, .known = v, .node = .{ .lit = v } };
     }
 
     /// Condition operand: bare integers become 1-bit literals, typed values
@@ -875,8 +901,8 @@ pub const ExprBuilder = struct {
         // routed through here (arithmetic, division/remainder and bitwise) uses
         // Verilog's rule: signed only when both operands are signed, in which
         // case narrower operands sign-extend; otherwise they zero-extend.
-        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
-        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
+        const a_signed = if (comptime isBareInt(@TypeOf(a))) false else asAny(a).is_signed;
+        const b_signed = if (comptime isBareInt(@TypeOf(b))) false else asAny(b).is_signed;
         const signed_op = a_signed and b_signed;
         const ae = self.normOperand(a, W, signed_op);
         const be = self.normOperand(b, W, signed_op);
@@ -917,8 +943,8 @@ pub const ExprBuilder = struct {
     /// RTL self-determined and lint-clean instead of relying on the operator
     /// context to widen a narrower operand.
     fn normOperand(self: ExprBuilder, x: anytype, comptime W: usize, signed_op: bool) Expr(W) {
-        if (@TypeOf(x) == comptime_int) {
-            var value = self.lit(W, x).e;
+        if (@TypeOf(x) == comptime_int or comptime isZigInt(@TypeOf(x))) {
+            var value = if (@TypeOf(x) == comptime_int) self.lit(W, x).e else self.typedLit(W, x);
             value.is_signed = signed_op;
             return .{ .e = value };
         }
@@ -985,14 +1011,14 @@ pub const ExprBuilder = struct {
 
     fn cmp(self: ExprBuilder, op: BinOp, a: anytype, b: anytype) Expr(1) {
         const W = comptime operandWidth(@TypeOf(a), @TypeOf(b));
-        const a_signed = if (@TypeOf(a) == comptime_int) false else asAny(a).is_signed;
-        const b_signed = if (@TypeOf(b) == comptime_int) false else asAny(b).is_signed;
+        const a_signed = if (comptime isBareInt(@TypeOf(a))) false else asAny(a).is_signed;
+        const b_signed = if (comptime isBareInt(@TypeOf(b))) false else asAny(b).is_signed;
         // Unsigned comparison when either operand is unsigned (Verilog rule).
         // A narrower operand is extended explicitly so the emitted comparison
         // is self-determined; equal-width operands are left untouched.
         const signed_op = a_signed and b_signed;
-        const aw = if (@TypeOf(a) == comptime_int) W else asAny(a).width;
-        const bw = if (@TypeOf(b) == comptime_int) W else asAny(b).width;
+        const aw = if (comptime isBareInt(@TypeOf(a))) W else asAny(a).width;
+        const bw = if (comptime isBareInt(@TypeOf(b))) W else asAny(b).width;
         const ae = if (aw < W) self.normOperand(a, W, signed_op).e else self.coerce(a, W);
         const be = if (bw < W) self.normOperand(b, W, signed_op).e else self.coerce(b, W);
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = op, .lhs = self.dup(ae), .rhs = self.dup(be) } } } };
@@ -1177,6 +1203,7 @@ pub const ExprBuilder = struct {
         if (@TypeOf(src) == comptime_int) {
             return .{ .assign = .{ .dst = asRef(dst), .src = self.lit(W, src).e } };
         }
+        if (comptime isZigInt(@TypeOf(src))) return .{ .assign = .{ .dst = asRef(dst), .src = self.typedLit(W, src) } };
         comptime {
             if (valWidth(@TypeOf(src)) != W) {
                 @compileError("assign width mismatch: dst has " ++
@@ -1191,6 +1218,7 @@ pub const ExprBuilder = struct {
         if (@TypeOf(src) == comptime_int) {
             return .{ .slice_assign = .{ .dst = asRef(dst), .hi = hi, .lo = lo, .src = self.lit(hi - lo + 1, src).e } };
         }
+        if (comptime isZigInt(@TypeOf(src))) return .{ .slice_assign = .{ .dst = asRef(dst), .hi = hi, .lo = lo, .src = self.typedLit(hi - lo + 1, src) } };
         comptime {
             if (valWidth(@TypeOf(src)) != hi - lo + 1) {
                 @compileError("slice assign width mismatch");
@@ -1204,6 +1232,7 @@ pub const ExprBuilder = struct {
         if (@TypeOf(src) == comptime_int) {
             return .{ .mem_write = .{ .mem = asRef(mem), .addr = self.intern(addr), .src = self.lit(W, src).e } };
         }
+        if (comptime isZigInt(@TypeOf(src))) return .{ .mem_write = .{ .mem = asRef(mem), .addr = self.intern(addr), .src = self.typedLit(W, src) } };
         comptime {
             if (valWidth(@TypeOf(src)) != W) {
                 @compileError("memory write data width must match memory width");
