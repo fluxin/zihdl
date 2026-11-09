@@ -194,7 +194,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const core_gen = b.addRunArtifact(core_witness);
-    b.step("zio-core", "Emit the native ZIO capture/control witness").dependOn(&core_gen.step);
+    const core_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "zio_timing_unit_x16_f16_vectors_tb", "-o", "out/zio_core_iv", "out/zio_core.v", "out/zio_core_tb.v" });
+    core_compile.step.dependOn(&core_gen.step);
+    const core_run = b.addSystemCommand(&.{ "vvp", "out/zio_core_iv" });
+    core_run.step.dependOn(&core_compile.step);
+    const zio_core_step = b.step("zio-core", "Emit the ZIO capture/control witness and replay it in Icarus");
+    zio_core_step.dependOn(&core_run.step);
 
     // Ethernet 10BASE-T transmit testbench generator: cycle-accurate expected
     // waveform for the Manchester encoder, NLP generator and stream handshake.
@@ -430,7 +435,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const zio_diff_gen = b.addRunArtifact(zio_diff_exe);
-    const zio_diff_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "zio_diff_tb", "-o", "out/zio_diff_iv", "out/zio_diff_core.v", "out/zio_diff_tb.v" });
+    const zio_diff_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "zio_diff_top_vectors_tb", "-o", "out/zio_diff_iv", "out/zio_diff_top.v", "out/zio_diff_tb.v" });
     zio_diff_compile.step.dependOn(&zio_diff_gen.step);
     const zio_diff_run = b.addSystemCommand(&.{ "vvp", "out/zio_diff_iv" });
     zio_diff_run.step.dependOn(&zio_diff_compile.step);
@@ -859,6 +864,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_zio_model_tests.step);
     verify_step.dependOn(&run_zio_model_tests.step);
     verify_step.dependOn(zio_diff_step);
+    verify_step.dependOn(zio_core_step);
     const zio_tests = b.addTest(.{ .root_module = zio_wit_exe.root_module });
     const run_zio_tests = b.addRunArtifact(zio_tests);
     test_step.dependOn(&run_zio_tests.step);

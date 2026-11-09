@@ -5,29 +5,7 @@ const std = @import("std");
 const zihdl = @import("zihdl");
 const core = @import("zio_timing_unit.zig");
 const isa = @import("isa.zig");
-const Field = struct { name: []const u8, width: usize };
-const inputs = [_]Field{
-    .{ .name = "rst_n", .width = 1 },                    .{ .name = "inst", .width = 32 },
-    .{ .name = "ctrl_start", .width = 1 },               .{ .name = "ctrl_stop", .width = 1 },
-    .{ .name = "start_pc", .width = 8 },                 .{ .name = "pin_in", .width = 4 },
-    .{ .name = "tx_we", .width = 1 },                    .{ .name = "tx_wdata", .width = 32 },
-    .{ .name = "cfg", .width = @bitSizeOf(isa.Config) },
-};
-const outputs = [_]Field{
-    .{ .name = "pc", .width = 8 },        .{ .name = "pin_out", .width = 4 },
-    .{ .name = "pin_oe", .width = 4 },    .{ .name = "core_running", .width = 1 },
-    .{ .name = "op_fault", .width = 1 },  .{ .name = "fetch", .width = 1 },
-    .{ .name = "tx_full", .width = 1 },   .{ .name = "tx_empty", .width = 1 },
-    .{ .name = "underrun", .width = 1 },  .{ .name = "rx_we", .width = 1 },
-    .{ .name = "rx_wdata", .width = 32 },
-};
-fn names(a: std.mem.Allocator, fields: []const Field) ![][]const u8 {
-    var list = std.ArrayList([]const u8).empty;
-    for (fields) |f| for (0..f.width) |bit| {
-        try list.append(a, if (f.width == 1) f.name else try std.fmt.allocPrint(a, "{s}[{d}]", .{ f.name, bit }));
-    };
-    return list.toOwnedSlice(a);
-}
+const Schedule = zihdl.backend.stimulus.Typed(core.ZioTimingUnitBlock.Inputs, core.ZioTimingUnitBlock.Outputs, "clk");
 const Row = struct {
     pc: ?u8 = null,
     reset: u1 = 1,
@@ -45,33 +23,33 @@ const Row = struct {
     rx_we: u1 = 0,
     rx_word: u32 = 0,
 };
-fn row(w: *zihdl.backend.stimulus.Writer, v: Row) !void {
-    const drive = @as(u128, v.reset) | (@as(u128, v.inst) << 1) |
-        (@as(u128, v.start) << 33) | (@as(u128, v.stop) << 34) |
-        (@as(u128, v.pins) << 43) | (@as(u128, v.tx_we) << 47) | (@as(u128, v.tx_word) << 48) |
-        (@as(u128, v.cfg) << 80);
-    const expect = (@as(u64, v.pin_out) << 8) | (@as(u64, v.running) << 16) |
-        (@as(u64, v.fault) << 17) | (@as(u64, v.empty) << 20) |
-        (@as(u64, v.rx_we) << 22) | (@as(u64, v.rx_word) << 23);
-    for (w.drive, 0..) |*c, i| c.* = '0' + @as(u8, @intCast((drive >> @intCast(i)) & 1));
-    for (w.expect, 0..) |*c, i| c.* = '0' + @as(u8, @intCast((expect >> @intCast(i)) & 1));
-    // The direct instruction driver deliberately does not model external fetch.
-    @memset(w.expect[0..8], 'x');
-    if (v.pc) |pc| for (w.expect[0..8], 0..) |*c, i| {
-        c.* = '0' + @as(u8, @intCast((pc >> @intCast(i)) & 1));
-    };
-    w.expect[18] = 'x';
-    try w.push();
-}
-fn schedule(a: std.mem.Allocator) ![]u8 {
-    var w = try zihdl.backend.stimulus.Writer.init(a, .{
-        .top = core.ZioTimingUnitBlock.name,
-        .clock = "clk",
-        .period_ps = 8333,
-        .input_names = try names(a, &inputs),
-        .output_names = try names(a, &outputs),
+/// The direct instruction driver deliberately does not model external fetch,
+/// so `pc` is compared only where a row states it; `fetch` is never compared.
+fn row(w: *Schedule, v: Row) !void {
+    try w.cycle(.{
+        .rst_n = v.reset,
+        .inst = v.inst,
+        .ctrl_start = v.start,
+        .ctrl_stop = v.stop,
+        .pin_in = v.pins,
+        .tx_we = v.tx_we,
+        .tx_wdata = v.tx_word,
+        .cfg = v.cfg,
+    }, .{
+        .pc = v.pc,
+        .pin_out = v.pin_out,
+        .pin_oe = 0,
+        .core_running = v.running,
+        .op_fault = v.fault,
+        .tx_full = 0,
+        .tx_empty = v.empty,
+        .underrun = 0,
+        .rx_we = v.rx_we,
+        .rx_wdata = v.rx_word,
     });
-    defer w.deinit();
+}
+fn schedule(a: std.mem.Allocator) !Schedule.Files {
+    var w = try Schedule.init(a, core.ZioTimingUnitBlock.name, 8333);
     const sample = isa.in(.PINS, 4, 0).toU32();
     try row(&w, .{ .reset = 0, .running = 0 });
     try row(&w, .{ .start = 1 });
@@ -126,7 +104,7 @@ fn schedule(a: std.mem.Allocator) ![]u8 {
     try row(&w, .{ .inst = wait2, .pins = 1, .pc = 0 });
     try row(&w, .{ .inst = wait2, .pins = 4, .pc = 2 });
     try row(&w, .{ .inst = isa.waitPin(4, 1, 0).toU32(), .fault = 1, .running = 0 });
-    return w.finish();
+    return w.finish("out/zio_core");
 }
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -137,11 +115,16 @@ pub fn main(init: std.process.Init) !void {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(init.io, "out");
     try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.v", .data = try zihdl.backend.verilog.emitDesign(a, &design, .{}) });
-    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.jsonl", .data = try schedule(a) });
+    const files = try schedule(a);
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core.jsonl", .data = files.schedule });
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core_tb.v", .data = files.testbench });
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core_drive.hex", .data = files.drive });
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core_expect.hex", .data = files.expect });
+    try cwd.writeFile(init.io, .{ .sub_path = "out/zio_core_care.hex", .data = files.care });
 }
 test "capture witness includes independent known words and instruction gates" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const text = try schedule(arena.allocator());
-    try std.testing.expect(std.mem.count(u8, text, "\"drive\"") >= 60);
+    const files = try schedule(arena.allocator());
+    try std.testing.expect(std.mem.count(u8, files.schedule, "\"drive\"") >= 60);
 }

@@ -40,7 +40,17 @@ UM10204 minimums. `zig build protocols` checks UART TX bit edges to the cycle
 at 1 Mbaud and 115200, RX at both rates and with the far end 2.9% fast and
 slow, and I2C writes and a repeated-START read against zihdl's own I2C target
 RTL at all three speeds (every SDA/SCL transition to the cycle) and with clock
-stretching. `zig build verify` includes these direct ZIO RTL witnesses. The
+stretching.
+
+The ZIO instruction set is defined once in `isa.zig` as packed payload
+formats (`zihdl.bitfield`); the RTL decoder, assembler, reference model and
+`docs/zio-isa.md` (`zig build isa-doc`) all derive from it. `zio_model.zig` is
+an independent cycle-accurate reference, and `zig build zio-diff` compares
+every output bit of the RTL with it over 192k random cycles (random valid
+programs from the ISA table, faults, pins, TX writes, configuration, start,
+stop and reset). Testbenches for these come from typed `oasic.stimulus/1`
+schedules (`backend.stimulus.Typed`), the same rows oasic's simulator replays.
+`zig build verify` includes these direct ZIO RTL witnesses. The
 standalone 10BASE-T RTL serializer is a reusable library block under
 `src/blocks/`, with its witness under `examples/blocks/`.
 
