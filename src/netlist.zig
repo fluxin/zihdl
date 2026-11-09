@@ -1057,8 +1057,11 @@ pub const ExprBuilder = struct {
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = self.selectBase(sig), .index = index } } } };
     }
 
+    /// Dynamic bit select. An index narrower than the select needs is
+    /// zero-extended so the emitted select is lint-clean (Verilator WIDTH).
     pub fn bitDyn(self: ExprBuilder, sig: anytype, index: anytype) Expr(1) {
-        const ie = asAny(index);
+        const IW = comptime shiftWidth(valWidth(@TypeOf(sig)));
+        const ie = if (comptime valWidth(@TypeOf(index)) < IW) self.zext(index, IW).e else asAny(index);
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit_dyn = .{ .base = self.selectBase(sig), .index = self.dup(ie) } } } };
     }
 

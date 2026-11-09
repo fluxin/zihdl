@@ -41,7 +41,7 @@ pub const Spec = struct {
     line: Line = .miso,
     observe: Observe = .pin_out,
     /// The core's `cfg` input (an `isa.Config` bit pattern) for the whole run.
-    cfg: u16,
+    cfg: u32,
 };
 
 fn add(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
@@ -58,19 +58,19 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
     try out.appendSlice(alloc, "  reg [31:0] tx_wdata = 0, inst = 0;\n");
     try add(&out, alloc, "  reg [31:0] program [0:63], stream [0:{d}], expected [0:{d}], expected_rx [0:{d}];\n", .{ spec.stream_words - 1, spec.symbols - 1, rx_alloc - 1 });
     try add(&out, alloc, "  reg [7:0] miso [0:{d}];\n", .{rx_alloc - 1});
-    try out.appendSlice(alloc, "  wire [7:0] pc;\n  wire [3:0] pin_out, pin_oe;\n");
+    try out.appendSlice(alloc, "  wire [7:0] pc;\n  wire [7:0] pin_out, pin_oe;\n");
     try out.appendSlice(alloc, "  wire running, fault, fetch, full, empty, underrun, rx_we;\n  wire [31:0] rx_wdata;\n");
     try out.appendSlice(alloc, "  integer i, next_tx = 0, elapsed = 0, origin = 0, index = 0, rx_count = 0;\n");
     try out.appendSlice(alloc, "  reg saw_idle = 0, started = 0, finished_wave = 0;\n");
     switch (spec.line) {
         // The SPI master samples with IN PINS,4, so the sample index is the
         // core's ISR bit count / 4.
-        .miso => try add(&out, alloc, "  wire [3:0] pin_in = {{miso[rx_count < {d} ? rx_count : 0][7 - (dut.isr_cnt >> 2)], 3'b000}};\n", .{spec.rx_words}),
+        .miso => try add(&out, alloc, "  wire [7:0] pin_in = {{4'b0000, miso[rx_count < {d} ? rx_count : 0][7 - (dut.isr_cnt >> 2)], 3'b000}};\n", .{spec.rx_words}),
         .uart => |u| {
             if (u.bytes == 0 or u.bit_cycles == 0) return error.InvalidProtocolCase;
             try out.appendSlice(alloc, "  reg uart_line = 1'b1;\n  integer line_byte, line_bit;\n");
             try add(&out, alloc, "  reg [7:0] line_bytes [0:{d}];\n", .{u.bytes - 1});
-            try add(&out, alloc, "  wire [3:0] pin_in = {{3'b000, uart_line}} << {d};\n", .{u.pin});
+            try add(&out, alloc, "  wire [7:0] pin_in = {{7'b0000000, uart_line}} << {d};\n", .{u.pin});
             try add(&out, alloc, "  initial begin\n    $readmemh(\"{s}_line.hex\", line_bytes);\n", .{spec.stem});
             try add(&out, alloc, "    @(posedge ctrl_start);\n    repeat ({d}) @(negedge clk);\n", .{u.start_cycle});
             try add(&out, alloc, "    for (line_byte = 0; line_byte < {d}; line_byte = line_byte + 1) begin\n", .{u.bytes});
@@ -87,7 +87,7 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
             try add(&out, alloc, "  reg [39:0] expected_writes [0:{d}];\n", .{@max(bus.writes, 1) - 1});
             try add(&out, alloc, "  wire scl_bus = !(pin_oe[{d}] && !pin_out[{d}]) && !stretch;\n", .{ bus.scl_pin, bus.scl_pin });
             try add(&out, alloc, "  wire sda_bus = !(pin_oe[{d}] && !pin_out[{d}]) && !(target_sda_oe && !target_sda_out);\n", .{ bus.sda_pin, bus.sda_pin });
-            try add(&out, alloc, "  wire [3:0] pin_in = ({{3'b000, sda_bus}} << {d}) | ({{3'b000, scl_bus}} << {d});\n", .{ bus.sda_pin, bus.scl_pin });
+            try add(&out, alloc, "  wire [7:0] pin_in = ({{7'b0000000, sda_bus}} << {d}) | ({{7'b0000000, scl_bus}} << {d});\n", .{ bus.sda_pin, bus.scl_pin });
             try add(&out, alloc, "  {s} target (\n", .{bus.target});
             try out.appendSlice(
                 alloc,
@@ -122,7 +122,7 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
             "    .fetch(fetch), .tx_full(full), .tx_empty(empty),\n" ++
             "    .underrun(underrun), .rx_we(rx_we), .rx_wdata(rx_wdata),\n",
     );
-    try add(&out, alloc, "    .cfg(16'h{x:0>4}));\n", .{spec.cfg});
+    try add(&out, alloc, "    .cfg(32'h{x:0>8}));\n", .{spec.cfg});
     try out.appendSlice(alloc, "  always @(posedge clk) inst <= program[pc];\n  initial begin\n");
     try add(&out, alloc, "    $readmemh(\"{s}_program.hex\", program, 0, {d});\n", .{ spec.stem, spec.program_words - 1 });
     try add(&out, alloc, "    $readmemh(\"{s}_stream.hex\", stream, 0, {d});\n", .{ spec.stem, spec.stream_words - 1 });
@@ -149,11 +149,12 @@ pub fn source(alloc: std.mem.Allocator, spec: Spec) ![]u8 {
         .pin_out => .{ "pin_out", "pin_oe" },
         .pin_oe => .{ "pin_oe", "pin_out" },
     };
-    try add(&out, alloc, "    if (running && {s} == 4'h{x} && {s} == 4'h{x}) saw_idle = 1;\n", .{ held, spec.output_enable, observed, spec.idle });
-    try add(&out, alloc, "    if (!started && saw_idle && running && {s} == 4'h{x} && {s} == expected[0][3:0]) begin\n", .{ held, spec.output_enable, observed });
+    // Cases describe pins 0..3; the core's other pins are not compared.
+    try add(&out, alloc, "    if (running && {s}[3:0] == 4'h{x} && {s}[3:0] == 4'h{x}) saw_idle = 1;\n", .{ held, spec.output_enable, observed, spec.idle });
+    try add(&out, alloc, "    if (!started && saw_idle && running && {s}[3:0] == 4'h{x} && {s}[3:0] == expected[0][3:0]) begin\n", .{ held, spec.output_enable, observed });
     try out.appendSlice(alloc, "      started = 1; origin = elapsed;\n    end\n    if (started && !finished_wave) begin\n");
     try add(&out, alloc, "      if (index + 1 < {d} && elapsed - origin == expected[index+1][31:4]) index = index + 1;\n", .{spec.symbols});
-    try add(&out, alloc, "      if ({s} !== expected[index][3:0] || {s} !== 4'h{x})\n", .{ observed, held, spec.output_enable });
+    try add(&out, alloc, "      if ({s}[3:0] !== expected[index][3:0] || {s}[3:0] !== 4'h{x})\n", .{ observed, held, spec.output_enable });
     try add(&out, alloc, "        $fatal(1, \"{s}: pin mismatch at cycle %0d symbol %0d: got out %h oe %h, expected {s} %h\", elapsed-origin, index, pin_out, pin_oe, expected[index][3:0]);\n", .{ spec.tag, observed });
     try add(&out, alloc, "      if (index == {d}) finished_wave = 1;\n", .{spec.symbols - 1});
     try out.appendSlice(alloc, "    end\n");

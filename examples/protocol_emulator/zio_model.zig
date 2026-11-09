@@ -12,12 +12,29 @@ const std = @import("std");
 const isa = @import("isa.zig");
 
 pub const fifo_depth = 16;
+pub const Pins = @Int(.unsigned, isa.pin_count);
+
+/// Pins rotated so pin `base` lands at bit 0 (windows wrap).
+fn window(pins: Pins, base: isa.PinIndex) Pins {
+    return std.math.rotr(Pins, pins, base);
+}
+
+/// Write `count` value bits to pins `base`, `base+1`, ... (wrapping).
+fn writeWindow(current: Pins, value: u32, count: usize, base: isa.PinIndex) Pins {
+    var pins = current;
+    for (0..@min(count, isa.pin_count)) |i| {
+        const pin: isa.PinIndex = @truncate(base +% i);
+        const bit: Pins = @intCast((value >> @intCast(i)) & 1);
+        pins = (pins & ~(@as(Pins, 1) << pin)) | (bit << pin);
+    }
+    return pins;
+}
 
 pub const Inputs = struct {
     ctrl_start: bool = false,
     ctrl_stop: bool = false,
     start_pc: u8 = 0,
-    pin_in: u4 = 0,
+    pin_in: Pins = 0,
     tx_we: bool = false,
     tx_wdata: u32 = 0,
     cfg: isa.Config = .{},
@@ -25,8 +42,8 @@ pub const Inputs = struct {
 
 pub const Outputs = struct {
     pc: u8,
-    pin_out: u4,
-    pin_oe: u4,
+    pin_out: Pins,
+    pin_oe: Pins,
     running: bool,
     fault: bool,
     fetch: bool,
@@ -72,8 +89,8 @@ pub const Core = struct {
     fifo_rd: u4 = 0,
     fifo_cnt: u5 = 0,
     underrun: bool = false,
-    pin_out: u4 = 0,
-    pin_oe: u4 = 0,
+    pin_out: Pins = 0,
+    pin_oe: Pins = 0,
     rx_we: bool = false,
     rx_wdata: u32 = 0,
 
@@ -93,16 +110,16 @@ pub const Core = struct {
         const d = isa.decode(inst);
         const fifo_empty = self.fifo_cnt == 0;
         const pin = struct {
-            fn level(pins: u4, index: u4) bool {
-                return index < isa.pin_count and (pins >> @intCast(index)) & 1 == 1;
+            fn level(pins: Pins, index: isa.PinIndex) bool {
+                return (pins >> index) & 1 == 1;
             }
         }.level;
         const data_avail = self.osr_cnt != 0 or !fifo_empty;
         const wait_blocked = if (d) |v| switch (v) {
             .WAIT => |w| switch (w.cond) {
                 .CYCLES => false,
-                .PIN_LOW => pin(in.pin_in, w.index),
-                .PIN_HIGH => !pin(in.pin_in, w.index),
+                .PIN_LOW => pin(in.pin_in, in.cfg.in_base +% @as(isa.PinIndex, @truncate(w.index))),
+                .PIN_HIGH => !pin(in.pin_in, in.cfg.in_base +% @as(isa.PinIndex, @truncate(w.index))),
             },
             else => false,
         } else false;
@@ -195,7 +212,10 @@ pub const Core = struct {
             return;
         }
         if (e.hold or old.halt) return;
-        self.delay = isa.Instruction.fromU32(inst).delay;
+        // With side-set, the top delay bits are pin values, not delay.
+        const k: u5 = in.cfg.sideset_count;
+        const raw_delay = isa.Instruction.fromU32(inst).delay;
+        self.delay = if (k == 0) raw_delay else raw_delay & ((@as(u16, 1) << @intCast(16 - k)) - 1);
         const d = e.d orelse {
             self.halt = true;
             self.running = false;
@@ -203,14 +223,22 @@ pub const Core = struct {
             return;
         };
         self.execute(old, d, e, in);
+        if (k > 0) {
+            const side: u32 = raw_delay >> @intCast(16 - k);
+            if (in.cfg.sideset_pindirs) {
+                self.pin_oe = writeWindow(self.pin_oe, side, k, in.cfg.sideset_base);
+            } else {
+                self.pin_out = writeWindow(self.pin_out, side, k, in.cfg.sideset_base);
+            }
+        }
     }
 
     fn execute(self: *Core, old: Core, d: isa.Decoded, e: Eval, in: Inputs) void {
         const head = old.fifo[old.fifo_rd];
         switch (d) {
             .SET => |s| switch (s.target) {
-                .PINS => self.pin_out = @truncate(s.value),
-                .PIN_DIRS => self.pin_oe = @truncate(s.value),
+                .PINS => self.pin_out = writeWindow(old.pin_out, s.value, isa.set_pins, in.cfg.set_base),
+                .PIN_DIRS => self.pin_oe = writeWindow(old.pin_oe, s.value, isa.set_pins, in.cfg.set_base),
                 .X => self.x = s.value,
                 .Y => self.y = s.value,
             },
@@ -231,8 +259,8 @@ pub const Core = struct {
                 self.osr = if (in.cfg.out_shift_right) shr(src, count) else shl(src, count);
                 self.osr_cnt = if (src_cnt > count) src_cnt - count else 0;
                 switch (o.target) {
-                    .PINS => self.pin_out = writePins(old.pin_out, value, count),
-                    .PIN_DIRS => self.pin_oe = writePins(old.pin_oe, value, count),
+                    .PINS => self.pin_out = writeWindow(old.pin_out, value, count, in.cfg.out_base),
+                    .PIN_DIRS => self.pin_oe = writeWindow(old.pin_oe, value, count, in.cfg.out_base),
                     .X => self.x = @truncate(value),
                     .Y => self.y = @truncate(value),
                     .NULL => {},
@@ -245,7 +273,7 @@ pub const Core = struct {
             .IN => |i| {
                 const count = bitCount(i.count);
                 const source: u32 = switch (i.source) {
-                    .PINS => in.pin_in,
+                    .PINS => window(in.pin_in, in.cfg.in_base),
                     .X => old.x,
                     .Y => old.y,
                     .NULL => 0,
@@ -282,7 +310,7 @@ pub const Core = struct {
             },
             .MOV => |m| {
                 const source: u32 = switch (m.src) {
-                    .PINS => in.pin_in,
+                    .PINS => window(in.pin_in, in.cfg.in_base),
                     .X => old.x,
                     .Y => old.y,
                     .NULL => 0,
@@ -295,8 +323,8 @@ pub const Core = struct {
                     .REVERSE => @bitReverse(source),
                 };
                 switch (m.dest) {
-                    .PINS => self.pin_out = @truncate(value),
-                    .PIN_DIRS => self.pin_oe = @truncate(value),
+                    .PINS => self.pin_out = writeWindow(old.pin_out, value, isa.pin_count, in.cfg.out_base),
+                    .PIN_DIRS => self.pin_oe = writeWindow(old.pin_oe, value, isa.pin_count, in.cfg.out_base),
                     .X => self.x = @truncate(value),
                     .Y => self.y = @truncate(value),
                     .ISR => {
@@ -310,15 +338,6 @@ pub const Core = struct {
                 }
             },
         }
-    }
-
-    fn writePins(current: u4, value: u32, count: u6) u4 {
-        var pins = current;
-        for (0..isa.pin_count) |i| if (i < count) {
-            const bit: u4 = @intCast((value >> @intCast(i)) & 1);
-            pins = (pins & ~(@as(u4, 1) << @intCast(i))) | (bit << @intCast(i));
-        };
-        return pins;
     }
 };
 
@@ -354,7 +373,7 @@ test "UART-style IN PINS,1 right shift with autopush at 8 yields bytes" {
     var cycles: usize = 0;
     while (got == null and cycles < 64) : (cycles += 1) {
         // Each bit is held for the two-cycle loop.
-        const level: u4 = @intCast((byte >> @intCast(@min(bit / 2, 7))) & 1);
+        const level: Pins = @intCast((byte >> @intCast(@min(bit / 2, 7))) & 1);
         const o = sys.outputs(.{ .pin_in = level, .cfg = cfg });
         if (o.rx_we) got = o.rx_wdata;
         sys.step(.{ .pin_in = level, .cfg = cfg });
@@ -372,5 +391,5 @@ test "invalid encodings fault without side effects" {
     const o = sys.outputs(.{});
     try std.testing.expect(o.fault);
     try std.testing.expect(!o.running);
-    try std.testing.expectEqual(@as(u4, 5), o.pin_out);
+    try std.testing.expectEqual(@as(Pins, 5), o.pin_out);
 }

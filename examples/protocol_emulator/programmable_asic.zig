@@ -652,6 +652,13 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             }
 
             // One ZIO execution core; instruction response comes from the partition.
+            // This composition exposes the core's first four pins.
+            const core_pin_in = try mb.wire("core_pin_in", isa.pin_count);
+            try mb.assign(core_pin_in, b.zext(ins.gpio_in, isa.pin_count));
+            const core_pin_out = try mb.wire("core_pin_out", isa.pin_count);
+            const core_pin_oe = try mb.wire("core_pin_oe", isa.pin_count);
+            try mb.assign(outs.gpio_out, b.slice(core_pin_out, 3, 0));
+            try mb.assign(outs.gpio_oe, b.slice(core_pin_oe, 3, 0));
             _ = try mb.instantiate(timing_core.ZioTimingUnit(config.counter_bits, config.fifo_depth), "u_core", .{
                 .clk = domain.clk,
                 .rst_n = domain.rst_n,
@@ -659,7 +666,7 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                 .ctrl_start = ctrl_start,
                 .ctrl_stop = ctrl_stop,
                 .start_pc = start_pc,
-                .pin_in = ins.gpio_in,
+                .pin_in = core_pin_in,
                 .tx_we = tx_we,
                 .tx_wdata = host_wdata,
                 .cfg = core_cfg,
@@ -668,8 +675,8 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
                 .tx_full = outs.tx_full,
                 .tx_empty = outs.tx_empty,
                 .underrun = outs.underrun,
-                .pin_out = outs.gpio_out,
-                .pin_oe = outs.gpio_oe,
+                .pin_out = core_pin_out,
+                .pin_oe = core_pin_oe,
                 .core_running = outs.core_running,
                 .op_fault = op_fault,
                 .fetch = fetch,
@@ -694,9 +701,9 @@ test "programmable asic block elaborates single and split partitions" {
         try std.testing.expect(std.mem.indexOf(u8, v, "module zio_timing_unit") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module i2c_slave_loader_42") != null);
         // The core configuration register decodes its host address and resets
-        // to the default isa.Config (0x18).
+        // to the default isa.Config (0x30).
         try std.testing.expect(std.mem.indexOf(u8, v, "(host_addr == 8'd244)") != null);
-        try std.testing.expect(std.mem.indexOf(u8, v, "core_cfg <= 16'd24") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v, "core_cfg <= 32'd48") != null);
         const sram_instances = std.mem.count(u8, v, "sky130_sram_1kbyte_1rw1r_32x256_8 u_");
         const expected: usize = if (partition == .single) 1 else 2;
         try std.testing.expectEqual(expected, sram_instances);

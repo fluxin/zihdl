@@ -12,14 +12,14 @@ const Row = struct {
     inst: u32 = 0,
     start: u1 = 0,
     stop: u1 = 0,
-    pins: u4 = 0,
+    pins: u8 = 0,
     tx_we: u1 = 0,
     tx_word: u32 = 0,
-    cfg: u16 = @bitCast(isa.Config{}),
+    cfg: u32 = @bitCast(isa.Config{}),
     running: u1 = 1,
     fault: u1 = 0,
     empty: u1 = 1,
-    pin_out: u4 = 0,
+    pin_out: u8 = 0,
     rx_we: u1 = 0,
     rx_word: u32 = 0,
 };
@@ -103,7 +103,7 @@ fn schedule(a: std.mem.Allocator) !Schedule.Files {
     try row(&w, .{ .inst = wait2, .pins = 1, .pc = 0 });
     try row(&w, .{ .inst = wait2, .pins = 1, .pc = 0 });
     try row(&w, .{ .inst = wait2, .pins = 4, .pc = 2 });
-    try row(&w, .{ .inst = isa.waitPin(4, 1, 0).toU32(), .fault = 1, .running = 0 });
+    try row(&w, .{ .inst = isa.waitPin(isa.pin_count, 1, 0).toU32(), .fault = 1, .running = 0 });
     return w.finish("out/zio_core");
 }
 pub fn main(init: std.process.Init) !void {

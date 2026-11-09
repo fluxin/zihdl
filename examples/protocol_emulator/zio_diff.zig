@@ -145,21 +145,27 @@ pub fn generate(alloc: std.mem.Allocator, seed: u64) !struct { program: []u8, fi
         for (program) |*word| word.* = if (r.uintLessThan(u8, 50) == 0) r.int(u32) else randomValid(r);
         for (program) |word| try program_hex.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{x:0>8}\n", .{word}));
         var cfg: isa.Config = .{
-            .jmp_pin = r.int(u2),
+            .jmp_pin = r.int(isa.PinIndex),
             .in_shift_right = r.boolean(),
             .out_shift_right = r.boolean(),
             .autopush = r.uintLessThan(u8, 4) != 0,
             .push_threshold = r.int(u5),
+            .in_base = r.int(isa.PinIndex),
+            .out_base = r.int(isa.PinIndex),
+            .set_base = r.int(isa.PinIndex),
+            .sideset_count = r.int(u2),
+            .sideset_base = r.int(isa.PinIndex),
+            .sideset_pindirs = r.boolean(),
         };
         var sys = model.System{ .program = program };
         for (0..cycles_per_run) |t| {
             const in_reset = t < reset_cycles;
-            if (!in_reset and r.uintLessThan(u16, 600) == 0) cfg.jmp_pin = r.int(u2);
+            if (!in_reset and r.uintLessThan(u16, 600) == 0) cfg.jmp_pin = r.int(isa.PinIndex);
             const in = model.Inputs{
                 .ctrl_start = !in_reset and (t == reset_cycles or r.uintLessThan(u16, 300) == 0),
                 .ctrl_stop = !in_reset and r.uintLessThan(u16, 500) == 0,
                 .start_pc = r.int(u8),
-                .pin_in = r.int(u4),
+                .pin_in = r.int(model.Pins),
                 .tx_we = r.uintLessThan(u8, 4) == 0,
                 .tx_wdata = r.int(u32),
                 .cfg = cfg,

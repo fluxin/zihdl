@@ -144,6 +144,19 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const cfg_out_right = bitfield.field(b, ins.cfg, isa.Config, "out_shift_right", 0);
             const cfg_autopush = bitfield.field(b, ins.cfg, isa.Config, "autopush", 0);
             const cfg_threshold = bitfield.field(b, ins.cfg, isa.Config, "push_threshold", 0);
+            const cfg_in_base = bitfield.field(b, ins.cfg, isa.Config, "in_base", 0);
+            const cfg_out_base = bitfield.field(b, ins.cfg, isa.Config, "out_base", 0);
+            const cfg_set_base = bitfield.field(b, ins.cfg, isa.Config, "set_base", 0);
+            const cfg_side_count = bitfield.field(b, ins.cfg, isa.Config, "sideset_count", 0);
+            const cfg_side_base = bitfield.field(b, ins.cfg, isa.Config, "sideset_base", 0);
+            const cfg_side_dirs = bitfield.field(b, ins.cfg, isa.Config, "sideset_pindirs", 0);
+            const P = isa.pin_count;
+            const PW = @bitSizeOf(isa.PinIndex);
+            // Input window: pin `in_base` at bit 0, wrapping.
+            const pins_window = b.bor(b.shr(ins.pin_in, cfg_in_base), b.shl(ins.pin_in, b.sub(b.lit(PW + 1, P), b.resize(cfg_in_base, PW + 1))));
+            // Side-set: the top `sideset_count` delay bits drive pins.
+            const delay_eff = b.band(delay_field, b.shr(b.lit(16, 0xffff), cfg_side_count));
+            const side_bits = b.shr(delay_field, b.sub(b.lit(5, 16), b.resize(cfg_side_count, 5)));
 
             // Supported decode, generated from the ISA table: any other opcode
             // or field combination faults.
@@ -171,7 +184,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const x_zero = b.eq(x_reg.expr(), 0);
             const y_zero = b.eq(y_reg.expr(), 0);
             const jmp_pin_high = b.bit(b.shr(ins.pin_in, cfg_jmp_pin), 0);
-            const wait_pin = b.bit(b.shr(ins.pin_in, wait_index), 0);
+            const wait_pin = b.bit(b.shr(ins.pin_in, b.add(cfg_in_base, b.resize(wait_index, PW))), 0);
             const data_avail = b.or_(b.not(osr_empty), b.not(fifo_empty));
             const conditions = .{
                 .{ isa.JmpCondition.ALWAYS, b.lit(1, 1) },
@@ -218,7 +231,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
 
             // Operand sources shared by IN and MOV (selected by their own enums).
             const sources = .{
-                .{ "PINS", b.zext(ins.pin_in, 32) },
+                .{ "PINS", b.zext(pins_window, 32) },
                 .{ "X", b.zext(x_reg.expr(), 32) },
                 .{ "Y", b.zext(y_reg.expr(), 32) },
                 .{ "NULL", b.lit(32, 0) },
@@ -251,10 +264,38 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 b.ternary(bitfield.is(b, mov_op, isa.MovOp.REVERSE), reverse32(b, mov_value), mov_value),
             );
 
+            // Output windows: physical pin p takes value bit (p - base) mod P
+            // when that offset is inside the window.
+            var out_pins: [P]Stmt = undefined;
+            var out_dirs: [P]Stmt = undefined;
+            var set_pins: [P]Stmt = undefined;
+            var set_dirs: [P]Stmt = undefined;
+            var mov_pins: [P]Stmt = undefined;
+            var mov_dirs: [P]Stmt = undefined;
+            var side_stmts: [P]Stmt = undefined;
+            inline for (0..P) |pin| {
+                const here = b.lit(PW, pin);
+                const out_off = b.sub(here, cfg_out_base);
+                const take_out = b.lt(b.resize(out_off, 6), out_count);
+                out_pins[pin] = b.when(take_out, &.{b.sliceAssign(outs.pin_out, pin, pin, b.bitDyn(out_value, out_off))}, &.{});
+                out_dirs[pin] = b.when(take_out, &.{b.sliceAssign(outs.pin_oe, pin, pin, b.bitDyn(out_value, out_off))}, &.{});
+                const set_off = b.sub(here, cfg_set_base);
+                const take_set = b.lt(set_off, b.lit(PW, isa.set_pins));
+                set_pins[pin] = b.when(take_set, &.{b.sliceAssign(outs.pin_out, pin, pin, b.bitDyn(set_value, set_off))}, &.{});
+                set_dirs[pin] = b.when(take_set, &.{b.sliceAssign(outs.pin_oe, pin, pin, b.bitDyn(set_value, set_off))}, &.{});
+                mov_pins[pin] = b.sliceAssign(outs.pin_out, pin, pin, b.bitDyn(mov_result, out_off));
+                mov_dirs[pin] = b.sliceAssign(outs.pin_oe, pin, pin, b.bitDyn(mov_result, out_off));
+                const side_off = b.sub(here, cfg_side_base);
+                const side_value = b.bitDyn(side_bits, side_off);
+                side_stmts[pin] = b.when(b.lt(side_off, b.resize(cfg_side_count, PW)), &.{
+                    b.when(cfg_side_dirs, &.{b.sliceAssign(outs.pin_oe, pin, pin, side_value)}, &.{b.sliceAssign(outs.pin_out, pin, pin, side_value)}),
+                }, &.{});
+            }
+
             const set_stmts = [_]Stmt{
                 b.case_(set_target, &.{
-                    b.caseBranch(@backingInt(isa.SetTarget.PINS), &.{b.assign(outs.pin_out, b.resize(set_value, isa.pin_count))}),
-                    b.caseBranch(@backingInt(isa.SetTarget.PIN_DIRS), &.{b.assign(outs.pin_oe, b.resize(set_value, isa.pin_count))}),
+                    b.caseBranch(@backingInt(isa.SetTarget.PINS), &set_pins),
+                    b.caseBranch(@backingInt(isa.SetTarget.PIN_DIRS), &set_dirs),
                     b.caseBranch(@backingInt(isa.SetTarget.X), &.{b.assign(x_reg, b.resize(set_value, x_bits))}),
                     b.caseBranch(@backingInt(isa.SetTarget.Y), &.{b.assign(y_reg, b.resize(set_value, x_bits))}),
                 }, &.{}),
@@ -264,14 +305,6 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                 b.when(x_dec_taken, &.{b.assign(x_reg, b.sub(x_reg.expr(), 1))}, &.{}),
                 b.when(y_dec_taken, &.{b.assign(y_reg, b.sub(y_reg.expr(), 1))}, &.{}),
             };
-
-            var out_pins: [isa.pin_count]Stmt = undefined;
-            var out_dirs: [isa.pin_count]Stmt = undefined;
-            inline for (0..isa.pin_count) |i| {
-                const take = b.lt(b.lit(6, i), out_count);
-                out_pins[i] = b.when(take, &.{b.sliceAssign(outs.pin_out, i, i, b.bit(out_value, i))}, &.{});
-                out_dirs[i] = b.when(take, &.{b.sliceAssign(outs.pin_oe, i, i, b.bit(out_value, i))}, &.{});
-            }
 
             // OUT: an empty pipeline sets the sticky underrun flag and leaves
             // outputs alone.
@@ -322,8 +355,8 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
 
             const mov_stmts = [_]Stmt{
                 b.case_(mov_dest, &.{
-                    b.caseBranch(@backingInt(isa.MovDest.PINS), &.{b.assign(outs.pin_out, b.trunc(mov_result, isa.pin_count))}),
-                    b.caseBranch(@backingInt(isa.MovDest.PIN_DIRS), &.{b.assign(outs.pin_oe, b.trunc(mov_result, isa.pin_count))}),
+                    b.caseBranch(@backingInt(isa.MovDest.PINS), &mov_pins),
+                    b.caseBranch(@backingInt(isa.MovDest.PIN_DIRS), &mov_dirs),
                     b.caseBranch(@backingInt(isa.MovDest.X), &.{b.assign(x_reg, b.trunc(mov_result, x_bits))}),
                     b.caseBranch(@backingInt(isa.MovDest.Y), &.{b.assign(y_reg, b.trunc(mov_result, x_bits))}),
                     b.caseBranch(@backingInt(isa.MovDest.ISR), &.{ b.assign(isr, mov_result), b.assign(isr_cnt, 0) }),
@@ -402,12 +435,12 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                                 }, &.{
                                     b.when(b.or_(wait_pin_blocked, pull_blocked), &.{}, &.{
                                         b.when(halt.expr(), &.{}, &.{
-                                            b.assign(delay_cnt, delay_field),
+                                            b.assign(delay_cnt, delay_eff),
                                             b.when(b.not(decode_ok), &.{
                                                 b.assign(halt, 1),
                                                 b.assign(running, 0),
                                                 b.assign(fault, 1),
-                                            }, &op_stmts),
+                                            }, &(op_stmts ++ side_stmts)),
                                         }),
                                     }),
                                 }),
@@ -447,7 +480,7 @@ test "zio timing unit emission" {
     const ctrl_start = try top.input("ctrl_start", 1);
     const ctrl_stop = try top.input("ctrl_stop", 1);
     const start_pc = try top.input("start_pc", 8);
-    const pin_in = try top.input("pin_in", 4);
+    const pin_in = try top.input("pin_in", isa.pin_count);
     const tx_we = try top.input("tx_we", 1);
     const tx_wdata = try top.input("tx_wdata", 32);
     const cfg = try top.input("cfg", @bitSizeOf(isa.Config));
