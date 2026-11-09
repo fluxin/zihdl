@@ -23,6 +23,9 @@ const ModuleBuilder = netlist.ModuleBuilder;
 /// SCLK, MOSI and CS_N pass through two-flop synchronizers, so SCLK must be at
 /// most clk/8: an edge is seen three clocks late and MISO changes on the
 /// synchronized falling edge.
+///
+/// `rst_n` must already be release-synchronized to `clk` (for example by
+/// `cdc.ResetSyncBlock`); the block declares that domain in its timing intent.
 pub const SpiTargetBlock = struct {
     pub const name = "spi_target_word_port";
     pub const command = struct {
@@ -60,7 +63,8 @@ pub const SpiTargetBlock = struct {
         const ins = try mb.declareInputs(Inputs);
         const outs = try mb.declareOutputs(Outputs);
         const b = mb.exprs();
-        const domain = netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+        const domain = netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .reset = .{ .release = .synchronous } };
+        try mb.addClockDomain(domain);
 
         const sclk = try lib.syncInput(mb, "sclk", ins.sclk, domain, 0);
         const mosi = try lib.syncInput(mb, "mosi", ins.mosi, domain, 0);

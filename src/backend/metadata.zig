@@ -562,7 +562,12 @@ fn writeInputTiming(j: *std.json.Stringify, module: *const ir.Module, intent: ir
     try j.objectField("clock");
     if (intent.clock) |clk| try j.write(clk.name()) else try j.write(null);
     try j.objectField("domain");
-    if (clockDomainName(module, intent.clock)) |name| try j.write(name) else try j.write(null);
+    // An input timed against a clock names that clock's declared domain; a
+    // module that times inputs on an undeclared clock is refused here rather
+    // than emitted with a null domain the physical flow cannot resolve.
+    if (intent.clock) |clk| {
+        try j.write(clockDomainName(module, clk) orelse return error.UndeclaredClockDomain);
+    } else try j.write(null);
     try j.objectField("synchronizer");
     try j.beginArray();
     for (intent.stages) |stage| {
@@ -703,8 +708,7 @@ fn writeTimeValue(j: *std.json.Stringify, value: ?ir.TimeValue) !void {
     }
 }
 
-fn clockDomainName(module: *const ir.Module, clk: ?ir.SymRef) ?[]const u8 {
-    const want = clk orelse return null;
+fn clockDomainName(module: *const ir.Module, want: ir.SymRef) ?[]const u8 {
     for (module.clocks) |clock| {
         if (clock.clk.ref.scope == want.scope and clock.clk.ref.idx == want.idx) return clock.name;
     }

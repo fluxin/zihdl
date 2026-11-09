@@ -392,3 +392,36 @@ test "design.json records memory storage intent and access ports" {
     // Three registered read ports, uniquely named.
     try std.testing.expect(std.mem.indexOf(u8, v, "program_mem_rdata2") != null);
 }
+
+test "design.json refuses input timing on a clock with no declared domain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Port = struct {
+        fn Make(comptime declare: bool) type {
+            return struct {
+                pub const name = if (declare) "timed_declared" else "timed_undeclared";
+                pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), din: Signal(1) };
+                pub const Outputs = struct { q: Signal(1) };
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const outs = try mb.declareOutputs(Outputs);
+                    const b = mb.exprs();
+                    const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+                    if (declare) try mb.addClockDomain(domain);
+                    const q = try mb.reg("q_r", 1, 0);
+                    try mb.seq(domain, &.{b.assign(q, ins.din)});
+                    try mb.assign(outs.q, q);
+                    try mb.addInputTiming(.{ .signal = ins.din.ref, .classification = .synchronous, .clock = ins.clk.ref });
+                }
+            };
+        }
+    };
+    var bad = Design.init(alloc);
+    _ = try bad.elaborate(Port.Make(false));
+    try std.testing.expectError(error.UndeclaredClockDomain, metadata.emitDesignJson(alloc, &bad, .{}));
+    var good = Design.init(alloc);
+    _ = try good.elaborate(Port.Make(true));
+    const json = try metadata.emitDesignJson(alloc, &good, .{});
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"domain\": \"sys\"") != null);
+}

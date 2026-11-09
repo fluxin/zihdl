@@ -553,6 +553,7 @@ test "declared synchronizer stages survive dead-code elimination" {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
             const sync = try lib.syncInput(mb, "dangle", ins.async_in, domain, 1);
             // The synchronizer output deliberately drives nothing; the declared
             // intent must still pin the chain into the emitted artifact.
@@ -596,6 +597,7 @@ test "declared vector synchronizer bits survive dead-code elimination" {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            try mb.addClockDomain(domain);
             const b = mb.exprs();
             const d0 = try mb.reg("bus_d0", 2, 0);
             const d1 = try mb.reg("bus_d1", 2, 0);
