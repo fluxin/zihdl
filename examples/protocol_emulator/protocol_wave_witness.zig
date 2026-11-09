@@ -90,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
         try emitUsbCase(alloc, init.io, cfg[1], data, cfg[0], cfg[3]);
         const token = try usb.tokenPacket(.out, 0x15, 0xe);
         try emitUsbCase(alloc, init.io, if (cfg[0] == 60_000_000) "token60" else "token120", &token, cfg[0], cfg[3]);
-        try emitUsbCase(alloc, init.io, if (cfg[0] == 60_000_000) "ack60" else "ack120", &.{@intFromEnum(usb.Pid.ack)}, cfg[0], cfg[3]);
+        try emitUsbCase(alloc, init.io, if (cfg[0] == 60_000_000) "ack60" else "ack120", &.{@backingInt(usb.Pid.ack)}, cfg[0], cfg[3]);
 
         const reset = try usb.assembleReset(alloc, cfg[0], 10);
         try emitCase(alloc, init.io, .{ .tag = cfg[2], .program = reset, .stream = &.{0}, .symbols = &.{ usb.se0, usb.j }, .offsets = &.{ 0, @as(u32, @intCast(cfg[0] / 100)) }, .dirs = 3, .idle = usb.j, .rx_words = 0, .half_period_ns = cfg[3] });

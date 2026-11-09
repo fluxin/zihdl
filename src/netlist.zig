@@ -294,7 +294,7 @@ fn shiftWidth(comptime W: usize) usize {
 fn tupleWidth(comptime T: type) usize {
     return comptime blk: {
         var total: usize = 0;
-        for (@typeInfo(T).@"struct".fields) |f| total += valWidth(f.type);
+        for (@typeInfo(T).@"struct".field_types) |field_type| total += valWidth(field_type);
         break :blk total;
     };
 }
@@ -530,7 +530,7 @@ fn computeHash(x: *const AnyExpr) u64 {
     var h = std.hash.Wyhash.init(0);
     mixHash(&h, x.width);
     mixHash(&h, @intFromBool(x.is_signed));
-    mixHash(&h, @intFromEnum(std.meta.activeTag(x.node)));
+    mixHash(&h, @backingInt(std.meta.activeTag(x.node)));
     switch (x.node) {
         .ref => |r| {
             mixHash(&h, r.idx);
@@ -561,7 +561,7 @@ fn computeHash(x: *const AnyExpr) u64 {
         },
         .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| mixHash(&h, exprHash(n)),
         .bin_op => |bo| {
-            mixHash(&h, @intFromEnum(bo.op));
+            mixHash(&h, @backingInt(bo.op));
             mixHash(&h, exprHash(bo.lhs));
             mixHash(&h, exprHash(bo.rhs));
         },
@@ -1019,9 +1019,9 @@ pub const ExprBuilder = struct {
     }
 
     pub fn concat(self: ExprBuilder, items: anytype) Expr(tupleWidth(@TypeOf(items))) {
-        const fields = @typeInfo(@TypeOf(items)).@"struct".fields;
-        const list = self.allocator.alloc(AnyExpr, fields.len) catch @panic("zihdl: expression arena out of memory");
-        inline for (fields, 0..) |f, i| list[i] = self.dup(asAny(@field(items, f.name))).*;
+        const field_names = @typeInfo(@TypeOf(items)).@"struct".field_names;
+        const list = self.allocator.alloc(AnyExpr, field_names.len) catch @panic("zihdl: expression arena out of memory");
+        inline for (field_names, 0..) |field_name, i| list[i] = self.dup(asAny(@field(items, field_name))).*;
         return .{ .e = .{
             .width = tupleWidth(@TypeOf(items)),
             .is_signed = false,
@@ -2019,7 +2019,7 @@ fn bundleLeafCount(comptime T: type) usize {
         if (isSignalHandle(T)) break :blk 1;
         if (@typeInfo(T) != .@"struct") @compileError("bundle value must be Signal(W) or a nested struct, not " ++ @typeName(T));
         var count: usize = 0;
-        for (@typeInfo(T).@"struct".fields) |field| count += bundleLeafCount(field.type);
+        for (@typeInfo(T).@"struct".field_types) |field_type| count += bundleLeafCount(field_type);
         break :blk count;
     };
 }
@@ -2032,14 +2032,14 @@ fn validatePortBundle(comptime T: type, comptime label: []const u8) void {
         if (@hasDecl(T, "dirs")) {
             const Dirs = @TypeOf(T.dirs);
             if (@typeInfo(Dirs) != .@"struct") @compileError(label ++ ": dirs must be a struct of PortDir values");
-            for (@typeInfo(Dirs).@"struct".fields) |df| {
-                if (df.type != PortDir) @compileError(label ++ ": dirs." ++ df.name ++ " must be PortDir");
-                if (!@hasField(T, df.name)) @compileError(label ++ ": dirs names unknown field '" ++ df.name ++ "'");
-                const dir: PortDir = @field(T.dirs, df.name);
-                if (dir == .inout) @compileError(label ++ ": dirs." ++ df.name ++ " cannot be inout");
+            for (@typeInfo(Dirs).@"struct".field_names, @typeInfo(Dirs).@"struct".field_types) |df_name, df_type| {
+                if (df_type != PortDir) @compileError(label ++ ": dirs." ++ df_name ++ " must be PortDir");
+                if (!@hasField(T, df_name)) @compileError(label ++ ": dirs names unknown field '" ++ df_name ++ "'");
+                const dir: PortDir = @field(T.dirs, df_name);
+                if (dir == .inout) @compileError(label ++ ": dirs." ++ df_name ++ " cannot be inout");
             }
         }
-        for (@typeInfo(T).@"struct".fields) |field| validatePortBundle(field.type, label ++ "." ++ field.name);
+        for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, field_type| validatePortBundle(field_type, label ++ "." ++ field_name);
     }
 }
 
@@ -2078,17 +2078,17 @@ pub fn assertBlock(comptime T: type) void {
             if (@typeInfo(T.Params) != .@"struct") {
                 @compileError("block " ++ T.name ++ ": Params must be a struct");
             }
-            for (@typeInfo(T.Params).@"struct".fields) |field| {
-                if (!@hasDecl(field.type, "is_param")) {
-                    @compileError("block " ++ T.name ++ ": parameter '" ++ field.name ++ "' must be ParamSpec(W)");
+            for (@typeInfo(T.Params).@"struct".field_names, @typeInfo(T.Params).@"struct".field_types) |field_name, field_type| {
+                if (!@hasDecl(field_type, "is_param")) {
+                    @compileError("block " ++ T.name ++ ": parameter '" ++ field_name ++ "' must be ParamSpec(W)");
                 }
             }
         }
 
         if (@hasDecl(T, "build")) {
             const F = @typeInfo(@TypeOf(T.build)).@"fn";
-            if (F.params.len != 1) @compileError("block " ++ T.name ++ ": build must take exactly one parameter (mb: *ModuleBuilder)");
-            const ParamType = F.params[0].type orelse @compileError("block " ++ T.name ++ ": build parameter must be *ModuleBuilder");
+            if (F.param_types.len != 1) @compileError("block " ++ T.name ++ ": build must take exactly one parameter (mb: *ModuleBuilder)");
+            const ParamType = F.param_types[0] orelse @compileError("block " ++ T.name ++ ": build parameter must be *ModuleBuilder");
             if (ParamType != *ModuleBuilder) @compileError("block " ++ T.name ++ ": build parameter must be *ModuleBuilder");
         }
     }
@@ -2099,17 +2099,17 @@ pub fn assertBlock(comptime T: type) void {
 /// emitted module can legally accept `#(.NAME(...))` overrides.
 fn checkParamSchema(comptime BlockType: type, mb: *ModuleBuilder) !void {
     if (!@hasDecl(BlockType, "Params")) return;
-    inline for (@typeInfo(BlockType.Params).@"struct".fields) |field| {
-        const sym = mb.scope.find(field.name) orelse {
-            std.log.err("zihdl: block '{s}' Params schema declares '{s}' but build never calls mb.moduleParam", .{ BlockType.name, field.name });
+    inline for (@typeInfo(BlockType.Params).@"struct".field_names, @typeInfo(BlockType.Params).@"struct".field_types) |field_name, field_type| {
+        const sym = mb.scope.find(field_name) orelse {
+            std.log.err("zihdl: block '{s}' Params schema declares '{s}' but build never calls mb.moduleParam", .{ BlockType.name, field_name });
             return error.MissingParameter;
         };
         if (sym.kind() != .module_param) {
-            std.log.err("zihdl: block '{s}' parameter '{s}' must be declared with mb.moduleParam, not mb.constant", .{ BlockType.name, field.name });
+            std.log.err("zihdl: block '{s}' parameter '{s}' must be declared with mb.moduleParam, not mb.constant", .{ BlockType.name, field_name });
             return error.InvalidParameter;
         }
-        if (sym.width() != valWidth(field.type)) {
-            std.log.err("zihdl: block '{s}' parameter '{s}' schema width {d} does not match declaration width {d}", .{ BlockType.name, field.name, valWidth(field.type), sym.width() });
+        if (sym.width() != valWidth(field_type)) {
+            std.log.err("zihdl: block '{s}' parameter '{s}' schema width {d} does not match declaration width {d}", .{ BlockType.name, field_name, valWidth(field_type), sym.width() });
             return error.InvalidParameter;
         }
     }
@@ -2126,21 +2126,21 @@ fn resolveShape(comptime Family: type, comptime overrides: anytype) Family.Shape
         if (!@hasDecl(Family, "Shape")) @compileError(@typeName(Family) ++ " is not a block family: missing `pub const Shape`");
         if (@typeInfo(Family.Shape) != .@"struct") @compileError(@typeName(Family) ++ ".Shape must be a struct");
         if (@typeInfo(@TypeOf(overrides)) != .@"struct") @compileError("instantiateShape overrides must be a struct");
-        for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
-            if (!@hasField(Family.Shape, field.name)) {
-                @compileError("unknown structural parameter '" ++ field.name ++ "' for family " ++ @typeName(Family));
+        for (@typeInfo(@TypeOf(overrides)).@"struct".field_names) |field_name| {
+            if (!@hasField(Family.Shape, field_name)) {
+                @compileError("unknown structural parameter '" ++ field_name ++ "' for family " ++ @typeName(Family));
             }
         }
-        for (@typeInfo(Family.Shape).@"struct".fields) |field| {
-            if (field.default_value_ptr == null) {
-                @compileError("structural parameter '" ++ field.name ++ "' of " ++ @typeName(Family) ++ " needs a default");
+        for (@typeInfo(Family.Shape).@"struct".field_names, @typeInfo(Family.Shape).@"struct".field_attrs) |field_name, attrs| {
+            if (attrs.default_value_ptr == null) {
+                @compileError("structural parameter '" ++ field_name ++ "' of " ++ @typeName(Family) ++ " needs a default");
             }
         }
     }
     return comptime blk: {
         var m: Family.Shape = .{};
-        for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
-            @field(m, field.name) = @field(overrides, field.name);
+        for (@typeInfo(@TypeOf(overrides)).@"struct".field_names) |field_name| {
+            @field(m, field_name) = @field(overrides, field_name);
         }
         if (@hasDecl(Family, "validateShape")) Family.validateShape(m);
         break :blk m;
@@ -2758,9 +2758,9 @@ pub const ModuleBuilder = struct {
     /// and field IDs); no IR symbols are created for the members.
     pub fn addEnumType(self: *ModuleBuilder, name: []const u8, comptime E: type) !void {
         const info = @typeInfo(E).@"enum";
-        var entries: [info.fields.len]EnumEntry = undefined;
-        inline for (info.fields, 0..) |field, i| {
-            entries[i] = .{ .name = field.name, .value = @intFromEnum(@field(E, field.name)) };
+        var entries: [info.field_names.len]EnumEntry = undefined;
+        inline for (info.field_names, 0..) |field_name, i| {
+            entries[i] = .{ .name = field_name, .value = @backingInt(@field(E, field_name)) };
         }
         try self.addEnumGroup(name, @max(1, @bitSizeOf(E)), &entries, null);
     }
@@ -2794,9 +2794,9 @@ pub const ModuleBuilder = struct {
         if (name.len == 0) {
             // Top-level Inputs/Outputs schema: each struct field is its own
             // bundle, leaves stay individual ports.
-            inline for (@typeInfo(B).@"struct".fields) |field| {
-                if (comptime !isSignalHandle(field.type) and @typeInfo(field.type) == .@"struct") {
-                    try self.recordBundle(field.name, field.type, @field(result, field.name));
+            inline for (@typeInfo(B).@"struct".field_names, @typeInfo(B).@"struct".field_types) |field_name, field_type| {
+                if (comptime !isSignalHandle(field_type) and @typeInfo(field_type) == .@"struct") {
+                    try self.recordBundle(field_name, field_type, @field(result, field_name));
                 }
             }
         } else {
@@ -2808,19 +2808,19 @@ pub const ModuleBuilder = struct {
     fn declarePortStruct(self: *ModuleBuilder, comptime S: type, prefix: []const u8, comptime inherited: PortDir, comptime flip: bool) !S {
         if (@typeInfo(S) != .@"struct") @compileError("bundle ports must be structs, not " ++ @typeName(S));
         var result: S = undefined;
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            const full = try self.scopedName(prefix, field.name);
-            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
-            if (comptime isSignalHandle(field.type)) {
-                @field(result, field.name) = switch (dir) {
-                    .input => try self.declareLeaf(field.type, .input, full, 0),
-                    .output => try self.declareLeaf(field.type, .output, full, 0),
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            const full = try self.scopedName(prefix, field_name);
+            const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
+            if (comptime isSignalHandle(field_type)) {
+                @field(result, field_name) = switch (dir) {
+                    .input => try self.declareLeaf(field_type, .input, full, 0),
+                    .output => try self.declareLeaf(field_type, .output, full, 0),
                     .inout => @compileError("bundle leaves cannot be inout"),
                 };
-            } else if (@typeInfo(field.type) == .@"struct") {
-                @field(result, field.name) = try self.declarePortStruct(field.type, full, dir, flip);
+            } else if (@typeInfo(field_type) == .@"struct") {
+                @field(result, field_name) = try self.declarePortStruct(field_type, full, dir, flip);
             } else {
-                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
             }
         }
         return result;
@@ -2845,14 +2845,14 @@ pub const ModuleBuilder = struct {
     fn wireStruct(self: *ModuleBuilder, comptime S: type, prefix: []const u8) !S {
         if (@typeInfo(S) != .@"struct") @compileError("bundles must be structs, not " ++ @typeName(S));
         var result: S = undefined;
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            const full = try self.scopedName(prefix, field.name);
-            if (comptime isSignalHandle(field.type)) {
-                @field(result, field.name) = try self.declareLeaf(field.type, .wire, full, 0);
-            } else if (@typeInfo(field.type) == .@"struct") {
-                @field(result, field.name) = try self.wireStruct(field.type, full);
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            const full = try self.scopedName(prefix, field_name);
+            if (comptime isSignalHandle(field_type)) {
+                @field(result, field_name) = try self.declareLeaf(field_type, .wire, full, 0);
+            } else if (@typeInfo(field_type) == .@"struct") {
+                @field(result, field_name) = try self.wireStruct(field_type, full);
             } else {
-                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
             }
         }
         return result;
@@ -2887,15 +2887,15 @@ pub const ModuleBuilder = struct {
         width: *usize,
     ) !void {
         if (@typeInfo(S) != .@"struct") @compileError("bundle must be a struct");
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            const path = comptime if (prefix.len == 0) field.name else prefix ++ "." ++ field.name;
-            if (comptime isSignalHandle(field.type)) {
-                try members.append(self.allocator, .{ .ref = asRef(@field(value, field.name)), .path = path });
-                width.* += field.type.width;
-            } else if (@typeInfo(field.type) == .@"struct") {
-                try self.collectBundleMembers(field.type, @field(value, field.name), path, members, width);
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            const path = comptime if (prefix.len == 0) field_name else prefix ++ "." ++ field_name;
+            if (comptime isSignalHandle(field_type)) {
+                try members.append(self.allocator, .{ .ref = asRef(@field(value, field_name)), .path = path });
+                width.* += field_type.width;
+            } else if (@typeInfo(field_type) == .@"struct") {
+                try self.collectBundleMembers(field_type, @field(value, field_name), path, members, width);
             } else {
-                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
             }
         }
     }
@@ -2919,12 +2919,12 @@ pub const ModuleBuilder = struct {
         }
         comptime {
             if (@typeInfo(S) != .@"struct" or @typeInfo(D) != .@"struct") @compileError("connect: both sides must be bundles of Signal(W)");
-            if (@typeInfo(S).@"struct".fields.len != @typeInfo(D).@"struct".fields.len) @compileError("connect: bundle shapes differ");
+            if (@typeInfo(S).@"struct".field_names.len != @typeInfo(D).@"struct".field_names.len) @compileError("connect: bundle shapes differ");
         }
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            if (comptime !@hasField(D, field.name)) @compileError("connect: destination is missing field '" ++ field.name ++ "'");
-            const sub_flip = comptime connectFieldFlip(S, field.name, flip);
-            try self.connectStruct(field.type, @field(src, field.name), @FieldType(D, field.name), @field(dst, field.name), sub_flip);
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            if (comptime !@hasField(D, field_name)) @compileError("connect: destination is missing field '" ++ field_name ++ "'");
+            const sub_flip = comptime connectFieldFlip(S, field_name, flip);
+            try self.connectStruct(field_type, @field(src, field_name), @FieldType(D, field_name), @field(dst, field_name), sub_flip);
         }
     }
 
@@ -3104,9 +3104,9 @@ pub const ModuleBuilder = struct {
         if (@typeInfo(@TypeOf(inputs)) != .@"struct") @compileError("instantiate inputs must be a struct");
         if (@typeInfo(@TypeOf(outputs_binding)) != .@"struct") @compileError("instantiate outputs_binding must be a struct");
 
-        inline for (@typeInfo(@TypeOf(outputs_binding)).@"struct".fields) |bind_field| {
-            if (!@hasField(BlockType.Outputs, bind_field.name)) {
-                @compileError("Unknown output binding '" ++ bind_field.name ++ "' for module '" ++ BlockType.name ++ "'");
+        inline for (@typeInfo(@TypeOf(outputs_binding)).@"struct".field_names) |bind_field_name| {
+            if (!@hasField(BlockType.Outputs, bind_field_name)) {
+                @compileError("Unknown output binding '" ++ bind_field_name ++ "' for module '" ++ BlockType.name ++ "'");
             }
         }
 
@@ -3166,12 +3166,12 @@ pub const ModuleBuilder = struct {
     /// actually resolved to. Integer and boolean fields keep their JSON type,
     /// enums record their tag name.
     fn recordShape(self: *ModuleBuilder, comptime Family: type, comptime overrides: anytype) !void {
-        const fields_info = @typeInfo(Family.Shape).@"struct".fields;
-        if (fields_info.len == 0) return;
+        const field_names = @typeInfo(Family.Shape).@"struct".field_names;
+        if (field_names.len == 0) return;
         const resolved = comptime resolveShape(Family, overrides);
-        const rows = try self.allocator.alloc(ShapeField, fields_info.len);
-        inline for (fields_info, 0..) |field, i| {
-            rows[i] = .{ .name = field.name, .value = shapeFieldValue(@field(resolved, field.name), field.name) };
+        const rows = try self.allocator.alloc(ShapeField, field_names.len);
+        inline for (field_names, 0..) |field_name, i| {
+            rows[i] = .{ .name = field_name, .value = shapeFieldValue(@field(resolved, field_name), field_name) };
         }
         self.instances.items[self.instances.items.len - 1].shape = rows;
     }
@@ -3188,24 +3188,24 @@ pub const ModuleBuilder = struct {
         idx: *usize,
     ) !void {
         if (@typeInfo(@TypeOf(binding)) != .@"struct") @compileError("instantiate inputs must be a struct");
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            if (!@hasField(@TypeOf(binding), field.name)) {
-                @compileError("Missing required input '" ++ field.name ++ "' when instantiating module '" ++ block_name ++ "'");
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            if (!@hasField(@TypeOf(binding), field_name)) {
+                @compileError("Missing required input '" ++ field_name ++ "' when instantiating module '" ++ block_name ++ "'");
             }
-            const full = try self.scopedName(prefix, field.name);
-            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
-            const actual = @field(binding, field.name);
-            if (comptime isSignalHandle(field.type)) {
+            const full = try self.scopedName(prefix, field_name);
+            const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
+            const actual = @field(binding, field_name);
+            if (comptime isSignalHandle(field_type)) {
                 comptime {
-                    if (!isSignalHandle(@TypeOf(actual))) @compileError("input '" ++ field.name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
-                    if (field.type.width != @TypeOf(actual).width) @compileError("Port width mismatch on input '" ++ field.name ++ "' for module '" ++ block_name ++ "'");
+                    if (!isSignalHandle(@TypeOf(actual))) @compileError("input '" ++ field_name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
+                    if (field_type.width != @TypeOf(actual).width) @compileError("Port width mismatch on input '" ++ field_name ++ "' for module '" ++ block_name ++ "'");
                 }
                 conns[idx.*] = .{ .port_name = full, .signal = asRef(actual), .direction = dir };
                 idx.* += 1;
-            } else if (@typeInfo(field.type) == .@"struct") {
-                try self.addInputConnections(field.type, block_name, actual, full, dir, flip, conns, idx);
+            } else if (@typeInfo(field_type) == .@"struct") {
+                try self.addInputConnections(field_type, block_name, actual, full, dir, flip, conns, idx);
             } else {
-                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
             }
         }
     }
@@ -3224,33 +3224,33 @@ pub const ModuleBuilder = struct {
         result: *S,
     ) !void {
         if (@typeInfo(@TypeOf(binding)) != .@"struct") @compileError("instantiate outputs_binding must be a struct");
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            const full = try self.scopedName(prefix, field.name);
-            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
-            if (@hasField(@TypeOf(binding), field.name)) {
-                const bound = @field(binding, field.name);
-                if (comptime isSignalHandle(field.type)) {
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            const full = try self.scopedName(prefix, field_name);
+            const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
+            if (@hasField(@TypeOf(binding), field_name)) {
+                const bound = @field(binding, field_name);
+                if (comptime isSignalHandle(field_type)) {
                     comptime {
-                        if (!isSignalHandle(@TypeOf(bound))) @compileError("output '" ++ field.name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
-                        if (field.type.width != @TypeOf(bound).width) @compileError("Output binding width mismatch on '" ++ field.name ++ "'");
+                        if (!isSignalHandle(@TypeOf(bound))) @compileError("output '" ++ field_name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
+                        if (field_type.width != @TypeOf(bound).width) @compileError("Output binding width mismatch on '" ++ field_name ++ "'");
                     }
                     conns[idx.*] = .{ .port_name = full, .signal = asRef(bound), .direction = dir };
                     idx.* += 1;
-                    @field(result, field.name) = bound;
+                    @field(result, field_name) = bound;
                 } else {
-                    var sub: field.type = undefined;
-                    try self.addOutputConnections(field.type, block_name, bound, instance_name, full, dir, flip, conns, idx, &sub);
-                    @field(result, field.name) = sub;
+                    var sub: field_type = undefined;
+                    try self.addOutputConnections(field_type, block_name, bound, instance_name, full, dir, flip, conns, idx, &sub);
+                    @field(result, field_name) = sub;
                 }
-            } else if (comptime isSignalHandle(field.type)) {
-                const w = try self.instanceWire(field.type, instance_name, full);
+            } else if (comptime isSignalHandle(field_type)) {
+                const w = try self.instanceWire(field_type, instance_name, full);
                 conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
                 idx.* += 1;
-                @field(result, field.name) = w;
+                @field(result, field_name) = w;
             } else {
-                var sub: field.type = undefined;
-                try self.addGeneratedOutputs(field.type, instance_name, full, dir, flip, conns, idx, &sub);
-                @field(result, field.name) = sub;
+                var sub: field_type = undefined;
+                try self.addGeneratedOutputs(field_type, instance_name, full, dir, flip, conns, idx, &sub);
+                @field(result, field_name) = sub;
             }
         }
     }
@@ -3266,20 +3266,20 @@ pub const ModuleBuilder = struct {
         idx: *usize,
         result: *S,
     ) !void {
-        inline for (@typeInfo(S).@"struct".fields) |field| {
-            const full = try self.scopedName(prefix, field.name);
-            const dir = comptime bundleFieldDir(S, field.name, inherited, flip);
-            if (comptime isSignalHandle(field.type)) {
-                const w = try self.instanceWire(field.type, instance_name, full);
+        inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
+            const full = try self.scopedName(prefix, field_name);
+            const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
+            if (comptime isSignalHandle(field_type)) {
+                const w = try self.instanceWire(field_type, instance_name, full);
                 conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
                 idx.* += 1;
-                @field(result, field.name) = w;
-            } else if (@typeInfo(field.type) == .@"struct") {
-                var sub: field.type = undefined;
-                try self.addGeneratedOutputs(field.type, instance_name, full, dir, flip, conns, idx, &sub);
-                @field(result, field.name) = sub;
+                @field(result, field_name) = w;
+            } else if (@typeInfo(field_type) == .@"struct") {
+                var sub: field_type = undefined;
+                try self.addGeneratedOutputs(field_type, instance_name, full, dir, flip, conns, idx, &sub);
+                @field(result, field_name) = sub;
             } else {
-                @compileError("bundle field '" ++ field.name ++ "' must be Signal(W) or a nested struct");
+                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
             }
         }
     }
@@ -3295,20 +3295,19 @@ pub const ModuleBuilder = struct {
         if (@typeInfo(ParamsType) != .@"struct") @compileError("block " ++ BlockType.name ++ ": Params must be a struct");
         if (@typeInfo(@TypeOf(params)) != .@"struct") @compileError("instantiate params must be a struct");
 
-        const fields = @typeInfo(@TypeOf(params)).@"struct".fields;
-        const list = try self.allocator.alloc(ParamOverride, fields.len);
+        const list = try self.allocator.alloc(ParamOverride, @typeInfo(@TypeOf(params)).@"struct".field_names.len);
         var idx: usize = 0;
-        inline for (fields) |field| {
-            if (!@hasField(ParamsType, field.name)) {
-                @compileError("Unknown parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "'");
+        inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |field_name| {
+            if (!@hasField(ParamsType, field_name)) {
+                @compileError("Unknown parameter '" ++ field_name ++ "' for module '" ++ BlockType.name ++ "'");
             }
-            const Spec = @FieldType(ParamsType, field.name);
+            const Spec = @FieldType(ParamsType, field_name);
             comptime {
-                if (!@hasDecl(Spec, "is_param")) @compileError("block " ++ BlockType.name ++ ": parameter '" ++ field.name ++ "' must be ParamSpec(W)");
+                if (!@hasDecl(Spec, "is_param")) @compileError("block " ++ BlockType.name ++ ": parameter '" ++ field_name ++ "' must be ParamSpec(W)");
             }
             const width = comptime valWidth(Spec);
-            if (width > 64) @compileError("parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "' is wider than 64 bits");
-            const raw = @field(params, field.name);
+            if (width > 64) @compileError("parameter '" ++ field_name ++ "' for module '" ++ BlockType.name ++ "' is wider than 64 bits");
+            const raw = @field(params, field_name);
             if (comptime isRefHandle(@TypeOf(raw))) {
                 // Forward a parent parameter or constant by name rather than a
                 // frozen literal; the parent's runtime override reaches the
@@ -3319,15 +3318,15 @@ pub const ModuleBuilder = struct {
                     return error.InvalidParameter;
                 }
                 if (comptime valWidth(@TypeOf(raw)) > width) {
-                    @compileError("forwarded parameter '" ++ field.name ++ "' for module '" ++ BlockType.name ++ "' is wider than the child parameter");
+                    @compileError("forwarded parameter '" ++ field_name ++ "' for module '" ++ BlockType.name ++ "' is wider than the child parameter");
                 }
-                list[idx] = .{ .name = field.name, .width = width, .value = sym.init_val, .symbol = forwarded };
+                list[idx] = .{ .name = field_name, .width = width, .value = sym.init_val, .symbol = forwarded };
                 idx += 1;
                 continue;
             }
             const value = std.math.cast(u64, raw) orelse return error.ParameterOutOfRange;
             if (width < 64 and value >= (@as(u64, 1) << @intCast(width))) return error.ParameterOutOfRange;
-            list[idx] = .{ .name = field.name, .width = width, .value = value };
+            list[idx] = .{ .name = field_name, .width = width, .value = value };
             idx += 1;
         }
         return list;

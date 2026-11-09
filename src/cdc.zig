@@ -136,7 +136,7 @@ fn ownedUnion(owned: []const Mask, idx: usize) Mask {
 /// inferred OR every operand domain into every result bit conservatively. Bits
 /// at or beyond `MaxBits` are not represented here.
 fn exprBits(owned: []const Mask, expr: ir.AnyExpr) Bits {
-    var out = [_]Mask{0} ** MaxBits;
+    var out: [MaxBits]Mask = @splat(0);
     const width = @min(expr.width, MaxBits);
     switch (expr.node) {
         .ref => |r| {

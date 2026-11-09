@@ -183,7 +183,7 @@ const Driver = struct {
     alloc: std.mem.Allocator,
     list: std.ArrayList(PartitionVector),
     model: Model,
-    mem: [256]u32 = [_]u32{0} ** 256,
+    mem: [256]u32 = @splat(0),
 
     fn step(self: *Driver, d: Drives) !void {
         const outs = self.model.eval(d, &self.mem);
@@ -543,7 +543,7 @@ pub fn main(init: std.process.Init) !void {
 
 test "model stores and fetches a program word" {
     var m = Model{};
-    var mem: [256]u32 = [_]u32{0} ** 256;
+    var mem: [256]u32 = @splat(0);
     const o1 = m.eval(.{ .host_we = 1, .host_addr = 5, .host_wdata = 0x7005_000A }, &mem);
     try std.testing.expectEqual(@as(u32, 1), o1.ack);
     try std.testing.expectEqual(@as(u32, 0x7005_000A), m.w0_data);

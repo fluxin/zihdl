@@ -98,28 +98,28 @@ comptime {
 // -------------------------------------------------------------------------
 
 pub fn set(target: SetTarget, val: u5, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(target)) << 5) | @as(u12, val);
+    const data_field: u12 = (@as(u12, @backingInt(target)) << 5) | @as(u12, val);
     return .{ .op = .SET, .data = data_field, .delay = delay };
 }
 
 pub fn waitCycles(cycles: u16) Instruction {
-    const data_field: u12 = @as(u12, @intFromEnum(WaitCondition.CYCLES)) << 10;
+    const data_field: u12 = @as(u12, @backingInt(WaitCondition.CYCLES)) << 10;
     return .{ .op = .WAIT, .data = data_field, .delay = cycles };
 }
 
 pub fn waitPin(pin: u4, level: u1, delay: u16) Instruction {
     const cond = if (level == 1) WaitCondition.PIN_HIGH else WaitCondition.PIN_LOW;
-    const data_field: u12 = (@as(u12, @intFromEnum(cond)) << 10) | @as(u12, pin);
+    const data_field: u12 = (@as(u12, @backingInt(cond)) << 10) | @as(u12, pin);
     return .{ .op = .WAIT, .data = data_field, .delay = delay };
 }
 
 pub fn out(target: OutTarget, bit_count: u5, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(target)) << 5) | @as(u12, bit_count);
+    const data_field: u12 = (@as(u12, @backingInt(target)) << 5) | @as(u12, bit_count);
     return .{ .op = .OUT, .data = data_field, .delay = delay };
 }
 
 pub fn in(source: InSource, bit_count: u5, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(source)) << 5) | @as(u12, bit_count);
+    const data_field: u12 = (@as(u12, @backingInt(source)) << 5) | @as(u12, bit_count);
     return .{ .op = .IN, .data = data_field, .delay = delay };
 }
 
@@ -134,12 +134,12 @@ pub fn push(block_if_full: bool, delay: u16) Instruction {
 }
 
 pub fn jmp(cond: JmpCondition, target_addr: u8, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(cond)) << 8) | @as(u12, target_addr);
+    const data_field: u12 = (@as(u12, @backingInt(cond)) << 8) | @as(u12, target_addr);
     return .{ .op = .JMP, .data = data_field, .delay = delay };
 }
 
 pub fn mov(dest: MovDest, src: MovSrc, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(dest)) << 3) | @as(u12, @intFromEnum(src));
+    const data_field: u12 = (@as(u12, @backingInt(dest)) << 3) | @as(u12, @backingInt(src));
     return .{ .op = .MOV, .data = data_field, .delay = delay };
 }
 
@@ -148,7 +148,7 @@ pub fn mov(dest: MovDest, src: MovSrc, delay: u16) Instruction {
 /// from the inverted or plain shift register bit. Data bit 6 is the invert
 /// flag (`inst[22]`); bits 7..11 of the 12-bit field stay reserved.
 pub fn movInv(dest: MovDest, src: MovSrc, delay: u16) Instruction {
-    const data_field: u12 = (@as(u12, @intFromEnum(dest)) << 3) | @as(u12, @intFromEnum(src)) | (@as(u12, 1) << 6);
+    const data_field: u12 = (@as(u12, @backingInt(dest)) << 3) | @as(u12, @backingInt(src)) | (@as(u12, 1) << 6);
     return .{ .op = .MOV, .data = data_field, .delay = delay };
 }
 

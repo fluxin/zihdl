@@ -275,7 +275,7 @@ rather than the authoring half of this specific project.
 - Package metadata ships the source, examples, documentation and MIT license
   (`build.zig.zon.paths`). The version remains `0.0.0` while the API is
   pre-release.
-- Zig 0.16.0 is pinned; the project tracks Zig's `std.Io` churn closely.
+- Zig 0.17.1 is pinned; the project tracks Zig's `std.Io` churn closely.
 
 The prioritized remaining work is in [PLAN.md](../PLAN.md).
 

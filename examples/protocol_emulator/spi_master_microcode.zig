@@ -100,7 +100,7 @@ test "SPI RX words unpack to bytes and long transfer uses refill" {
     defer alloc.free(rx);
     try std.testing.expectEqualSlices(u8, &.{ 0x89, 0x76 }, rx);
     try std.testing.expectError(error.InvalidRxWordCount, unpackRx(alloc, &.{0}, 2));
-    const transfer = try assemble(alloc, &([_]u8{0x5a} ** 8), 120_000_000, 10_000_000, false, false);
+    const transfer = try assemble(alloc, &@as([8]u8, @splat(0x5a)), 120_000_000, 10_000_000, false, false);
     defer alloc.free(transfer.stream);
     defer alloc.free(transfer.program);
     defer alloc.free(transfer.symbols);

@@ -43,7 +43,7 @@ const transitions = [16][2]State{
 };
 
 pub fn next(state: State, tms: u1) State {
-    return transitions[@intFromEnum(state)][tms];
+    return transitions[@backingInt(state)][tms];
 }
 
 pub const Clock = struct { tms: u1, tdi: u1, state_after: State };
@@ -81,19 +81,19 @@ pub const Builder = struct {
     /// Follow the shortest TMS path from the current TAP state.
     pub fn goTo(self: *Builder, target: State) !void {
         if (self.state == target) return;
-        var seen = [_]bool{false} ** 16;
-        var previous = [_]State{.test_logic_reset} ** 16;
-        var edge = [_]u1{0} ** 16;
+        var seen: [16]bool = @splat(false);
+        var previous: [16]State = @splat(.test_logic_reset);
+        var edge: [16]u1 = @splat(0);
         var queue: [16]State = undefined;
         var head: usize = 0;
         var tail: usize = 1;
         queue[0] = self.state;
-        seen[@intFromEnum(self.state)] = true;
-        while (head < tail and !seen[@intFromEnum(target)]) : (head += 1) {
+        seen[@backingInt(self.state)] = true;
+        while (head < tail and !seen[@backingInt(target)]) : (head += 1) {
             const from = queue[head];
             for (0..2) |bit| {
                 const to = next(from, @intCast(bit));
-                const index = @intFromEnum(to);
+                const index = @backingInt(to);
                 if (seen[index]) continue;
                 seen[index] = true;
                 previous[index] = from;
@@ -102,12 +102,12 @@ pub const Builder = struct {
                 tail += 1;
             }
         }
-        if (!seen[@intFromEnum(target)]) return error.UnreachableTapState;
+        if (!seen[@backingInt(target)]) return error.UnreachableTapState;
         var reversed: [16]u1 = undefined;
         var count: usize = 0;
         var cursor = target;
         while (cursor != self.state) {
-            const index = @intFromEnum(cursor);
+            const index = @backingInt(cursor);
             reversed[count] = edge[index];
             count += 1;
             cursor = previous[index];

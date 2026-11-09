@@ -1,6 +1,6 @@
 # Code structure
 
-`zihdl` is a hardware construction library in pure Zig (0.16.0). There is no
+`zihdl` is a hardware construction library in pure Zig (0.17.1). There is no
 separate HDL, no compiler binary and no runtime: a design is a Zig program that
 elaborates typed handles into an IR and hands the IR to a backend. This document
 is the map of that code and the rules for extending it.

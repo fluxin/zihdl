@@ -50,7 +50,7 @@ pub fn muxLookup(mb: *ModuleBuilder, sel: anytype, default: anytype, cases: anyt
     var result = b.resize(default, W);
     inline for (cases) |case| {
         comptime {
-            if (@typeInfo(@TypeOf(case)).@"struct".fields.len != 2) {
+            if (@typeInfo(@TypeOf(case)).@"struct".field_names.len != 2) {
                 @compileError("muxLookup cases must be .{ key, value } pairs");
             }
         }
@@ -387,7 +387,7 @@ pub const StateEncoding = enum { binary, one_hot, gray };
 /// Number of bits a state machine needs for the chosen encoding.
 pub fn stateWidth(comptime E: type, comptime encoding: StateEncoding) usize {
     return comptime blk: {
-        const n = @typeInfo(E).@"enum".fields.len;
+        const n = @typeInfo(E).@"enum".field_names.len;
         if (n <= 1) break :blk 1;
         break :blk switch (encoding) {
             .binary, .gray => std.math.log2_int_ceil(usize, n),
@@ -398,8 +398,8 @@ pub fn stateWidth(comptime E: type, comptime encoding: StateEncoding) usize {
 
 fn stateIndex(comptime E: type, comptime s: E) usize {
     return comptime blk: {
-        for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
-            if (f.value == @intFromEnum(s)) break :blk i;
+        for (@typeInfo(E).@"enum".field_values, 0..) |value, i| {
+            if (value == @backingInt(s)) break :blk i;
         }
         @compileError("state is not a member of the state enum");
     };
@@ -416,7 +416,7 @@ fn stateEncoding(comptime E: type, comptime encoding: StateEncoding, comptime s:
 
 /// An enum-backed state register with named encodings emitted as constants.
 pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: StateEncoding) type {
-    const N = @typeInfo(E).@"enum".fields.len;
+    const N = @typeInfo(E).@"enum".field_names.len;
     const W = stateWidth(E, encoding);
 
     return struct {
@@ -430,9 +430,9 @@ pub fn StateMachine(comptime E: type, comptime reset: E, comptime encoding: Stat
         pub fn create(mb: *ModuleBuilder, name: []const u8) !@This() {
             var params: [N]Param(W) = undefined;
             var entries: [N]netlist.EnumEntry = undefined;
-            inline for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
-                const pname = try std.fmt.allocPrint(mb.allocator, "{s}_{s}", .{ name, f.name });
-                const value = stateEncoding(E, encoding, @field(E, f.name));
+            inline for (@typeInfo(E).@"enum".field_names, 0..) |field_name, i| {
+                const pname = try std.fmt.allocPrint(mb.allocator, "{s}_{s}", .{ name, field_name });
+                const value = stateEncoding(E, encoding, @field(E, field_name));
                 params[i] = try mb.constant(pname, W, value);
                 entries[i] = .{ .name = pname, .value = value };
             }

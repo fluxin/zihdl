@@ -96,13 +96,13 @@ pub fn Axi4LiteRegisterBlock(comptime address_width: usize, comptime data_width:
                 b.assign(w_pending, b.and_(b.or_(w_pending.expr(), w_fire), b.not(commit))),
                 b.when(commit, &.{
                     b.assign(b_valid, 1),
-                    b.assign(b_resp, b.ternary(write_hit, b.lit(2, @intFromEnum(Resp.okay)), b.lit(2, @intFromEnum(Resp.decerr)))),
+                    b.assign(b_resp, b.ternary(write_hit, b.lit(2, @backingInt(Resp.okay)), b.lit(2, @backingInt(Resp.decerr)))),
                     b.when(write_hit, &.{b.assign(value, updated)}, &.{}),
                 }, &.{b.when(b.and_(b_valid.expr(), ins.bready.expr()), &.{b.assign(b_valid, 0)}, &.{})}),
                 b.when(ar_fire, &.{
                     b.assign(r_valid, 1),
                     b.assign(r_data, b.ternary(read_hit, value.expr(), b.lit(data_width, 0))),
-                    b.assign(r_resp, b.ternary(read_hit, b.lit(2, @intFromEnum(Resp.okay)), b.lit(2, @intFromEnum(Resp.decerr)))),
+                    b.assign(r_resp, b.ternary(read_hit, b.lit(2, @backingInt(Resp.okay)), b.lit(2, @backingInt(Resp.decerr)))),
                 }, &.{b.when(b.and_(r_valid.expr(), ins.rready.expr()), &.{b.assign(r_valid, 0)}, &.{})}),
             });
 

@@ -141,7 +141,7 @@ pub const Collector = struct {
     current: ?usize = null,
     artifact_language: []const u8 = "verilog2001",
     artifact_bytes: usize = 0,
-    artifact_sha256: [64]u8 = [_]u8{'0'} ** 64,
+    artifact_sha256: [64]u8 = @splat('0'),
 
     pub fn init(allocator: std.mem.Allocator, design: *const ir.Design) !Collector {
         var self = Collector{
@@ -401,7 +401,7 @@ fn spanLessThan(_: void, a: SpanRow, b: SpanRow) bool {
     if (a.start != b.start) return a.start < b.start;
     if (a.end != b.end) return a.end < b.end;
     if (a.operation != b.operation) return a.operation < b.operation;
-    return @intFromEnum(a.occurrence) < @intFromEnum(b.occurrence);
+    return @backingInt(a.occurrence) < @backingInt(b.occurrence);
 }
 
 /// Writes the `"provenance"` object into a `design.json` stream.

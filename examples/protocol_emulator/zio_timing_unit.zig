@@ -100,13 +100,13 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const wait_cond = ins.inst.slice(27, 26);
             const pull_block = ins.inst.bit(16);
 
-            const is_set = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.SET)));
-            const is_jmp = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.JMP)));
-            const is_out = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.OUT)));
-            const is_in = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.IN)));
-            const is_pull = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.PULL)));
-            const is_mov = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.MOV)));
-            const is_wait = b.eq(op, b.lit(4, @intFromEnum(isa.Opcode.WAIT)));
+            const is_set = b.eq(op, b.lit(4, @backingInt(isa.Opcode.SET)));
+            const is_jmp = b.eq(op, b.lit(4, @backingInt(isa.Opcode.JMP)));
+            const is_out = b.eq(op, b.lit(4, @backingInt(isa.Opcode.OUT)));
+            const is_in = b.eq(op, b.lit(4, @backingInt(isa.Opcode.IN)));
+            const is_pull = b.eq(op, b.lit(4, @backingInt(isa.Opcode.PULL)));
+            const is_mov = b.eq(op, b.lit(4, @backingInt(isa.Opcode.MOV)));
+            const is_wait = b.eq(op, b.lit(4, @backingInt(isa.Opcode.WAIT)));
 
             // FIFO status and the autopull source: OSR while it has bits, the
             // FIFO head when it is empty; both are consumed in the same cycle.
@@ -122,30 +122,30 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const out_mask = b.sub(b.shl(b.lit(32, 1), out_count_raw5), 1);
 
             // Supported decode: any other opcode or field combination faults.
-            const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @intFromEnum(isa.SetTarget.Y))));
+            const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @backingInt(isa.SetTarget.Y))));
             const out_target_ok = b.or_(
-                b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.PINS))),
+                b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.PINS))),
                 b.or_(
-                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.X))),
-                    b.eq(out_target, b.lit(3, @intFromEnum(isa.OutTarget.NULL))),
+                    b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.X))),
+                    b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.NULL))),
                 ),
             );
             const out_ok = b.and_(is_out, b.and_(
                 out_target_ok,
                 b.and_(b.ge(out_count, 1), b.le(out_count, 16)),
             ));
-            const in_ok = b.and_(is_in, b.and_(b.eq(in_source, b.lit(3, @intFromEnum(isa.InSource.PINS))), b.eq(in_count, 4)));
+            const in_ok = b.and_(is_in, b.and_(b.eq(in_source, b.lit(3, @backingInt(isa.InSource.PINS))), b.eq(in_count, 4)));
             const wait_ok = b.and_(is_wait, b.and_(
-                b.le(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))),
+                b.le(wait_cond, b.lit(2, @backingInt(isa.WaitCondition.PIN_HIGH))),
                 b.or_(b.eq(wait_cond, 0), b.lt(ins.inst.slice(19, 16), 4)),
             ));
             const decode_ok = b.or_(
                 set_ok,
                 b.or_(
-                    b.and_(is_jmp, b.le(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.OSR_NOT_FULL)))),
+                    b.and_(is_jmp, b.le(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.OSR_NOT_FULL)))),
                     b.or_(
                         out_ok,
-                        b.or_(in_ok, b.or_(is_pull, b.or_(b.and_(is_mov, b.and_(b.le(mov_dest, b.lit(3, @intFromEnum(isa.MovDest.OSR))), b.le(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.OSR))))), wait_ok))),
+                        b.or_(in_ok, b.or_(is_pull, b.or_(b.and_(is_mov, b.and_(b.le(mov_dest, b.lit(3, @backingInt(isa.MovDest.OSR))), b.le(mov_src, b.lit(3, @backingInt(isa.MovSrc.OSR))))), wait_ok))),
                     ),
                 ),
             );
@@ -157,10 +157,10 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const pin_high = b.bit(ins.pin_in, 0);
             const wait_pin = b.bit(b.shr(ins.pin_in, ins.inst.slice(19, 16)), 0);
             const data_avail = b.or_(b.ne(osr_cnt.expr(), 0), b.not(fifo_empty));
-            const x_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.X_DEC))), b.not(x_zero));
-            const y_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.Y_DEC))), b.not(y_zero));
-            const wait_pin_high = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_HIGH))));
-            const wait_pin_low = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @intFromEnum(isa.WaitCondition.PIN_LOW))));
+            const x_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.X_DEC))), b.not(x_zero));
+            const y_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.Y_DEC))), b.not(y_zero));
+            const wait_pin_high = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @backingInt(isa.WaitCondition.PIN_HIGH))));
+            const wait_pin_low = b.and_(wait_ok, b.eq(wait_cond, b.lit(2, @backingInt(isa.WaitCondition.PIN_LOW))));
             const wait_pin_blocked = b.or_(
                 b.and_(wait_pin_high, b.not(wait_pin)),
                 b.and_(wait_pin_low, wait_pin),
@@ -183,18 +183,18 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const fifo_pop = b.and_(b.and_(executing, decode_ok), b.and_(b.not(fifo_empty), b.or_(autopull, is_pull)));
             const starved_out = b.and_(autopull, fifo_empty);
             const branch_taken = b.and_(is_jmp, b.or_(
-                b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.ALWAYS))),
+                b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.ALWAYS))),
                 b.or_(
-                    b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.NOT_X))), x_zero),
+                    b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.NOT_X))), x_zero),
                     b.or_(
                         x_dec_taken,
                         b.or_(
-                            b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.NOT_Y))), y_zero),
+                            b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.NOT_Y))), y_zero),
                             b.or_(
                                 y_dec_taken,
                                 b.or_(
-                                    b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.PIN_HIGH))), pin_high),
-                                    b.and_(b.eq(jmp_cond, b.lit(3, @intFromEnum(isa.JmpCondition.OSR_NOT_FULL))), data_avail),
+                                    b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.PIN_HIGH))), pin_high),
+                                    b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.OSR_NOT_FULL))), data_avail),
                                 ),
                             ),
                         ),
@@ -209,19 +209,19 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
 
             // MOV operand mux.
             const mov_src_value = b.ternary(
-                b.eq(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.PINS))),
+                b.eq(mov_src, b.lit(3, @backingInt(isa.MovSrc.PINS))),
                 b.zext(ins.pin_in, 32),
                 b.ternary(
-                    b.eq(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.X))),
+                    b.eq(mov_src, b.lit(3, @backingInt(isa.MovSrc.X))),
                     b.zext(x_reg.expr(), 32),
                     b.ternary(
-                        b.eq(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.Y))),
+                        b.eq(mov_src, b.lit(3, @backingInt(isa.MovSrc.Y))),
                         b.zext(y_reg.expr(), 32),
                         b.ternary(
-                            b.eq(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.NULL))),
+                            b.eq(mov_src, b.lit(3, @backingInt(isa.MovSrc.NULL))),
                             b.lit(32, 0),
                             b.ternary(
-                                b.eq(mov_src, b.lit(3, @intFromEnum(isa.MovSrc.ISR))),
+                                b.eq(mov_src, b.lit(3, @backingInt(isa.MovSrc.ISR))),
                                 isr.expr(),
                                 osr.expr(),
                             ),
@@ -234,10 +234,10 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
 
             const set_stmts = [_]Stmt{
                 b.case_(set_target, &.{
-                    b.caseBranch(@intFromEnum(isa.SetTarget.PINS), &.{b.assign(outs.pin_out, set_val4)}),
-                    b.caseBranch(@intFromEnum(isa.SetTarget.PIN_DIRS), &.{b.assign(outs.pin_oe, set_val4)}),
-                    b.caseBranch(@intFromEnum(isa.SetTarget.X), &.{b.assign(x_reg, b.resize(set_val5, x_bits))}),
-                    b.caseBranch(@intFromEnum(isa.SetTarget.Y), &.{b.assign(y_reg, b.resize(set_val5, x_bits))}),
+                    b.caseBranch(@backingInt(isa.SetTarget.PINS), &.{b.assign(outs.pin_out, set_val4)}),
+                    b.caseBranch(@backingInt(isa.SetTarget.PIN_DIRS), &.{b.assign(outs.pin_oe, set_val4)}),
+                    b.caseBranch(@backingInt(isa.SetTarget.X), &.{b.assign(x_reg, b.resize(set_val5, x_bits))}),
+                    b.caseBranch(@backingInt(isa.SetTarget.Y), &.{b.assign(y_reg, b.resize(set_val5, x_bits))}),
                 }, &.{}),
             };
 
@@ -253,16 +253,16 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                     b.assign(underrun_r, 1),
                 }, &.{
                     b.case_(out_target, &.{
-                        b.caseBranch(@intFromEnum(isa.OutTarget.PINS), &.{
+                        b.caseBranch(@backingInt(isa.OutTarget.PINS), &.{
                             b.when(b.lt(b.lit(5, 0), out_count_raw5), &.{b.sliceAssign(outs.pin_out, 0, 0, b.bit(osr_src, 0))}, &.{}),
                             b.when(b.lt(b.lit(5, 1), out_count_raw5), &.{b.sliceAssign(outs.pin_out, 1, 1, b.bit(osr_src, 1))}, &.{}),
                             b.when(b.lt(b.lit(5, 2), out_count_raw5), &.{b.sliceAssign(outs.pin_out, 2, 2, b.bit(osr_src, 2))}, &.{}),
                             b.when(b.lt(b.lit(5, 3), out_count_raw5), &.{b.sliceAssign(outs.pin_out, 3, 3, b.bit(osr_src, 3))}, &.{}),
                         }),
-                        b.caseBranch(@intFromEnum(isa.OutTarget.X), &.{
+                        b.caseBranch(@backingInt(isa.OutTarget.X), &.{
                             b.assign(x_reg, b.resize(b.band(osr_src, out_mask), x_bits)),
                         }),
-                        b.caseBranch(@intFromEnum(isa.OutTarget.NULL), &.{}),
+                        b.caseBranch(@backingInt(isa.OutTarget.NULL), &.{}),
                     }, &.{}),
                     b.assign(osr, b.shr(osr_src, out_count_raw5)),
                     b.assign(osr_cnt, b.sub(osr_src_cnt, out_count)),
@@ -290,24 +290,24 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
 
             const mov_stmts = [_]Stmt{
                 b.case_(mov_dest, &.{
-                    b.caseBranch(@intFromEnum(isa.MovDest.PINS), &.{b.assign(outs.pin_out, b.trunc(mov_value, 4))}),
-                    b.caseBranch(@intFromEnum(isa.MovDest.PIN_DIRS), &.{b.assign(outs.pin_oe, b.trunc(mov_value, 4))}),
-                    b.caseBranch(@intFromEnum(isa.MovDest.X), &.{b.assign(x_reg, b.trunc(mov_value, x_bits))}),
-                    b.caseBranch(@intFromEnum(isa.MovDest.Y), &.{b.assign(y_reg, b.trunc(mov_value, x_bits))}),
-                    b.caseBranch(@intFromEnum(isa.MovDest.ISR), &.{b.assign(isr, mov_value)}),
-                    b.caseBranch(@intFromEnum(isa.MovDest.OSR), &.{b.assign(osr, mov_value)}),
+                    b.caseBranch(@backingInt(isa.MovDest.PINS), &.{b.assign(outs.pin_out, b.trunc(mov_value, 4))}),
+                    b.caseBranch(@backingInt(isa.MovDest.PIN_DIRS), &.{b.assign(outs.pin_oe, b.trunc(mov_value, 4))}),
+                    b.caseBranch(@backingInt(isa.MovDest.X), &.{b.assign(x_reg, b.trunc(mov_value, x_bits))}),
+                    b.caseBranch(@backingInt(isa.MovDest.Y), &.{b.assign(y_reg, b.trunc(mov_value, x_bits))}),
+                    b.caseBranch(@backingInt(isa.MovDest.ISR), &.{b.assign(isr, mov_value)}),
+                    b.caseBranch(@backingInt(isa.MovDest.OSR), &.{b.assign(osr, mov_value)}),
                 }, &.{}),
             };
 
             const op_stmts = [_]Stmt{
                 b.case_(op, &.{
-                    b.caseBranch(@intFromEnum(isa.Opcode.SET), &set_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.JMP), &jmp_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.OUT), &out_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.IN), &in_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.PULL), &pull_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.MOV), &mov_stmts),
-                    b.caseBranch(@intFromEnum(isa.Opcode.WAIT), &.{}),
+                    b.caseBranch(@backingInt(isa.Opcode.SET), &set_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.JMP), &jmp_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.OUT), &out_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.IN), &in_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.PULL), &pull_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.MOV), &mov_stmts),
+                    b.caseBranch(@backingInt(isa.Opcode.WAIT), &.{}),
                 }, &.{}),
             };
 

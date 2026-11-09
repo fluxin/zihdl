@@ -1,6 +1,6 @@
 # zihdl
 
-A pure Zig (0.16.0) hardware construction library and RTL generator.
+A pure Zig (0.17.1) hardware construction library and RTL generator.
 The Zig package, import module and generated executable are all named `zihdl`.
 The project is available under the [MIT license](LICENSE), copyright 2026
 Bob Klosinski (fluxin). The package version is `0.0.0`; no stable API promise
@@ -200,7 +200,7 @@ resolution.
 
 ## Quick Start
 
-Install Zig 0.16.0 for generation and unit tests. `zig build verify` also
+Install Zig 0.17.1 for generation and unit tests. `zig build verify` also
 requires Verilator, Icarus Verilog and `vvp` on `PATH`. `oasic` is only needed
 for the separate replay commands above.
 

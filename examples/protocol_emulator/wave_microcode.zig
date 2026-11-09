@@ -59,8 +59,8 @@ test "pin symbols pack across word boundaries with a count header" {
     const pair = try packSymbols(alloc, &.{ 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 2 }, 2);
     defer alloc.free(pair);
     try std.testing.expectEqualSlices(u32, &.{ 16, 0x39393939, 2 }, pair);
-    try std.testing.expectError(error.StreamTooLong, packSymbols(alloc, &([_]u4{1} ** 121), 4));
-    const refilled = try packSymbolsForRefill(alloc, &([_]u4{1} ** 121), 4, 121);
+    try std.testing.expectError(error.StreamTooLong, packSymbols(alloc, &@as([121]u4, @splat(1)), 4));
+    const refilled = try packSymbolsForRefill(alloc, &@as([121]u4, @splat(1)), 4, 121);
     defer alloc.free(refilled);
     try std.testing.expectEqual(@as(usize, 17), refilled.len);
 }

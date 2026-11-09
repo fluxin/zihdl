@@ -42,7 +42,7 @@ pub const Run = struct {
 
 const Interp = struct {
     program: []const u32,
-    fifo: [(asic.Config{}).fifo_depth]u32 = [_]u32{0} ** (asic.Config{}).fifo_depth,
+    fifo: [(asic.Config{}).fifo_depth]u32 = @splat(0),
     fifo_rd: usize = 0,
     fifo_cnt: usize = 0,
     pc_exec: u8 = 0,
@@ -83,11 +83,11 @@ const Interp = struct {
         const osr_empty = self.osr_cnt == 0;
         const fifo_empty = self.fifo_cnt == 0;
         const data_avail = !osr_empty or !fifo_empty;
-        const is_out = op == @intFromEnum(isa.Opcode.OUT);
-        const is_pull = op == @intFromEnum(isa.Opcode.PULL);
-        const is_jmp = op == @intFromEnum(isa.Opcode.JMP);
-        const is_mov = op == @intFromEnum(isa.Opcode.MOV);
-        const is_set = op == @intFromEnum(isa.Opcode.SET);
+        const is_out = op == @backingInt(isa.Opcode.OUT);
+        const is_pull = op == @backingInt(isa.Opcode.PULL);
+        const is_jmp = op == @backingInt(isa.Opcode.JMP);
+        const is_mov = op == @backingInt(isa.Opcode.MOV);
+        const is_set = op == @backingInt(isa.Opcode.SET);
         const out_target = bits(word, 23, 21);
         const out_count = bits(word, 20, 16);
         const jmp_cond = bits(word, 26, 24);
@@ -96,19 +96,19 @@ const Interp = struct {
         const mov_src = bits(word, 18, 16);
         const mov_inv = (word >> 22) & 1;
         const pull_block = (word >> 16) & 1;
-        const x_dec_taken = is_jmp and jmp_cond == @intFromEnum(isa.JmpCondition.X_DEC) and self.x != 0;
-        const y_dec_taken = is_jmp and jmp_cond == @intFromEnum(isa.JmpCondition.Y_DEC) and self.y != 0;
-        const wait_pin_blocked = op == @intFromEnum(isa.Opcode.WAIT) and bits(word, 27, 26) == 1;
+        const x_dec_taken = is_jmp and jmp_cond == @backingInt(isa.JmpCondition.X_DEC) and self.x != 0;
+        const y_dec_taken = is_jmp and jmp_cond == @backingInt(isa.JmpCondition.Y_DEC) and self.y != 0;
+        const wait_pin_blocked = op == @backingInt(isa.Opcode.WAIT) and bits(word, 27, 26) == 1;
         const pull_blocked = is_pull and pull_block == 1 and fifo_empty;
         const hold_fetch = !self.ir_valid or self.halt or self.delay > 0 or wait_pin_blocked or pull_blocked;
         const executing = self.running and !hold_fetch and s.ctrl_start == 0 and s.ctrl_stop == 0;
         const branch_taken = is_jmp and switch (jmp_cond) {
-            @intFromEnum(isa.JmpCondition.ALWAYS) => true,
-            @intFromEnum(isa.JmpCondition.NOT_X) => self.x == 0,
-            @intFromEnum(isa.JmpCondition.X_DEC) => self.x != 0,
-            @intFromEnum(isa.JmpCondition.NOT_Y) => self.y == 0,
-            @intFromEnum(isa.JmpCondition.Y_DEC) => self.y != 0,
-            @intFromEnum(isa.JmpCondition.OSR_NOT_FULL) => data_avail,
+            @backingInt(isa.JmpCondition.ALWAYS) => true,
+            @backingInt(isa.JmpCondition.NOT_X) => self.x == 0,
+            @backingInt(isa.JmpCondition.X_DEC) => self.x != 0,
+            @backingInt(isa.JmpCondition.NOT_Y) => self.y == 0,
+            @backingInt(isa.JmpCondition.Y_DEC) => self.y != 0,
+            @backingInt(isa.JmpCondition.OSR_NOT_FULL) => data_avail,
             else => false,
         };
         const fetch_addr: u8 = if (hold_fetch) self.pc_exec else if (branch_taken) jmp_target else self.pc_exec +% 1;
@@ -624,7 +624,7 @@ fn appendJsonl(alloc: std.mem.Allocator, out: *std.ArrayList(u8), rows: []const 
     for (rows, 0..) |row, i| {
         var drive: [7]u8 = undefined;
         for (0..7) |b| drive[b] = '0' + @as(u8, @intCast((row.inputs >> @intCast(b)) & 1));
-        var expect: [16]u8 = [_]u8{'x'} ** 16;
+        var expect: [16]u8 = @splat('x');
         if (i >= result.anchor and run_idx < runs.len and !runs[run_idx].min) {
             if (run_left == 0) {
                 level = runs[run_idx].level;

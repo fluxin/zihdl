@@ -72,19 +72,19 @@ pub fn tokenPacket(pid: Pid, address: u7, endpoint: u4) ![3]u8 {
     if (pid != .out and pid != .in and pid != .setup) return error.InvalidTokenPid;
     const fields: u11 = @as(u11, address) | (@as(u11, endpoint) << 7);
     const word: u16 = @as(u16, fields) | (@as(u16, crc5(fields)) << 11);
-    return .{ @intFromEnum(pid), @truncate(word), @truncate(word >> 8) };
+    return .{ @backingInt(pid), @truncate(word), @truncate(word >> 8) };
 }
 
 pub fn sofPacket(frame: u11) [3]u8 {
     const word: u16 = @as(u16, frame) | (@as(u16, crc5(frame)) << 11);
-    return .{ @intFromEnum(Pid.sof), @truncate(word), @truncate(word >> 8) };
+    return .{ @backingInt(Pid.sof), @truncate(word), @truncate(word >> 8) };
 }
 
 pub fn dataPacket(alloc: std.mem.Allocator, pid: Pid, payload: []const u8) ![]u8 {
     if (pid != .data0 and pid != .data1) return error.InvalidDataPid;
     if (payload.len > 8) return error.LowSpeedPayloadTooLong;
     const bytes = try alloc.alloc(u8, payload.len + 3);
-    bytes[0] = @intFromEnum(pid);
+    bytes[0] = @backingInt(pid);
     @memcpy(bytes[1 .. payload.len + 1], payload);
     const crc = crc16(payload);
     bytes[payload.len + 1] = @truncate(crc);
@@ -392,7 +392,7 @@ test "USB packet receive decodes NRZI, stuffing, PID, CRC and RX words" {
             },
             else => return error.WrongPacketKind,
         }
-        const ack = try assemblePacket(alloc, &.{@intFromEnum(Pid.ack)}, clock);
+        const ack = try assemblePacket(alloc, &.{@backingInt(Pid.ack)}, clock);
         defer alloc.free(ack.stream);
         defer alloc.free(ack.program);
         defer alloc.free(ack.symbols);
