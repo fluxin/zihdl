@@ -12,7 +12,7 @@ Jump to `target` when `cond` holds; X_DEC/Y_DEC decrement only when taken.
 |---|---|---|
 | `target` | `[23:16]` | 0..255 |
 | `cond` | `[26:24]` | `ALWAYS`=0, `NOT_X`=1, `X_DEC`=2, `NOT_Y`=3, `Y_DEC`=4, `PIN`=5, `TX_PENDING`=6, `X_NE_Y`=7 |
-| `reserved` | `[27:27]` | reserved |
+| `reserved` | `[27:27]` | reserved, must be 0 |
 
 ## WAIT (opcode 1)
 
@@ -21,7 +21,7 @@ Stall until pin `index` matches `cond`, then hold for the delay.
 | Field | Bits | Values |
 |---|---|---|
 | `index` | `[19:16]` | 0..3 (any when `cond`=0) |
-| `reserved` | `[25:20]` | reserved |
+| `reserved` | `[25:20]` | reserved, must be 0 |
 | `cond` | `[27:26]` | `CYCLES`=0, `PIN_LOW`=1, `PIN_HIGH`=2 |
 
 ## IN (opcode 2)
@@ -32,7 +32,7 @@ Shift `count` bits (0 means 32) of `source` into the ISR in the configured direc
 |---|---|---|
 | `count` | `[20:16]` | 0..31 |
 | `source` | `[23:21]` | `PINS`=0, `X`=1, `Y`=2, `NULL`=3, `ISR`=4, `OSR`=5 |
-| `reserved` | `[27:24]` | reserved |
+| `reserved` | `[27:24]` | reserved, must be 0 |
 
 ## OUT (opcode 3)
 
@@ -42,7 +42,7 @@ Shift `count` bits (0 means 32) out of the OSR in the configured direction, auto
 |---|---|---|
 | `count` | `[20:16]` | 0..31 |
 | `target` | `[23:21]` | `PINS`=0, `PIN_DIRS`=1, `X`=2, `Y`=3, `NULL`=4, `ISR`=5 |
-| `reserved` | `[27:24]` | reserved |
+| `reserved` | `[27:24]` | reserved, must be 0 |
 
 ## PUSH (opcode 4)
 
@@ -50,7 +50,7 @@ Write the ISR as one RX word and clear it.
 
 | Field | Bits | Values |
 |---|---|---|
-| `reserved` | `[27:16]` | reserved |
+| `reserved` | `[27:16]` | reserved, must be 0 |
 
 ## PULL (opcode 5)
 
@@ -59,7 +59,7 @@ Load the OSR from the TX FIFO; `block` stalls on an empty FIFO, otherwise it fla
 | Field | Bits | Values |
 |---|---|---|
 | `block` | `[16:16]` | 0..1 |
-| `reserved` | `[27:17]` | reserved |
+| `reserved` | `[27:17]` | reserved, must be 0 |
 
 ## MOV (opcode 6)
 
@@ -70,7 +70,7 @@ Copy `src` to `dest`, optionally inverted or bit-reversed. MOV ISR empties the I
 | `src` | `[18:16]` | `PINS`=0, `X`=1, `Y`=2, `NULL`=3, `ISR`=4, `OSR`=5 |
 | `dest` | `[21:19]` | `PINS`=0, `PIN_DIRS`=1, `X`=2, `Y`=3, `ISR`=4, `OSR`=5 |
 | `op` | `[23:22]` | `NONE`=0, `INVERT`=1, `REVERSE`=2 |
-| `reserved` | `[27:24]` | reserved |
+| `reserved` | `[27:24]` | reserved, must be 0 |
 
 ## SET (opcode 7)
 
@@ -80,4 +80,4 @@ Write the immediate `value` to `target`.
 |---|---|---|
 | `value` | `[20:16]` | 0..31 |
 | `target` | `[23:21]` | `PINS`=0, `PIN_DIRS`=1, `X`=2, `Y`=3 |
-| `reserved` | `[27:24]` | reserved |
+| `reserved` | `[27:24]` | reserved, must be 0 |

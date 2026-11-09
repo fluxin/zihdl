@@ -3,6 +3,7 @@ pub const lib = @import("lib.zig");
 pub const blocks = @import("blocks.zig");
 pub const backend = @import("backend.zig");
 pub const cdc = @import("cdc.zig");
+pub const bitfield = @import("bitfield.zig");
 
 test {
     _ = netlist;
@@ -10,6 +11,7 @@ test {
     _ = blocks;
     _ = backend;
     _ = cdc;
+    _ = bitfield;
     _ = @import("backend/verilog_test.zig");
     _ = @import("backend/systemverilog_test.zig");
     _ = @import("backend/metadata_test.zig");

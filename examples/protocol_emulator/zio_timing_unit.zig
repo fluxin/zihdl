@@ -25,57 +25,17 @@ const isa = @import("isa.zig");
 const Expr = netlist.Expr;
 const ExprBuilder = netlist.ExprBuilder;
 
+const bitfield = zihdl.bitfield;
+
 /// Payload field `name` of `P`, sliced from `inst` at its ISA table offset.
-fn field(inst: Signal(32), comptime P: type, comptime name: []const u8) Expr(@bitSizeOf(@FieldType(P, name))) {
-    const bits = comptime isa.fieldBits(P, name);
-    return inst.slice(bits.hi, bits.lo);
-}
-
-/// Value is a declared tag of `E`: one comparator for a dense enum and no
-/// logic when every encoding is declared.
-fn declared(b: ExprBuilder, value: anytype, comptime E: type) Expr(1) {
-    const values = @typeInfo(E).@"enum".field_values;
-    const W = @bitSizeOf(@typeInfo(E).@"enum".tag_type);
-    comptime var dense = true;
-    inline for (values, 0..) |v, i| dense = dense and v == i;
-    if (dense and values.len == 1 << W) return b.lit(1, 1);
-    if (dense) return b.le(value, b.lit(W, values.len - 1));
-    var any = b.lit(1, 0);
-    inline for (values) |v| any = b.or_(any, b.eq(value, b.lit(W, v)));
-    return any;
-}
-
-/// Validity of payload `P` exactly as `isa.decode` defines it: every enum field
-/// holds a declared tag, reserved fields are zero and every rule holds.
-fn payloadValid(b: ExprBuilder, inst: Signal(32), comptime P: type) Expr(1) {
-    var ok = b.lit(1, 1);
-    inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |name, T| {
-        if (@typeInfo(T) == .@"enum") ok = b.and_(ok, declared(b, field(inst, P, name), T));
-        if (comptime std.mem.eql(u8, name, "reserved")) ok = b.and_(ok, b.eq(field(inst, P, name), b.lit(@bitSizeOf(T), 0)));
-    }
-    inline for (P.rules) |rule| {
-        const W = @bitSizeOf(@FieldType(P, rule.field));
-        const v = field(inst, P, rule.field);
-        // Bounds at the ends of the field's range are vacuous and emit nothing.
-        const above = if (rule.min == 0) b.lit(1, 1) else b.ge(v, b.lit(W, rule.min));
-        const below = if (rule.max == (1 << W) - 1) b.lit(1, 1) else b.le(v, b.lit(W, rule.max));
-        var in_range = b.and_(above, below);
-        if (rule.unless) |u| in_range = b.or_(b.eq(field(inst, P, u.field), b.lit(@bitSizeOf(@FieldType(P, u.field)), u.value)), in_range);
-        ok = b.and_(ok, in_range);
-    }
-    return ok;
+fn field(b: ExprBuilder, inst: Signal(32), comptime P: type, comptime name: []const u8) Expr(@bitSizeOf(@FieldType(P, name))) {
+    return bitfield.field(b, inst, P, name, isa.payload_lsb);
 }
 
 /// Opcode `opc` is executing a valid encoding.
 fn opValid(b: ExprBuilder, inst: Signal(32), comptime opc: isa.Opcode) Expr(1) {
     const op = inst.slice(isa.opcode_lsb + 3, isa.opcode_lsb);
-    return b.and_(b.eq(op, b.lit(4, @backingInt(opc))), payloadValid(b, inst, isa.Payload(opc)));
-}
-
-/// `value` equals tag `tag` of the enum field it was sliced from.
-fn is(b: ExprBuilder, value: anytype, comptime tag: anytype) Expr(1) {
-    const E = @TypeOf(tag);
-    return b.eq(value, b.lit(@bitSizeOf(@typeInfo(E).@"enum".tag_type), @backingInt(tag)));
+    return b.and_(b.eq(op, b.lit(4, @backingInt(opc))), bitfield.valid(b, inst, isa.Payload(opc), isa.payload_lsb));
 }
 
 /// Count field shared by IN and OUT: 0 encodes 32.
@@ -138,11 +98,6 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             rx_wdata: Signal(32),
         };
 
-        fn cfgField(cfg: Signal(cfg_bits), comptime name_: []const u8) Expr(@bitSizeOf(@FieldType(isa.Config, name_))) {
-            const lo = @bitOffsetOf(isa.Config, name_);
-            return cfg.slice(lo + @bitSizeOf(@FieldType(isa.Config, name_)) - 1, lo);
-        }
-
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
@@ -170,25 +125,25 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             // Instruction and configuration fields, sliced at the ISA table's offsets.
             const op = ins.inst.slice(isa.opcode_lsb + 3, isa.opcode_lsb);
             const delay_field = ins.inst.slice(isa.payload_lsb - 1, 0);
-            const set_target = field(ins.inst, isa.Set, "target");
-            const set_value = field(ins.inst, isa.Set, "value");
-            const jmp_cond = field(ins.inst, isa.Jmp, "cond");
-            const jmp_target = field(ins.inst, isa.Jmp, "target");
-            const out_target = field(ins.inst, isa.Out, "target");
-            const out_count = bitCount(b, field(ins.inst, isa.Out, "count"));
-            const in_source = field(ins.inst, isa.In, "source");
-            const in_count = bitCount(b, field(ins.inst, isa.In, "count"));
-            const mov_dest = field(ins.inst, isa.Mov, "dest");
-            const mov_src = field(ins.inst, isa.Mov, "src");
-            const mov_op = field(ins.inst, isa.Mov, "op");
-            const wait_cond = field(ins.inst, isa.Wait, "cond");
-            const wait_index = field(ins.inst, isa.Wait, "index");
-            const pull_block = field(ins.inst, isa.Pull, "block");
-            const cfg_jmp_pin = cfgField(ins.cfg, "jmp_pin");
-            const cfg_in_right = cfgField(ins.cfg, "in_shift_right");
-            const cfg_out_right = cfgField(ins.cfg, "out_shift_right");
-            const cfg_autopush = cfgField(ins.cfg, "autopush");
-            const cfg_threshold = cfgField(ins.cfg, "push_threshold");
+            const set_target = field(b, ins.inst, isa.Set, "target");
+            const set_value = field(b, ins.inst, isa.Set, "value");
+            const jmp_cond = field(b, ins.inst, isa.Jmp, "cond");
+            const jmp_target = field(b, ins.inst, isa.Jmp, "target");
+            const out_target = field(b, ins.inst, isa.Out, "target");
+            const out_count = bitCount(b, field(b, ins.inst, isa.Out, "count"));
+            const in_source = field(b, ins.inst, isa.In, "source");
+            const in_count = bitCount(b, field(b, ins.inst, isa.In, "count"));
+            const mov_dest = field(b, ins.inst, isa.Mov, "dest");
+            const mov_src = field(b, ins.inst, isa.Mov, "src");
+            const mov_op = field(b, ins.inst, isa.Mov, "op");
+            const wait_cond = field(b, ins.inst, isa.Wait, "cond");
+            const wait_index = field(b, ins.inst, isa.Wait, "index");
+            const pull_block = field(b, ins.inst, isa.Pull, "block");
+            const cfg_jmp_pin = bitfield.field(b, ins.cfg, isa.Config, "jmp_pin", 0);
+            const cfg_in_right = bitfield.field(b, ins.cfg, isa.Config, "in_shift_right", 0);
+            const cfg_out_right = bitfield.field(b, ins.cfg, isa.Config, "out_shift_right", 0);
+            const cfg_autopush = bitfield.field(b, ins.cfg, isa.Config, "autopush", 0);
+            const cfg_threshold = bitfield.field(b, ins.cfg, isa.Config, "push_threshold", 0);
 
             // Supported decode, generated from the ISA table: any other opcode
             // or field combination faults.
@@ -230,13 +185,13 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             };
             comptime std.debug.assert(conditions.len == @typeInfo(isa.JmpCondition).@"enum".field_names.len);
             var cond_true = b.lit(1, 0);
-            inline for (conditions) |c| cond_true = b.or_(cond_true, b.and_(is(b, jmp_cond, c[0]), c[1]));
+            inline for (conditions) |c| cond_true = b.or_(cond_true, b.and_(bitfield.is(b, jmp_cond, c[0]), c[1]));
             const branch_taken = b.and_(jmp_ok, cond_true);
-            const x_dec_taken = b.and_(branch_taken, is(b, jmp_cond, isa.JmpCondition.X_DEC));
-            const y_dec_taken = b.and_(branch_taken, is(b, jmp_cond, isa.JmpCondition.Y_DEC));
+            const x_dec_taken = b.and_(branch_taken, bitfield.is(b, jmp_cond, isa.JmpCondition.X_DEC));
+            const y_dec_taken = b.and_(branch_taken, bitfield.is(b, jmp_cond, isa.JmpCondition.Y_DEC));
             const wait_pin_blocked = b.and_(wait_ok, b.or_(
-                b.and_(is(b, wait_cond, isa.WaitCondition.PIN_HIGH), b.not(wait_pin)),
-                b.and_(is(b, wait_cond, isa.WaitCondition.PIN_LOW), wait_pin),
+                b.and_(bitfield.is(b, wait_cond, isa.WaitCondition.PIN_HIGH), b.not(wait_pin)),
+                b.and_(bitfield.is(b, wait_cond, isa.WaitCondition.PIN_LOW), wait_pin),
             ));
             const pull_blocked = b.and_(b.and_(pull_ok, pull_block), fifo_empty);
             const hold_fetch = b.or_(
@@ -291,9 +246,9 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const autopush = b.and_(cfg_autopush, b.ge(isr_filled, threshold));
 
             const mov_result = b.ternary(
-                is(b, mov_op, isa.MovOp.INVERT),
+                bitfield.is(b, mov_op, isa.MovOp.INVERT),
                 b.bitNot(mov_value),
-                b.ternary(is(b, mov_op, isa.MovOp.REVERSE), reverse32(b, mov_value), mov_value),
+                b.ternary(bitfield.is(b, mov_op, isa.MovOp.REVERSE), reverse32(b, mov_value), mov_value),
             );
 
             const set_stmts = [_]Stmt{

@@ -416,6 +416,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("examples/protocol_emulator/isa_doc.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
         }),
     });
     b.step("isa-doc", "Write docs/zio-isa.md from the ZIO ISA table").dependOn(&b.addRunArtifact(isa_doc_exe).step);

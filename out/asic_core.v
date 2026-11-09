@@ -601,11 +601,10 @@ module zio_timing_unit_x16_f16 (
     wire [31:0]  tmp25;
     wire [5:0]  tmp26;
     wire [5:0]  tmp27;
-    wire [5:0]  tmp28;
+    wire [31:0]  tmp28;
     wire [31:0]  tmp29;
-    wire [31:0]  tmp30;
-    wire [3:0]  tmp31;
-    wire [15:0]  tmp32;
+    wire [3:0]  tmp30;
+    wire [15:0]  tmp31;
 
     reg [7:0]  pc_exec;
     reg         ir_valid;
@@ -651,14 +650,13 @@ module zio_timing_unit_x16_f16 (
     assign tmp22 = (6'd3 < tmp24);
     assign tmp23 = tmp2[15:0];
     assign tmp24 = ((inst[20:16] == 5'd0) ? 6'd32 : {{1{1'b0}}, inst[20:16]});
-    assign tmp25 = ((osr_cnt == 6'd0) ? tmp30 : osr);
-    assign tmp26 = (tmp24 - 6'd1);
-    assign tmp27 = ((osr_cnt == 6'd0) ? 6'd32 : osr_cnt);
-    assign tmp28 = ((tmp3 > 7'd32) ? 6'd32 : tmp3[5:0]);
-    assign tmp29 = (cfg[2:2] ? (((isr >> tmp26) >> 5'd1) | ((((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24))) << (6'd32 - tmp24))) : (((isr << tmp26) << 5'd1) | (((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24)))));
-    assign tmp30 = tx_fifo[fifo_rd];
-    assign tmp31 = tmp4[3:0];
-    assign tmp32 = tmp4[15:0];
+    assign tmp25 = ((osr_cnt == 6'd0) ? tmp29 : osr);
+    assign tmp26 = ((osr_cnt == 6'd0) ? 6'd32 : osr_cnt);
+    assign tmp27 = ((tmp3 > 7'd32) ? 6'd32 : tmp3[5:0]);
+    assign tmp28 = (cfg[2:2] ? ((isr >> tmp24) | ((((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24))) << (6'd32 - tmp24))) : ((isr << tmp24) | (((inst[23:21] == 3'd5) ? osr : ((inst[23:21] == 3'd4) ? isr : ((inst[23:21] == 3'd3) ? 32'd0 : ((inst[23:21] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[23:21] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[23:21] == 3'd0) ? {{28{1'b0}}, pin_in} : 32'd0)))))) & (32'd4294967295 >> (6'd32 - tmp24)))));
+    assign tmp29 = tx_fifo[fifo_rd];
+    assign tmp30 = tmp4[3:0];
+    assign tmp31 = tmp4[15:0];
 
     assign pc = tmp5;
     assign core_running = running;
@@ -806,19 +804,19 @@ module zio_timing_unit_x16_f16 (
                                                                 isr_cnt <= tmp24;
                                                             end
                                                         endcase
-                                                        osr <= (cfg[3:3] ? ((tmp25 >> tmp26) >> 5'd1) : ((tmp25 << tmp26) << 5'd1));
-                                                        osr_cnt <= ((tmp27 > tmp24) ? (tmp27 - tmp24) : 6'd0);
+                                                        osr <= (cfg[3:3] ? (tmp25 >> tmp24) : (tmp25 << tmp24));
+                                                        osr_cnt <= ((tmp26 > tmp24) ? (tmp26 - tmp24) : 6'd0);
                                                     end
                                                 end
                                                 2: begin
-                                                    if ((cfg[4:4] && (tmp28 >= ((cfg[9:5] == 5'd0) ? 6'd32 : {{1{1'b0}}, cfg[9:5]})))) begin
+                                                    if ((cfg[4:4] && (tmp27 >= ((cfg[9:5] == 5'd0) ? 6'd32 : {{1{1'b0}}, cfg[9:5]})))) begin
                                                         rx_we <= 1'b1;
-                                                        rx_wdata <= tmp29;
+                                                        rx_wdata <= tmp28;
                                                         isr <= 32'd0;
                                                         isr_cnt <= 6'd0;
                                                     end else begin
-                                                        isr <= tmp29;
-                                                        isr_cnt <= tmp28;
+                                                        isr <= tmp28;
+                                                        isr_cnt <= tmp27;
                                                     end
                                                 end
                                                 4: begin
@@ -833,23 +831,23 @@ module zio_timing_unit_x16_f16 (
                                                             underrun_r <= 1'b1;
                                                         end
                                                     end else begin
-                                                        osr <= tmp30;
+                                                        osr <= tmp29;
                                                         osr_cnt <= 6'd32;
                                                     end
                                                 end
                                                 6: begin
                                                     case (inst[21:19])
                                                         0: begin
-                                                            pin_out <= tmp31;
+                                                            pin_out <= tmp30;
                                                         end
                                                         1: begin
-                                                            pin_oe <= tmp31;
+                                                            pin_oe <= tmp30;
                                                         end
                                                         2: begin
-                                                            x_reg <= tmp32;
+                                                            x_reg <= tmp31;
                                                         end
                                                         3: begin
-                                                            y_reg <= tmp32;
+                                                            y_reg <= tmp31;
                                                         end
                                                         4: begin
                                                             isr <= tmp4;

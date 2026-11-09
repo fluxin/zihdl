@@ -9,6 +9,7 @@
 //! The core faults on anything else before any side effect. `Config` is the
 //! per-core configuration word; its defaults reproduce the original core.
 const std = @import("std");
+const bitfield = @import("zihdl").bitfield;
 
 /// [31:28] opcode, [27:16] payload, [15:0] delay: the instruction occupies
 /// delay + 1 cycles.
@@ -128,20 +129,12 @@ comptime {
     std.debug.assert(@as(usize, 1) << @bitSizeOf(@FieldType(Config, "jmp_pin")) == pin_count);
 }
 
-/// Inclusive range on a raw payload field, waived while `unless` holds.
-pub const Rule = struct {
-    field: []const u8,
-    min: u32,
-    max: u32,
-    unless: ?struct { field: []const u8, value: u32 } = null,
-};
-
 pub const Jmp = packed struct(u12) {
     target: u8,
     cond: JmpCondition,
     reserved: u1 = 0,
     pub const summary = "Jump to `target` when `cond` holds; X_DEC/Y_DEC decrement only when taken.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Wait = packed struct(u12) {
@@ -149,7 +142,7 @@ pub const Wait = packed struct(u12) {
     reserved: u6 = 0,
     cond: WaitCondition,
     pub const summary = "Stall until pin `index` matches `cond`, then hold for the delay.";
-    pub const rules = [_]Rule{.{ .field = "index", .min = 0, .max = pin_count - 1, .unless = .{ .field = "cond", .value = @backingInt(WaitCondition.CYCLES) } }};
+    pub const rules = [_]bitfield.Rule{.{ .field = "index", .min = 0, .max = pin_count - 1, .unless = .{ .field = "cond", .value = @backingInt(WaitCondition.CYCLES) } }};
 };
 
 pub const In = packed struct(u12) {
@@ -157,7 +150,7 @@ pub const In = packed struct(u12) {
     source: InSource,
     reserved: u4 = 0,
     pub const summary = "Shift `count` bits (0 means 32) of `source` into the ISR in the configured direction; autopush writes an RX word at the threshold.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Out = packed struct(u12) {
@@ -165,20 +158,20 @@ pub const Out = packed struct(u12) {
     target: OutTarget,
     reserved: u4 = 0,
     pub const summary = "Shift `count` bits (0 means 32) out of the OSR in the configured direction, autopulling an empty OSR from the TX FIFO.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Push = packed struct(u12) {
     reserved: u12 = 0,
     pub const summary = "Write the ISR as one RX word and clear it.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Pull = packed struct(u12) {
     block: bool,
     reserved: u11 = 0,
     pub const summary = "Load the OSR from the TX FIFO; `block` stalls on an empty FIFO, otherwise it flags underrun.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Mov = packed struct(u12) {
@@ -187,7 +180,7 @@ pub const Mov = packed struct(u12) {
     op: MovOp,
     reserved: u4 = 0,
     pub const summary = "Copy `src` to `dest`, optionally inverted or bit-reversed. MOV ISR empties the ISR count; MOV OSR fills the OSR count.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub const Set = packed struct(u12) {
@@ -195,7 +188,7 @@ pub const Set = packed struct(u12) {
     target: SetTarget,
     reserved: u4 = 0,
     pub const summary = "Write the immediate `value` to `target`.";
-    pub const rules = [_]Rule{};
+    pub const rules = [_]bitfield.Rule{};
 };
 
 pub fn Payload(comptime op: Opcode) type {
@@ -216,19 +209,9 @@ pub fn encode(comptime op: Opcode, payload: Payload(op), delay: u16) Instruction
 }
 
 /// Instruction bit range `[hi:lo]` of a payload field.
-pub fn fieldBits(comptime P: type, comptime name: []const u8) struct { hi: u32, lo: u32 } {
-    const lo = payload_lsb + @bitOffsetOf(P, name);
-    return .{ .hi = lo + @bitSizeOf(@FieldType(P, name)) - 1, .lo = lo };
-}
-
-fn raw(word: u32, comptime P: type, comptime name: []const u8) u32 {
-    const bits = comptime fieldBits(P, name);
-    return (word >> bits.lo) & ((@as(u32, 1) << (bits.hi - bits.lo + 1)) - 1);
-}
-
-fn enumHas(comptime E: type, value: u32) bool {
-    inline for (@typeInfo(E).@"enum".field_values) |v| if (v == value) return true;
-    return false;
+pub fn fieldBits(comptime P: type, comptime name: []const u8) struct { hi: usize, lo: usize } {
+    const r = bitfield.bits(P, name, payload_lsb);
+    return .{ .hi = r.hi, .lo = r.lo };
 }
 
 /// The payload of a valid instruction.
@@ -246,28 +229,14 @@ pub const Decoded = union(Opcode) {
 /// Null exactly when the core faults on `word`.
 pub fn decode(word: u32) ?Decoded {
     const op_raw = word >> opcode_lsb;
+    const data: u12 = @truncate(word >> payload_lsb);
     inline for (@typeInfo(Opcode).@"enum".field_names, @typeInfo(Opcode).@"enum".field_values) |name, value| {
         if (op_raw == value) {
-            const P = Payload(@field(Opcode, name));
-            if (!payloadValid(P, word)) return null;
-            const data: u12 = @truncate(word >> payload_lsb);
-            return @unionInit(Decoded, name, @as(P, @bitCast(data)));
+            const payload = bitfield.decode(Payload(@field(Opcode, name)), data) orelse return null;
+            return @unionInit(Decoded, name, payload);
         }
     }
     return null;
-}
-
-fn payloadValid(comptime P: type, word: u32) bool {
-    inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |name, T| {
-        if (@typeInfo(T) == .@"enum" and !enumHas(T, raw(word, P, name))) return false;
-        if (comptime std.mem.eql(u8, name, "reserved")) if (raw(word, P, name) != 0) return false;
-    }
-    inline for (P.rules) |rule| {
-        const waived = if (rule.unless) |u| raw(word, P, u.field) == u.value else false;
-        const v = raw(word, P, rule.field);
-        if (!waived and (v < rule.min or v > rule.max)) return false;
-    }
-    return true;
 }
 
 // -------------------------------------------------------------------------
@@ -337,27 +306,8 @@ pub fn document(alloc: std.mem.Allocator) ![]u8 {
     try print(&text, alloc, "Every instruction is 32 bits: opcode `[31:28]`, payload `[27:16]`, delay `[15:0]`; it occupies delay + 1 cycles. The core has {d} GPIO pins. An encoding outside these tables, or with a nonzero reserved field, faults before any side effect.\n", .{pin_count});
     inline for (@typeInfo(Opcode).@"enum".field_names, @typeInfo(Opcode).@"enum".field_values) |name, value| {
         const P = Payload(@field(Opcode, name));
-        try print(&text, alloc, "\n## {s} (opcode {d})\n\n{s}\n\n| Field | Bits | Values |\n|---|---|---|\n", .{ name, value, P.summary });
-        inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |field, T| {
-            const bits = comptime fieldBits(P, field);
-            try print(&text, alloc, "| `{s}` | `[{d}:{d}]` | ", .{ field, bits.hi, bits.lo });
-            if (@typeInfo(T) == .@"enum") {
-                inline for (@typeInfo(T).@"enum".field_names, @typeInfo(T).@"enum".field_values, 0..) |tag, tag_value, i| {
-                    try print(&text, alloc, "{s}`{s}`={d}", .{ if (i == 0) "" else ", ", tag, tag_value });
-                }
-            } else if (comptime std.mem.eql(u8, field, "reserved")) {
-                try text.appendSlice(alloc, "reserved");
-            } else {
-                var ranged = false;
-                inline for (P.rules) |rule| if (comptime std.mem.eql(u8, rule.field, field)) {
-                    ranged = true;
-                    try print(&text, alloc, "{d}..{d}", .{ rule.min, rule.max });
-                    if (rule.unless) |u| try print(&text, alloc, " (any when `{s}`={d})", .{ u.field, u.value });
-                };
-                if (!ranged) try print(&text, alloc, "0..{d}", .{if (T == bool) 1 else std.math.maxInt(T)});
-            }
-            try text.appendSlice(alloc, " |\n");
-        }
+        try print(&text, alloc, "\n## {s} (opcode {d})\n\n{s}\n\n", .{ name, value, P.summary });
+        try bitfield.writeTable(alloc, &text, P, payload_lsb);
     }
     return text.toOwnedSlice(alloc);
 }
