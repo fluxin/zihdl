@@ -462,6 +462,26 @@ pub fn build(b: *std.Build) void {
     cluster_lint.step.dependOn(&cluster_diff_gen.step);
     cluster_diff_step.dependOn(&cluster_lint.step);
     const cluster_model_tests = b.addTest(.{ .root_module = cluster_diff_exe.root_module });
+    const chip_test_exe = b.addExecutable(.{
+        .name = "zio_chip_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/zio_chip_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const chip_test_gen = b.addRunArtifact(chip_test_exe);
+    const chip_test_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "zio_chip_board_vectors_tb", "-o", "out/zio_chip_iv", "out/zio_chip_board.v", "out/zio_chip_tb.v" });
+    chip_test_compile.step.dependOn(&chip_test_gen.step);
+    const chip_test_run = b.addSystemCommand(&.{ "vvp", "out/zio_chip_iv" });
+    chip_test_run.step.dependOn(&chip_test_compile.step);
+    const chip_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "--top-module", "zio_chip_board", "out/zio_chip_board.v" });
+    chip_lint.step.dependOn(&chip_test_gen.step);
+    const chip_test_step = b.step("zio-chip", "End-to-end chip test over SPI: two machines loop UART back through a pad");
+    chip_test_step.dependOn(&chip_test_run.step);
+    chip_test_step.dependOn(&chip_lint.step);
+    const chip_tests = b.addTest(.{ .root_module = chip_test_exe.root_module });
     const competition_gen = b.addRunArtifact(competition_exe);
     const competition_step = b.step("competition", "Emit IHP CMOS5L Tiny Tapeout 6x4 composition and witness");
     competition_step.dependOn(&competition_gen.step);
@@ -889,6 +909,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cluster_model_tests.step);
     verify_step.dependOn(&run_cluster_model_tests.step);
     verify_step.dependOn(cluster_diff_step);
+    const run_chip_tests = b.addRunArtifact(chip_tests);
+    test_step.dependOn(&run_chip_tests.step);
+    verify_step.dependOn(&run_chip_tests.step);
+    verify_step.dependOn(chip_test_step);
     const zio_tests = b.addTest(.{ .root_module = zio_wit_exe.root_module });
     const run_zio_tests = b.addRunArtifact(zio_tests);
     test_step.dependOn(&run_zio_tests.step);

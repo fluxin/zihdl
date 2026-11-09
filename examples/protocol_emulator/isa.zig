@@ -306,6 +306,21 @@ pub fn movInv(dest: MovDest, src: MovSrc, delay: u16) Instruction {
     return encode(.MOV, .{ .src = src, .dest = dest, .op = .INVERT }, delay);
 }
 
+/// Program placed at word `base`: JMP targets move by `base`, nothing else
+/// changes. Programs are assembled at address 0.
+pub fn relocate(alloc: std.mem.Allocator, program: []const u32, base: u8) ![]u32 {
+    const out_words = try alloc.alloc(u32, program.len);
+    for (program, out_words) |word, *moved| {
+        moved.* = word;
+        if (decode(word)) |d| if (d == .JMP) {
+            var j = d.JMP;
+            j.target = std.math.add(u8, j.target, base) catch return error.RelocationOverflow;
+            moved.* = encode(.JMP, j, Instruction.fromU32(word).delay).toU32();
+        };
+    }
+    return out_words;
+}
+
 // -------------------------------------------------------------------------
 // Reference document
 // -------------------------------------------------------------------------

@@ -136,4 +136,5 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = cluster_model;
+    _ = @import("zio_chip.zig");
 }
