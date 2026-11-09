@@ -163,6 +163,12 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     wrote_section = false;
     for (module.scope.symbols.items) |sym| {
         if (sym.kind != .mem or sym.dead) continue;
+        switch (sym.storage) {
+            .any => {},
+            .registers => try render.appendStr(out, allocator, "    (* ram_style = \"logic\" *)\n"),
+            .latches => try render.appendStr(out, allocator, "    (* ram_style = \"latch\" *)\n"),
+            .macro => try render.appendStr(out, allocator, "    (* ram_style = \"block\" *)\n"),
+        }
         if (sym.is_signed) {
             if (sym.width == 1) {
                 try render.appendFmt(out, allocator, "    reg signed {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });

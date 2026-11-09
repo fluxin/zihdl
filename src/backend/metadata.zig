@@ -143,7 +143,7 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
 
     try j.objectField("memories");
     try j.beginArray();
-    for (module.scope.symbols.items) |sym| {
+    for (module.scope.symbols.items, 0..) |sym, sym_idx| {
         if (sym.kind != .mem) continue;
         try j.beginObject();
         try j.objectField("name");
@@ -160,6 +160,13 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(@tagName(sym.read_kind));
         try j.objectField("write");
         try j.write(@tagName(sym.write_mode));
+        try j.objectField("storage");
+        try j.write(@tagName(sym.storage));
+        const ports = try ir.memoryPorts(allocator, module, @intCast(sym_idx));
+        try j.objectField("read_ports");
+        try j.write(ports.reads);
+        try j.objectField("write_ports");
+        try j.write(ports.writes);
         try j.objectField("init_file");
         try j.write(sym.init_file);
         try j.endObject();

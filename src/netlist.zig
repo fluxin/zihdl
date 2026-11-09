@@ -33,8 +33,22 @@ pub const SymbolKind = enum {
 pub const ReadKind = enum { comb, sync };
 pub const WriteMode = enum { read_first, write_first, no_change };
 
+/// Physical storage intent for a memory. The emitted RTL stays behavioral;
+/// the intent is metadata (`design.json`) plus a `ram_style` attribute so a
+/// physical tool can keep registers as an array, use latches, or bind a macro.
+pub const MemStorage = enum {
+    /// The implementation tool chooses.
+    any,
+    /// Flip-flops with one read mux per read port.
+    registers,
+    latches,
+    /// A hard macro from the target's macro catalog.
+    macro,
+};
+
 pub const MemOpts = struct {
     read: ReadKind = .comb,
+    storage: MemStorage = .any,
     write_mode: WriteMode = .read_first,
     init_file: ?[]const u8 = null,
     /// Declares the memory signed: the emitted memory and every `memRead`
@@ -54,6 +68,7 @@ pub const Symbol = struct {
     is_signed: bool = false,
     read_kind: ReadKind = .comb,
     write_mode: WriteMode = .read_first,
+    storage: MemStorage = .any,
     init_file: ?[]const u8 = null,
     /// Elaboration reached no live reader or driver; backends may omit it.
     dead: bool = false,
@@ -1675,6 +1690,88 @@ fn collectSelectBase(alloc: std.mem.Allocator, base: SelectBase, list: *std.Arra
     }
 }
 
+/// Access ports of one memory: each distinct read address expression is a
+/// read port and each distinct write address expression a write port.
+pub const MemPorts = struct { reads: usize = 0, writes: usize = 0 };
+
+/// `mem` is the memory's symbol index in `module`'s scope.
+pub fn memoryPorts(alloc: std.mem.Allocator, module: *const Module, mem: u32) !MemPorts {
+    var reads = std.ArrayList(*const AnyExpr).empty;
+    defer reads.deinit(alloc);
+    var writes = std.ArrayList(*const AnyExpr).empty;
+    defer writes.deinit(alloc);
+    for (module.assigns) |a| try collectMemReads(alloc, &a.src, mem, &reads);
+    for (module.processes) |p| try collectMemAccesses(alloc, p.stmts, mem, &reads, &writes);
+    return .{ .reads = reads.items.len, .writes = writes.items.len };
+}
+
+fn addUniqueExpr(alloc: std.mem.Allocator, list: *std.ArrayList(*const AnyExpr), e: *const AnyExpr) !void {
+    for (list.items) |old| if (exprEql(old, e)) return;
+    try list.append(alloc, e);
+}
+
+fn collectMemReads(alloc: std.mem.Allocator, expr: *const AnyExpr, mem: u32, list: *std.ArrayList(*const AnyExpr)) error{OutOfMemory}!void {
+    switch (expr.node) {
+        .ref, .lit => {},
+        .bit => |b| if (b.base == .expr) try collectMemReads(alloc, b.base.expr, mem, list),
+        .bit_dyn => |b| {
+            if (b.base == .expr) try collectMemReads(alloc, b.base.expr, mem, list);
+            try collectMemReads(alloc, b.index, mem, list);
+        },
+        .slice => |s| if (s.base == .expr) try collectMemReads(alloc, s.base.expr, mem, list),
+        .concat => |items| for (items) |*item| try collectMemReads(alloc, item, mem, list),
+        .mem_read => |mr| {
+            if (mr.mem.idx == mem) try addUniqueExpr(alloc, list, mr.addr);
+            try collectMemReads(alloc, mr.addr, mem, list);
+        },
+        .not, .bit_not, .neg, .sext, .zext, .trunc, .reduce_and, .reduce_or, .reduce_xor => |n| try collectMemReads(alloc, n, mem, list),
+        .replicate => |r| try collectMemReads(alloc, r.base, mem, list),
+        .bin_op => |bo| {
+            try collectMemReads(alloc, bo.lhs, mem, list);
+            try collectMemReads(alloc, bo.rhs, mem, list);
+        },
+        .ternary => |t| {
+            try collectMemReads(alloc, t.cond, mem, list);
+            try collectMemReads(alloc, t.then_e, mem, list);
+            try collectMemReads(alloc, t.else_e, mem, list);
+        },
+    }
+}
+
+fn collectMemAccesses(alloc: std.mem.Allocator, stmts: []const Stmt, mem: u32, reads: *std.ArrayList(*const AnyExpr), writes: *std.ArrayList(*const AnyExpr)) !void {
+    for (stmts) |*stmt| {
+        switch (stmt.*) {
+            .nop => {},
+            .assert_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
+            .assume_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
+            .cover_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
+            .assign => |*a| try collectMemReads(alloc, &a.src, mem, reads),
+            .slice_assign => |*a| try collectMemReads(alloc, &a.src, mem, reads),
+            .mem_write => |*a| {
+                if (a.mem.idx == mem) try addUniqueExpr(alloc, writes, &a.addr);
+                try collectMemReads(alloc, &a.addr, mem, reads);
+                try collectMemReads(alloc, &a.src, mem, reads);
+            },
+            .mem_write_bytes => |*a| {
+                if (a.mem.idx == mem) try addUniqueExpr(alloc, writes, &a.addr);
+                try collectMemReads(alloc, &a.addr, mem, reads);
+                try collectMemReads(alloc, &a.src, mem, reads);
+                try collectMemReads(alloc, &a.be, mem, reads);
+            },
+            .if_then => |*it| {
+                try collectMemReads(alloc, &it.cond, mem, reads);
+                try collectMemAccesses(alloc, it.then_stmts, mem, reads, writes);
+                try collectMemAccesses(alloc, it.else_stmts, mem, reads, writes);
+            },
+            .case_block => |*cb| {
+                try collectMemReads(alloc, &cb.sel, mem, reads);
+                for (cb.cases) |c| try collectMemAccesses(alloc, c.stmts, mem, reads, writes);
+                try collectMemAccesses(alloc, cb.default_stmts, mem, reads, writes);
+            },
+        }
+    }
+}
+
 /// Symbols read by a statement list (conditions, addresses, data).
 pub fn collectStmtReads(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std.ArrayList(SymRef)) !void {
     for (stmts) |stmt| {
@@ -2777,6 +2874,7 @@ pub const ModuleBuilder = struct {
         const ref = try self.scope.add(.mem, name, W, 0, depth);
         self.scope.symbols.items[ref.idx].read_kind = opts.read;
         self.scope.symbols.items[ref.idx].write_mode = opts.write_mode;
+        self.scope.symbols.items[ref.idx].storage = opts.storage;
         self.scope.symbols.items[ref.idx].init_file = opts.init_file;
         self.scope.symbols.items[ref.idx].is_signed = opts.signed;
         return .{ .ref = ref, .depth = depth };
@@ -3026,7 +3124,13 @@ pub const ModuleBuilder = struct {
     /// Simple synchronous read port: `rdata <= mem[addr]` when `en`.
     pub fn syncRead(self: *ModuleBuilder, memory: anytype, domain: ClockDomain, en: anytype, addr: anytype) !Signal(valWidth(@TypeOf(memory))) {
         const W = comptime valWidth(@TypeOf(memory));
-        const rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
+        // Each registered read is its own port; the first keeps `<mem>_rdata`
+        // and later ports of the same memory are numbered.
+        var rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
+        var port: usize = 1;
+        while (self.scope.find(rname) != null) : (port += 1) {
+            rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata{d}", .{ memory.ref.name(), port });
+        }
         const rdata = try self.reg(rname, W, 0);
         const b = self.exprs();
         try self.seq(domain, &.{
@@ -3047,7 +3151,13 @@ pub const ModuleBuilder = struct {
         wdata: anytype,
     ) !Signal(valWidth(@TypeOf(memory))) {
         const W = comptime valWidth(@TypeOf(memory));
-        const rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
+        // Each registered read is its own port; the first keeps `<mem>_rdata`
+        // and later ports of the same memory are numbered.
+        var rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
+        var port: usize = 1;
+        while (self.scope.find(rname) != null) : (port += 1) {
+            rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata{d}", .{ memory.ref.name(), port });
+        }
         const rdata = try self.reg(rname, W, 0);
         const b = self.exprs();
         const collision = b.and_(we, b.eq(waddr, addr));

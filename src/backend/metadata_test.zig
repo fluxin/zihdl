@@ -354,3 +354,41 @@ test "design.json records resolved structural shapes on instances" {
     try std.testing.expect(!narrow[1].object.get("value").?.bool);
     try std.testing.expectEqualStrings("fast", narrow[2].object.get("value").?.string);
 }
+
+test "design.json records memory storage intent and access ports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const verilog = @import("verilog.zig");
+
+    // A shared program memory in registers: one host write port and three
+    // registered read ports, as one read per state machine would declare.
+    const Shared = struct {
+        pub const name = "shared_program";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), we: Signal(1), waddr: Signal(6), wdata: Signal(32), pc0: Signal(6), pc1: Signal(6), pc2: Signal(6) };
+        pub const Outputs = struct { i0: Signal(32), i1: Signal(32), i2: Signal(32) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const b = mb.exprs();
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+            const program = try mb.mem(32, "program", 64, .{ .storage = .registers });
+            try mb.seq(domain, &.{b.when(ins.we, &.{b.memWrite(program, ins.waddr, ins.wdata)}, &.{})});
+            try mb.assign(outs.i0, try mb.syncRead(program, domain, 1, ins.pc0));
+            try mb.assign(outs.i1, try mb.syncRead(program, domain, 1, ins.pc1));
+            try mb.assign(outs.i2, try mb.syncRead(program, domain, 1, ins.pc2));
+        }
+    };
+    var design = Design.init(alloc);
+    _ = try design.elaborate(Shared);
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"storage\": \"registers\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"read_ports\": 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"write_ports\": 1") != null);
+    const v = try verilog.emitDesign(alloc, &design, .{});
+    const attr = std.mem.indexOf(u8, v, "(* ram_style = \"logic\" *)").?;
+    const decl = std.mem.indexOf(u8, v, "program [0:63];").?;
+    try std.testing.expect(attr < decl);
+    // Three registered read ports, uniquely named.
+    try std.testing.expect(std.mem.indexOf(u8, v, "program_rdata2") != null);
+}
