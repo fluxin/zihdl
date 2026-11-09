@@ -1174,7 +1174,7 @@ test "comptime integers adopt context widths" {
             sum: Signal(8),
             is_zero: Signal(1),
             pick: Signal(8),
-            small: Signal(4),
+            narrow: Signal(4),
             flag: Signal(1),
             shifted: Signal(8),
             masked: Signal(8),
@@ -1186,7 +1186,7 @@ test "comptime integers adopt context widths" {
             try mb.assign(outs.sum, b.add(ins.a, 1));
             try mb.assign(outs.is_zero, b.eq(ins.a, 0));
             try mb.assign(outs.pick, b.ternary(ins.choose, 0, ins.a));
-            try mb.assign(outs.small, 0);
+            try mb.assign(outs.narrow, 0);
             try mb.assign(outs.flag, b.lt(ins.b, 8));
             try mb.assign(outs.shifted, b.shr(ins.a, 2));
             try mb.assign(outs.masked, b.band(ins.a, 0xFF));
@@ -1205,7 +1205,7 @@ test "comptime integers adopt context widths" {
     try std.testing.expect(std.mem.indexOf(u8, v, "assign sum = (a + 8'd1);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign is_zero = (a == 8'd0);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign pick = (choose ? 8'd0 : a);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "assign small = 4'd0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "assign narrow = 4'd0;") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign flag = (b < 4'd8);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign shifted = (a >> 3'd2);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign masked = (a & 8'd255);") != null);
@@ -1892,4 +1892,23 @@ test "signed memories emit signed declarations and signed reads" {
     try std.testing.expect(std.mem.indexOf(u8, v, "reg signed [7:0]  ram [0:3];") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "assign dout = $signed(ram[addr]);") != null);
     try std.testing.expect(std.mem.indexOf(u8, v, "ram[addr] <= $signed(wdata);") != null);
+}
+
+test "a reserved keyword cannot name a signal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const K = struct {
+        pub const name = "keyword_signal";
+        pub const Inputs = struct { clk: Signal(1) };
+        pub const Outputs = struct {};
+        pub fn build(mb: *ModuleBuilder) !void {
+            _ = try mb.declareInputs(Inputs);
+            _ = try mb.mem(32, "program", 4, .{});
+        }
+    };
+    var design = Design.init(arena.allocator());
+    const old_level = std.testing.log_level;
+    defer std.testing.log_level = old_level;
+    std.testing.log_level = .err;
+    try std.testing.expectError(error.ReservedIdentifier, design.elaborate(K));
 }

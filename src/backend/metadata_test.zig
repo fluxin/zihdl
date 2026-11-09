@@ -372,7 +372,7 @@ test "design.json records memory storage intent and access ports" {
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-            const program = try mb.mem(32, "program", 64, .{ .storage = .registers });
+            const program = try mb.mem(32, "program_mem", 64, .{ .storage = .registers });
             try mb.seq(domain, &.{b.when(ins.we, &.{b.memWrite(program, ins.waddr, ins.wdata)}, &.{})});
             try mb.assign(outs.i0, try mb.syncRead(program, domain, 1, ins.pc0));
             try mb.assign(outs.i1, try mb.syncRead(program, domain, 1, ins.pc1));
@@ -387,8 +387,8 @@ test "design.json records memory storage intent and access ports" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"write_ports\": 1") != null);
     const v = try verilog.emitDesign(alloc, &design, .{});
     const attr = std.mem.indexOf(u8, v, "(* ram_style = \"logic\" *)").?;
-    const decl = std.mem.indexOf(u8, v, "program [0:63];").?;
+    const decl = std.mem.indexOf(u8, v, "program_mem [0:63];").?;
     try std.testing.expect(attr < decl);
     // Three registered read ports, uniquely named.
-    try std.testing.expect(std.mem.indexOf(u8, v, "program_rdata2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "program_mem_rdata2") != null);
 }

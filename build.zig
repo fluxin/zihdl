@@ -442,6 +442,26 @@ pub fn build(b: *std.Build) void {
     const zio_diff_step = b.step("zio-diff", "Randomized cycle-by-cycle comparison of the ZIO core RTL against the reference model");
     zio_diff_step.dependOn(&zio_diff_run.step);
     const zio_model_tests = b.addTest(.{ .root_module = zio_diff_exe.root_module });
+    const cluster_diff_exe = b.addExecutable(.{
+        .name = "zio_cluster_diff",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/zio_cluster_diff.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const cluster_diff_gen = b.addRunArtifact(cluster_diff_exe);
+    const cluster_diff_compile = b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", "zio_cluster_4x64_vectors_tb", "-o", "out/zio_cluster_diff_iv", "out/zio_cluster.v", "out/zio_cluster_diff_tb.v" });
+    cluster_diff_compile.step.dependOn(&cluster_diff_gen.step);
+    const cluster_diff_run = b.addSystemCommand(&.{ "vvp", "out/zio_cluster_diff_iv" });
+    cluster_diff_run.step.dependOn(&cluster_diff_compile.step);
+    const cluster_diff_step = b.step("zio-cluster-diff", "Randomized cycle-by-cycle comparison of the four-machine cluster RTL against its model");
+    cluster_diff_step.dependOn(&cluster_diff_run.step);
+    const cluster_lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "--top-module", "zio_cluster_4x64", "out/zio_cluster.v" });
+    cluster_lint.step.dependOn(&cluster_diff_gen.step);
+    cluster_diff_step.dependOn(&cluster_lint.step);
+    const cluster_model_tests = b.addTest(.{ .root_module = cluster_diff_exe.root_module });
     const competition_gen = b.addRunArtifact(competition_exe);
     const competition_step = b.step("competition", "Emit IHP CMOS5L Tiny Tapeout 6x4 composition and witness");
     competition_step.dependOn(&competition_gen.step);
@@ -865,6 +885,10 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(&run_zio_model_tests.step);
     verify_step.dependOn(zio_diff_step);
     verify_step.dependOn(zio_core_step);
+    const run_cluster_model_tests = b.addRunArtifact(cluster_model_tests);
+    test_step.dependOn(&run_cluster_model_tests.step);
+    verify_step.dependOn(&run_cluster_model_tests.step);
+    verify_step.dependOn(cluster_diff_step);
     const zio_tests = b.addTest(.{ .root_module = zio_wit_exe.root_module });
     const run_zio_tests = b.addRunArtifact(zio_tests);
     test_step.dependOn(&run_zio_tests.step);

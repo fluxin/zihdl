@@ -21,7 +21,7 @@ const Rng = std.Random.DefaultPrng;
 
 /// A random valid instruction: enum fields take declared tags, ruled fields
 /// stay in range, reserved fields stay zero.
-fn randomValid(r: std.Random) u32 {
+pub fn randomValid(r: std.Random) u32 {
     const op_names = @typeInfo(isa.Opcode).@"enum".field_names;
     const pick = r.uintLessThan(usize, op_names.len);
     inline for (op_names, 0..) |name, i| if (i == pick) {
@@ -77,7 +77,7 @@ pub const ZioDiffTop = struct {
         const outs = try mb.declareOutputs(Outputs);
         const b = mb.exprs();
         const domain = zihdl.netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-        const program = try mb.mem(32, "program", runs * program_words, .{ .init_file = "out/zio_diff_program.hex" });
+        const program = try mb.mem(32, "program_mem", runs * program_words, .{ .init_file = "out/zio_diff_program.hex" });
         const pc = try mb.wire("fetch_pc", 8);
         const inst = try mb.syncRead(program, domain, 1, b.concat(.{ ins.run, pc }));
         _ = try mb.instantiate(core.ZioTimingUnitBlock, "u_core", .{
@@ -234,4 +234,5 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = model;
     _ = isa;
+    _ = @import("zio_cluster.zig");
 }
