@@ -573,24 +573,24 @@ module zio_timing_unit_x16_f16 (
 );
 
     wire [3:0]  tmp0;
-    wire [31:0]  tmp1;
+    wire [4:0]  tmp1;
     wire [31:0]  tmp2;
     wire [31:0]  tmp3;
-    wire [7:0]  tmp4;
-    wire        tmp5;
+    wire [31:0]  tmp4;
+    wire [7:0]  tmp5;
     wire        tmp6;
     wire        tmp7;
     wire        tmp8;
     wire        tmp9;
     wire        tmp10;
     wire        tmp11;
-    wire [15:0]  tmp12;
-    wire        tmp13;
+    wire        tmp12;
+    wire [15:0]  tmp13;
     wire        tmp14;
     wire        tmp15;
-    wire [4:0]  tmp16;
-    wire        tmp17;
-    wire [5:0]  tmp18;
+    wire        tmp16;
+    wire [4:0]  tmp17;
+    wire        tmp18;
     wire [31:0]  tmp19;
     wire [31:0]  tmp20;
     wire [3:0]  tmp21;
@@ -616,35 +616,35 @@ module zio_timing_unit_x16_f16 (
     reg [31:0]  tx_fifo [0:15];
 
     assign tmp0 = (pin_in >> inst[19:16]);
-    assign tmp1 = (tmp17 ? tmp20 : osr);
-    assign tmp2 = (tmp1 & ((32'd1 << tmp16) - 32'd1));
-    assign tmp3 = (inst[22] ? (~((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr)))))) : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr))))));
-    assign tmp4 = ((((!ir_valid) || (halt || tmp9)) || tmp10) ? pc_exec : (((inst[31:28] == 4'd0) && ((inst[26:24] == 3'd0) || (((inst[26:24] == 3'd1) && (x_reg == 16'd0)) || (tmp13 || (((inst[26:24] == 3'd3) && (y_reg == 16'd0)) || (tmp14 || (((inst[26:24] == 3'd5) && pin_in[0]) || ((inst[26:24] == 3'd6) && ((osr_cnt != 6'd0) || (!tmp6)))))))))) ? inst[23:16] : (pc_exec + 8'd1)));
-    assign tmp5 = (fifo_cnt == 5'd16);
-    assign tmp6 = (fifo_cnt == 5'd0);
-    assign tmp7 = (tx_we && (!tmp5));
-    assign tmp8 = ((((running && (!(((!ir_valid) || (halt || tmp9)) || tmp10))) && ((!ctrl_start) && (!ctrl_stop))) && tmp11) && ((!tmp6) && (tmp15 || (inst[31:28] == 4'd5))));
-    assign tmp9 = (delay_cnt > 16'd0);
-    assign tmp10 = ((((((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4)))) && (inst[27:26] == 2'd2)) && (!tmp0[0])) || ((((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4)))) && (inst[27:26] == 2'd1)) && tmp0[0])) || (((inst[31:28] == 4'd5) && inst[16]) && tmp6));
-    assign tmp11 = (((inst[31:28] == 4'd7) && (inst[23:21] <= 3'd3)) || (((inst[31:28] == 4'd0) && (inst[26:24] <= 3'd6)) || (((inst[31:28] == 4'd3) && (((inst[23:21] == 3'd0) || ((inst[23:21] == 3'd2) || (inst[23:21] == 3'd4))) && ((tmp18 >= 6'd1) && (tmp18 <= 6'd16)))) || (((inst[31:28] == 4'd2) && ((inst[23:21] == 3'd0) && (inst[20:16] == 5'd4))) || ((inst[31:28] == 4'd5) || (((inst[31:28] == 4'd6) && ((inst[21:19] <= 3'd5) && (inst[18:16] <= 3'd5))) || ((inst[31:28] == 4'd1) && ((inst[27:26] <= 2'd2) && ((inst[27:26] == 2'd0) || (inst[19:16] < 4'd4))))))))));
-    assign tmp12 = {{11{1'b0}}, inst[20:16]};
-    assign tmp13 = ((inst[26:24] == 3'd2) && (!(x_reg == 16'd0)));
-    assign tmp14 = ((inst[26:24] == 3'd4) && (!(y_reg == 16'd0)));
-    assign tmp15 = ((((running && (!(((!ir_valid) || (halt || tmp9)) || tmp10))) && ((!ctrl_start) && (!ctrl_stop))) && (inst[31:28] == 4'd3)) && tmp17);
-    assign tmp16 = ((inst[20:16] == 5'd0) ? 5'd16 : inst[20:16]);
-    assign tmp17 = (osr_cnt == 6'd0);
-    assign tmp18 = {{1{1'b0}}, tmp16};
+    assign tmp1 = inst[20:16];
+    assign tmp2 = (tmp18 ? tmp20 : osr);
+    assign tmp3 = (tmp2 & ((32'd1 << tmp17) - 32'd1));
+    assign tmp4 = ((inst[22:22] == 1'b1) ? (~((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr)))))) : ((inst[18:16] == 3'd0) ? {{28{1'b0}}, pin_in} : ((inst[18:16] == 3'd1) ? {{16{1'b0}}, x_reg} : ((inst[18:16] == 3'd2) ? {{16{1'b0}}, y_reg} : ((inst[18:16] == 3'd3) ? 32'd0 : ((inst[18:16] == 3'd4) ? isr : osr))))));
+    assign tmp5 = ((((!ir_valid) || (halt || tmp10)) || tmp11) ? pc_exec : (((inst[31:28] == 4'd0) && ((inst[26:24] == 3'd0) || (((inst[26:24] == 3'd1) && (x_reg == 16'd0)) || (tmp14 || (((inst[26:24] == 3'd3) && (y_reg == 16'd0)) || (tmp15 || (((inst[26:24] == 3'd5) && pin_in[0]) || ((inst[26:24] == 3'd6) && ((osr_cnt != 6'd0) || (!tmp7)))))))))) ? inst[23:16] : (pc_exec + 8'd1)));
+    assign tmp6 = (fifo_cnt == 5'd16);
+    assign tmp7 = (fifo_cnt == 5'd0);
+    assign tmp8 = (tx_we && (!tmp6));
+    assign tmp9 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && tmp12) && ((!tmp7) && (tmp16 || (inst[31:28] == 4'd5))));
+    assign tmp10 = (delay_cnt > 16'd0);
+    assign tmp11 = ((((((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3))))) && (inst[27:26] == 2'd2)) && (!tmp0[0])) || ((((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3))))) && (inst[27:26] == 2'd1)) && tmp0[0])) || (((inst[31:28] == 4'd5) && inst[16:16]) && tmp7));
+    assign tmp12 = (((((((1'b0 || ((inst[31:28] == 4'd0) && (1'b1 && (inst[26:24] <= 3'd6)))) || ((inst[31:28] == 4'd1) && ((1'b1 && (inst[27:26] <= 2'd2)) && ((inst[27:26] == 2'd0) || (1'b1 && (inst[19:16] <= 4'd3)))))) || ((inst[31:28] == 4'd2) && ((1'b1 && (inst[23:21] <= 3'd0)) && ((tmp1 >= 5'd4) && (tmp1 <= 5'd4))))) || ((inst[31:28] == 4'd3) && ((1'b1 && (((1'b0 || (inst[23:21] == 3'd0)) || (inst[23:21] == 3'd2)) || (inst[23:21] == 3'd4))) && (1'b1 && (tmp1 <= 5'd16))))) || ((inst[31:28] == 4'd5) && 1'b1)) || ((inst[31:28] == 4'd6) && (((1'b1 && (inst[18:16] <= 3'd5)) && (inst[21:19] <= 3'd5)) && 1'b1))) || ((inst[31:28] == 4'd7) && (1'b1 && (inst[23:21] <= 3'd3))));
+    assign tmp13 = {{11{1'b0}}, tmp1};
+    assign tmp14 = ((inst[26:24] == 3'd2) && (!(x_reg == 16'd0)));
+    assign tmp15 = ((inst[26:24] == 3'd4) && (!(y_reg == 16'd0)));
+    assign tmp16 = ((((running && (!(((!ir_valid) || (halt || tmp10)) || tmp11))) && ((!ctrl_start) && (!ctrl_stop))) && (inst[31:28] == 4'd3)) && tmp18);
+    assign tmp17 = ((tmp1 == 5'd0) ? 5'd16 : tmp1);
+    assign tmp18 = (osr_cnt == 6'd0);
     assign tmp19 = {isr[27:0], pin_in};
     assign tmp20 = tx_fifo[fifo_rd];
-    assign tmp21 = tmp3[3:0];
-    assign tmp22 = tmp3[15:0];
+    assign tmp21 = tmp4[3:0];
+    assign tmp22 = tmp4[15:0];
 
-    assign pc = tmp4;
+    assign pc = tmp5;
     assign core_running = running;
     assign op_fault = fault;
     assign fetch = (running && (!halt));
-    assign tx_full = tmp5;
-    assign tx_empty = tmp6;
+    assign tx_full = tmp6;
+    assign tx_empty = tmp7;
     assign underrun = underrun_r;
 
     always @(posedge clk or negedge rst_n) begin
@@ -671,14 +671,14 @@ module zio_timing_unit_x16_f16 (
             underrun_r <= 1'b0;
         end else begin
             rx_we <= 1'b0;
-            fifo_cnt <= ((fifo_cnt + {{4{1'b0}}, tmp7}) - {{4{1'b0}}, tmp8});
-            if (tmp7) begin
+            fifo_cnt <= ((fifo_cnt + {{4{1'b0}}, tmp8}) - {{4{1'b0}}, tmp9});
+            if (tmp8) begin
                 tx_fifo[fifo_wr] <= tx_wdata;
             end
-            if (tmp7) begin
+            if (tmp8) begin
                 fifo_wr <= (fifo_wr + 4'd1);
             end
-            if (tmp8) begin
+            if (tmp9) begin
                 fifo_rd <= (fifo_rd + 4'd1);
             end
             if ((ctrl_start == 1'b1)) begin
@@ -697,19 +697,19 @@ module zio_timing_unit_x16_f16 (
                     running <= 1'b0;
                 end else begin
                     if (running) begin
-                        pc_exec <= tmp4;
+                        pc_exec <= tmp5;
                         if ((ir_valid == 1'b0)) begin
                             ir_valid <= 1'b1;
                         end else begin
-                            if (tmp9) begin
+                            if (tmp10) begin
                                 delay_cnt <= (delay_cnt - 16'd1);
                             end else begin
-                                if (tmp10) begin
+                                if (tmp11) begin
                                 end else begin
                                     if (halt) begin
                                     end else begin
                                         delay_cnt <= inst[15:0];
-                                        if ((!tmp11)) begin
+                                        if ((!tmp12)) begin
                                             halt <= 1'b1;
                                             running <= 1'b0;
                                             fault <= 1'b1;
@@ -718,54 +718,54 @@ module zio_timing_unit_x16_f16 (
                                                 7: begin
                                                     case (inst[23:21])
                                                         0: begin
-                                                            pin_out <= inst[19:16];
+                                                            pin_out <= tmp1[3:0];
                                                         end
                                                         1: begin
-                                                            pin_oe <= inst[19:16];
+                                                            pin_oe <= tmp1[3:0];
                                                         end
                                                         2: begin
-                                                            x_reg <= tmp12;
+                                                            x_reg <= tmp13;
                                                         end
                                                         3: begin
-                                                            y_reg <= tmp12;
+                                                            y_reg <= tmp13;
                                                         end
                                                     endcase
                                                 end
                                                 0: begin
-                                                    if (tmp13) begin
+                                                    if (tmp14) begin
                                                         x_reg <= (x_reg - 16'd1);
                                                     end
-                                                    if (tmp14) begin
+                                                    if (tmp15) begin
                                                         y_reg <= (y_reg - 16'd1);
                                                     end
                                                 end
                                                 3: begin
-                                                    if ((tmp15 && tmp6)) begin
+                                                    if ((tmp16 && tmp7)) begin
                                                         underrun_r <= 1'b1;
                                                     end else begin
                                                         case (inst[23:21])
                                                             0: begin
-                                                                if ((5'd0 < tmp16)) begin
-                                                                    pin_out[0:0] <= tmp1[0];
+                                                                if ((5'd0 < tmp17)) begin
+                                                                    pin_out[0:0] <= tmp2[0];
                                                                 end
-                                                                if ((5'd1 < tmp16)) begin
-                                                                    pin_out[1:1] <= tmp1[1];
+                                                                if ((5'd1 < tmp17)) begin
+                                                                    pin_out[1:1] <= tmp2[1];
                                                                 end
-                                                                if ((5'd2 < tmp16)) begin
-                                                                    pin_out[2:2] <= tmp1[2];
+                                                                if ((5'd2 < tmp17)) begin
+                                                                    pin_out[2:2] <= tmp2[2];
                                                                 end
-                                                                if ((5'd3 < tmp16)) begin
-                                                                    pin_out[3:3] <= tmp1[3];
+                                                                if ((5'd3 < tmp17)) begin
+                                                                    pin_out[3:3] <= tmp2[3];
                                                                 end
                                                             end
                                                             2: begin
-                                                                x_reg <= tmp2[15:0];
+                                                                x_reg <= tmp3[15:0];
                                                             end
                                                             4: begin
                                                             end
                                                         endcase
-                                                        osr <= (tmp1 >> tmp16);
-                                                        osr_cnt <= ((tmp17 ? 6'd32 : osr_cnt) - tmp18);
+                                                        osr <= (tmp2 >> tmp17);
+                                                        osr_cnt <= ((tmp18 ? 6'd32 : osr_cnt) - {{1{1'b0}}, tmp17});
                                                     end
                                                 end
                                                 2: begin
@@ -777,8 +777,8 @@ module zio_timing_unit_x16_f16 (
                                                     end
                                                 end
                                                 5: begin
-                                                    if (tmp6) begin
-                                                        if ((!inst[16])) begin
+                                                    if (tmp7) begin
+                                                        if ((!inst[16:16])) begin
                                                             underrun_r <= 1'b1;
                                                         end
                                                     end else begin
@@ -801,10 +801,10 @@ module zio_timing_unit_x16_f16 (
                                                             y_reg <= tmp22;
                                                         end
                                                         4: begin
-                                                            isr <= tmp3;
+                                                            isr <= tmp4;
                                                         end
                                                         5: begin
-                                                            osr <= tmp3;
+                                                            osr <= tmp4;
                                                         end
                                                     endcase
                                                 end

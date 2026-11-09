@@ -410,6 +410,15 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const isa_doc_exe = b.addExecutable(.{
+        .name = "zio_isa_doc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/protocol_emulator/isa_doc.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.step("isa-doc", "Write docs/zio-isa.md from the ZIO ISA table").dependOn(&b.addRunArtifact(isa_doc_exe).step);
     const competition_gen = b.addRunArtifact(competition_exe);
     const competition_step = b.step("competition", "Emit IHP CMOS5L Tiny Tapeout 6x4 composition and witness");
     competition_step.dependOn(&competition_gen.step);

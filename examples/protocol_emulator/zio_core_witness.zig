@@ -100,7 +100,8 @@ fn schedule(a: std.mem.Allocator) ![]u8 {
     try row(&w, .{ .running = 0, .tx_we = 1, .tx_word = 0x1234567F, .empty = 0 });
     try row(&w, .{ .start = 1, .empty = 0 });
     try row(&w, .{ .empty = 0 });
-    try row(&w, .{ .inst = isa.out(.EXEC, 4, 0).toU32(), .running = 0, .fault = 1, .empty = 0 });
+    // OUT target 6 is not an implemented target.
+    try row(&w, .{ .inst = (isa.Instruction{ .op = .OUT, .data = (6 << 5) | 4, .delay = 0 }).toU32(), .running = 0, .fault = 1, .empty = 0 });
     try row(&w, .{ .start = 1, .empty = 0 });
     try row(&w, .{ .empty = 0 });
     try row(&w, .{ .inst = isa.pull(true, 0).toU32(), .stop = 1, .running = 0, .empty = 0 });

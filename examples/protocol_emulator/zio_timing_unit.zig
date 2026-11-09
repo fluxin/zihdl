@@ -19,6 +19,48 @@ const Stmt = netlist.Stmt;
 const ModuleBuilder = netlist.ModuleBuilder;
 
 const isa = @import("isa.zig");
+const Expr = netlist.Expr;
+const ExprBuilder = netlist.ExprBuilder;
+
+/// Payload field `name` of `P`, sliced from `inst` at its ISA table offset.
+fn field(inst: Signal(32), comptime P: type, comptime name: []const u8) Expr(@bitSizeOf(@FieldType(P, name))) {
+    const bits = comptime isa.fieldBits(P, name);
+    return inst.slice(bits.hi, bits.lo);
+}
+
+/// Value is a declared tag of `E`: one comparator for a dense enum and no
+/// logic when every encoding is declared.
+fn declared(b: ExprBuilder, value: anytype, comptime E: type) Expr(1) {
+    const values = @typeInfo(E).@"enum".field_values;
+    const W = @bitSizeOf(@typeInfo(E).@"enum".tag_type);
+    comptime var dense = true;
+    inline for (values, 0..) |v, i| dense = dense and v == i;
+    if (dense and values.len == 1 << W) return b.lit(1, 1);
+    if (dense) return b.le(value, b.lit(W, values.len - 1));
+    var any = b.lit(1, 0);
+    inline for (values) |v| any = b.or_(any, b.eq(value, b.lit(W, v)));
+    return any;
+}
+
+/// Validity of payload `P` exactly as `isa.decode` defines it: every enum field
+/// holds a declared tag and every rule holds.
+fn payloadValid(b: ExprBuilder, inst: Signal(32), comptime P: type) Expr(1) {
+    var ok = b.lit(1, 1);
+    inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |name, T| {
+        if (@typeInfo(T) == .@"enum") ok = b.and_(ok, declared(b, field(inst, P, name), T));
+    }
+    inline for (P.rules) |rule| {
+        const W = @bitSizeOf(@FieldType(P, rule.field));
+        const v = field(inst, P, rule.field);
+        // Bounds at the ends of the field's range are vacuous and emit nothing.
+        const above = if (rule.min == 0) b.lit(1, 1) else b.ge(v, b.lit(W, rule.min));
+        const below = if (rule.max == (1 << W) - 1) b.lit(1, 1) else b.le(v, b.lit(W, rule.max));
+        var in_range = b.and_(above, below);
+        if (rule.unless) |u| in_range = b.or_(b.eq(field(inst, P, u.field), b.lit(@bitSizeOf(@FieldType(P, u.field)), u.value)), in_range);
+        ok = b.and_(ok, in_range);
+    }
+    return ok;
+}
 
 pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
     comptime {
@@ -83,29 +125,26 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             const fifo_cnt = try mb.reg("fifo_cnt", fifo_cnt_w, 0);
             const underrun_r = try mb.reg("underrun_r", 1, 0);
 
-            // Instruction fields (see isa.Instruction)
-            const op = ins.inst.slice(31, 28);
-            const set_target = ins.inst.slice(23, 21);
-            const set_val4 = ins.inst.slice(19, 16);
-            const set_val5 = ins.inst.slice(20, 16);
-            const jmp_cond = ins.inst.slice(26, 24);
-            const jmp_target = ins.inst.slice(23, 16);
-            const out_target = ins.inst.slice(23, 21);
-            const out_count_raw = ins.inst.slice(20, 16);
-            const in_source = ins.inst.slice(23, 21);
-            const in_count = ins.inst.slice(20, 16);
-            const mov_dest = ins.inst.slice(21, 19);
-            const mov_src = ins.inst.slice(18, 16);
-            const mov_inv = ins.inst.bit(22);
-            const wait_cond = ins.inst.slice(27, 26);
-            const pull_block = ins.inst.bit(16);
+            // Instruction fields, sliced at the ISA table's offsets.
+            const op = ins.inst.slice(isa.opcode_lsb + 3, isa.opcode_lsb);
+            const delay_field = ins.inst.slice(isa.payload_lsb - 1, 0);
+            const set_target = field(ins.inst, isa.Set, "target");
+            const set_val5 = field(ins.inst, isa.Set, "value");
+            const set_val4 = b.slice(set_val5, 3, 0);
+            const jmp_cond = field(ins.inst, isa.Jmp, "cond");
+            const jmp_target = field(ins.inst, isa.Jmp, "target");
+            const out_target = field(ins.inst, isa.Out, "target");
+            const out_count_raw = field(ins.inst, isa.Out, "count");
+            const mov_dest = field(ins.inst, isa.Mov, "dest");
+            const mov_src = field(ins.inst, isa.Mov, "src");
+            const mov_inv = b.eq(field(ins.inst, isa.Mov, "op"), b.lit(1, @backingInt(isa.MovOp.INVERT)));
+            const wait_cond = field(ins.inst, isa.Wait, "cond");
+            const wait_index = field(ins.inst, isa.Wait, "index");
+            const pull_block = field(ins.inst, isa.Pull, "block");
 
-            const is_set = b.eq(op, b.lit(4, @backingInt(isa.Opcode.SET)));
             const is_jmp = b.eq(op, b.lit(4, @backingInt(isa.Opcode.JMP)));
             const is_out = b.eq(op, b.lit(4, @backingInt(isa.Opcode.OUT)));
-            const is_in = b.eq(op, b.lit(4, @backingInt(isa.Opcode.IN)));
             const is_pull = b.eq(op, b.lit(4, @backingInt(isa.Opcode.PULL)));
-            const is_mov = b.eq(op, b.lit(4, @backingInt(isa.Opcode.MOV)));
             const is_wait = b.eq(op, b.lit(4, @backingInt(isa.Opcode.WAIT)));
 
             // FIFO status and the autopull source: OSR while it has bits, the
@@ -121,41 +160,21 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
             // Low `out_count` bits of the source, the value OUT writes to X.
             const out_mask = b.sub(b.shl(b.lit(32, 1), out_count_raw5), 1);
 
-            // Supported decode: any other opcode or field combination faults.
-            const set_ok = b.and_(is_set, b.le(set_target, b.lit(3, @backingInt(isa.SetTarget.Y))));
-            const out_target_ok = b.or_(
-                b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.PINS))),
-                b.or_(
-                    b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.X))),
-                    b.eq(out_target, b.lit(3, @backingInt(isa.OutTarget.NULL))),
-                ),
-            );
-            const out_ok = b.and_(is_out, b.and_(
-                out_target_ok,
-                b.and_(b.ge(out_count, 1), b.le(out_count, 16)),
-            ));
-            const in_ok = b.and_(is_in, b.and_(b.eq(in_source, b.lit(3, @backingInt(isa.InSource.PINS))), b.eq(in_count, 4)));
-            const wait_ok = b.and_(is_wait, b.and_(
-                b.le(wait_cond, b.lit(2, @backingInt(isa.WaitCondition.PIN_HIGH))),
-                b.or_(b.eq(wait_cond, 0), b.lt(ins.inst.slice(19, 16), 4)),
-            ));
-            const decode_ok = b.or_(
-                set_ok,
-                b.or_(
-                    b.and_(is_jmp, b.le(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.OSR_NOT_FULL)))),
-                    b.or_(
-                        out_ok,
-                        b.or_(in_ok, b.or_(is_pull, b.or_(b.and_(is_mov, b.and_(b.le(mov_dest, b.lit(3, @backingInt(isa.MovDest.OSR))), b.le(mov_src, b.lit(3, @backingInt(isa.MovSrc.OSR))))), wait_ok))),
-                    ),
-                ),
-            );
+            // Supported decode, generated from the ISA table: any other opcode
+            // or field combination faults.
+            const wait_ok = b.and_(is_wait, payloadValid(b, ins.inst, isa.Wait));
+            var decode_ok = b.lit(1, 0);
+            inline for (@typeInfo(isa.Opcode).@"enum".field_names, @typeInfo(isa.Opcode).@"enum".field_values) |opcode_name, opcode_value| {
+                const is_op = b.eq(op, b.lit(4, opcode_value));
+                decode_ok = b.or_(decode_ok, b.and_(is_op, payloadValid(b, ins.inst, isa.Payload(@field(isa.Opcode, opcode_name)))));
+            }
 
             // Branch resolution is combinational from the executing
             // instruction, so the fetch address redirects in the same cycle.
             const x_zero = b.eq(x_reg.expr(), 0);
             const y_zero = b.eq(y_reg.expr(), 0);
             const pin_high = b.bit(ins.pin_in, 0);
-            const wait_pin = b.bit(b.shr(ins.pin_in, ins.inst.slice(19, 16)), 0);
+            const wait_pin = b.bit(b.shr(ins.pin_in, wait_index), 0);
             const data_avail = b.or_(b.ne(osr_cnt.expr(), 0), b.not(fifo_empty));
             const x_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.X_DEC))), b.not(x_zero));
             const y_dec_taken = b.and_(b.eq(jmp_cond, b.lit(3, @backingInt(isa.JmpCondition.Y_DEC))), b.not(y_zero));
@@ -370,7 +389,7 @@ pub fn ZioTimingUnit(comptime x_bits: usize, comptime fifo_depth: usize) type {
                                 }, &.{
                                     b.when(b.or_(wait_pin_blocked, pull_blocked), &.{}, &.{
                                         b.when(halt.expr(), &.{}, &.{
-                                            b.assign(delay_cnt, ins.inst.slice(15, 0)),
+                                            b.assign(delay_cnt, delay_field),
                                             b.when(b.not(decode_ok), &.{
                                                 b.assign(halt, 1),
                                                 b.assign(running, 0),

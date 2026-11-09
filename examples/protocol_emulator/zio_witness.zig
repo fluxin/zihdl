@@ -65,10 +65,6 @@ const Interp = struct {
         tx_wdata: u32 = 0,
     };
 
-    fn bits(word: u32, comptime hi: usize, lo: usize) u32 {
-        return (word >> @intCast(lo)) & ((@as(u32, 1) << @intCast(hi - lo + 1)) - 1);
-    }
-
     fn push(self: *Interp, word: u32) void {
         if (self.fifo_cnt < self.fifo.len) {
             self.fifo[(self.fifo_rd + self.fifo_cnt) % self.fifo.len] = word;
@@ -76,45 +72,37 @@ const Interp = struct {
         }
     }
 
-    /// One clock edge; returns the pin visible after it.
+    /// One clock edge; returns the pin visible after it. Decoding is the ISA
+    /// table's (`isa.decode`); the behavior below is written independently of
+    /// the RTL. The model has no input pins: WAIT PIN_LOW never releases and
+    /// JMP PIN_HIGH is never taken.
     fn step(self: *Interp, s: Inputs) u4 {
         const word = self.program[self.pc_exec];
-        const op = bits(word, 31, 28);
+        const d = isa.decode(word) orelse @panic("ZIO model: the program holds an invalid instruction");
         const osr_empty = self.osr_cnt == 0;
         const fifo_empty = self.fifo_cnt == 0;
         const data_avail = !osr_empty or !fifo_empty;
-        const is_out = op == @backingInt(isa.Opcode.OUT);
-        const is_pull = op == @backingInt(isa.Opcode.PULL);
-        const is_jmp = op == @backingInt(isa.Opcode.JMP);
-        const is_mov = op == @backingInt(isa.Opcode.MOV);
-        const is_set = op == @backingInt(isa.Opcode.SET);
-        const out_target = bits(word, 23, 21);
-        const out_count = bits(word, 20, 16);
-        const jmp_cond = bits(word, 26, 24);
-        const jmp_target: u8 = @intCast(bits(word, 23, 16));
-        const mov_dest = bits(word, 21, 19);
-        const mov_src = bits(word, 18, 16);
-        const mov_inv = (word >> 22) & 1;
-        const pull_block = (word >> 16) & 1;
-        const x_dec_taken = is_jmp and jmp_cond == @backingInt(isa.JmpCondition.X_DEC) and self.x != 0;
-        const y_dec_taken = is_jmp and jmp_cond == @backingInt(isa.JmpCondition.Y_DEC) and self.y != 0;
-        const wait_pin_blocked = op == @backingInt(isa.Opcode.WAIT) and bits(word, 27, 26) == 1;
-        const pull_blocked = is_pull and pull_block == 1 and fifo_empty;
+        const wait_pin_blocked = d == .WAIT and d.WAIT.cond == .PIN_LOW;
+        const pull_blocked = d == .PULL and d.PULL.block and fifo_empty;
         const hold_fetch = !self.ir_valid or self.halt or self.delay > 0 or wait_pin_blocked or pull_blocked;
         const executing = self.running and !hold_fetch and s.ctrl_start == 0 and s.ctrl_stop == 0;
-        const branch_taken = is_jmp and switch (jmp_cond) {
-            @backingInt(isa.JmpCondition.ALWAYS) => true,
-            @backingInt(isa.JmpCondition.NOT_X) => self.x == 0,
-            @backingInt(isa.JmpCondition.X_DEC) => self.x != 0,
-            @backingInt(isa.JmpCondition.NOT_Y) => self.y == 0,
-            @backingInt(isa.JmpCondition.Y_DEC) => self.y != 0,
-            @backingInt(isa.JmpCondition.OSR_NOT_FULL) => data_avail,
+        const branch_taken = switch (d) {
+            .JMP => |j| switch (j.cond) {
+                .ALWAYS => true,
+                .NOT_X => self.x == 0,
+                .X_DEC => self.x != 0,
+                .NOT_Y => self.y == 0,
+                .Y_DEC => self.y != 0,
+                .PIN_HIGH => false,
+                .OSR_NOT_FULL => data_avail,
+            },
             else => false,
         };
-        const fetch_addr: u8 = if (hold_fetch) self.pc_exec else if (branch_taken) jmp_target else self.pc_exec +% 1;
+        const fetch_addr: u8 = if (hold_fetch) self.pc_exec else if (branch_taken) d.JMP.target else self.pc_exec +% 1;
         const fifo_head = self.fifo[self.fifo_rd];
+        const consumes = d == .PULL or (d == .OUT and osr_empty);
 
-        if (executing and !fifo_empty and (is_pull or (is_out and osr_empty))) {
+        if (executing and !fifo_empty and consumes) {
             self.fifo_rd = (self.fifo_rd + 1) % self.fifo.len;
             self.fifo_cnt -= 1;
         }
@@ -138,69 +126,61 @@ const Interp = struct {
             } else if (self.delay > 0) {
                 self.delay -= 1;
             } else if (!wait_pin_blocked and !pull_blocked and !self.halt) {
-                self.delay = @intCast(bits(word, 15, 0));
-                if (is_out and out_target == 0) {
-                    const src: u32 = if (osr_empty) fifo_head else self.osr;
-                    const src_cnt: u6 = if (osr_empty) 32 else self.osr_cnt;
-                    if (osr_empty and fifo_empty) {
-                        self.underrun = true;
-                    } else {
-                        var i: u32 = 0;
-                        while (i < 4) : (i += 1) {
-                            if (i < out_count) {
-                                const bit: u4 = @intCast((src >> @intCast(i)) & 1);
-                                self.pin = (self.pin & ~(@as(u4, 1) << @intCast(i))) | (bit << @intCast(i));
+                self.delay = isa.Instruction.fromU32(word).delay;
+                switch (d) {
+                    .OUT => |o| {
+                        const count: u6 = if (o.count == 0) 16 else o.count;
+                        if (osr_empty and fifo_empty) {
+                            self.underrun = true;
+                        } else {
+                            const src: u32 = if (osr_empty) fifo_head else self.osr;
+                            const src_cnt: u6 = if (osr_empty) 32 else self.osr_cnt;
+                            switch (o.target) {
+                                .PINS => for (0..isa.pin_count) |i| if (i < count) {
+                                    const bit: u4 = @intCast((src >> @intCast(i)) & 1);
+                                    self.pin = (self.pin & ~(@as(u4, 1) << @intCast(i))) | (bit << @intCast(i));
+                                },
+                                .X => self.x = @truncate(src & ((@as(u32, 1) << @intCast(count)) - 1)),
+                                .NULL => {},
                             }
+                            self.osr = src >> @intCast(count);
+                            self.osr_cnt = src_cnt - count;
                         }
-                        self.osr = src >> @intCast(out_count);
-                        self.osr_cnt = src_cnt - @as(u6, @intCast(out_count));
-                    }
-                } else if (is_out and out_target == 2) {
-                    const src: u32 = if (osr_empty) fifo_head else self.osr;
-                    const src_cnt: u6 = if (osr_empty) 32 else self.osr_cnt;
-                    if (osr_empty and fifo_empty) {
-                        self.underrun = true;
-                    } else {
-                        const mask: u32 = (@as(u32, 1) << @intCast(out_count)) - 1;
-                        self.x = @truncate(src & mask);
-                        self.osr = src >> @intCast(out_count);
-                        self.osr_cnt = src_cnt - @as(u6, @intCast(out_count));
-                    }
-                } else if (is_out and out_target == 4) {
-                    const src: u32 = if (osr_empty) fifo_head else self.osr;
-                    const src_cnt: u6 = if (osr_empty) 32 else self.osr_cnt;
-                    if (osr_empty and fifo_empty) {
-                        self.underrun = true;
-                    } else {
-                        self.osr = src >> @intCast(out_count);
-                        self.osr_cnt = src_cnt - @as(u6, @intCast(out_count));
-                    }
-                } else if (is_pull) {
-                    self.osr = fifo_head;
-                    self.osr_cnt = 32;
-                } else if (is_mov) {
-                    const raw: u32 = switch (mov_src) {
-                        0 => 0,
-                        1 => self.x,
-                        2 => self.y,
-                        3 => 0,
-                        4 => self.isr,
-                        else => self.osr,
-                    };
-                    const val: u32 = if (mov_inv == 1) ~raw else raw;
-                    switch (mov_dest) {
-                        0 => self.pin = @truncate(val),
-                        2 => self.x = @truncate(val),
-                        3 => self.y = @truncate(val),
-                        4 => self.isr = val,
-                        5 => self.osr = val,
-                        else => {},
-                    }
-                } else if (is_set and bits(word, 23, 21) == 0) {
-                    self.pin = @truncate(bits(word, 19, 16));
+                    },
+                    .PULL => {
+                        self.osr = fifo_head;
+                        self.osr_cnt = 32;
+                    },
+                    .MOV => |m| {
+                        const value: u32 = switch (m.src) {
+                            .PINS, .NULL => 0,
+                            .X => self.x,
+                            .Y => self.y,
+                            .ISR => self.isr,
+                            .OSR => self.osr,
+                        };
+                        const moved = if (m.op == .INVERT) ~value else value;
+                        switch (m.dest) {
+                            .PINS => self.pin = @truncate(moved),
+                            .PIN_DIRS => {},
+                            .X => self.x = @truncate(moved),
+                            .Y => self.y = @truncate(moved),
+                            .ISR => self.isr = moved,
+                            .OSR => self.osr = moved,
+                        }
+                    },
+                    .SET => |set| switch (set.target) {
+                        .PINS => self.pin = @truncate(set.value),
+                        .PIN_DIRS => {},
+                        .X => self.x = set.value,
+                        .Y => self.y = set.value,
+                    },
+                    .JMP => |j| {
+                        if (j.cond == .X_DEC and self.x != 0) self.x -%= 1;
+                        if (j.cond == .Y_DEC and self.y != 0) self.y -%= 1;
+                    },
+                    .WAIT, .IN => {},
                 }
-                if (x_dec_taken) self.x -%= 1;
-                if (y_dec_taken) self.y -%= 1;
             }
         }
         return self.pin;
