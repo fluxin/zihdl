@@ -355,6 +355,10 @@ pub const tx_fifo_host_addr: u8 = 0xF8;
 /// Host word write: the core's `isa.Config` in bits 15:0 (reset: defaults).
 pub const config_host_addr: u8 = 0xF4;
 
+/// Host-writable registers; each default is the reset value.
+pub const HostRegisters = struct { core_cfg: isa.Config = .{} };
+pub const host_register_addresses = .{ .core_cfg = config_host_addr };
+
 /// One composition and one execution core for all emitted products/witnesses.
 pub fn ProgrammableAsicBlock(comptime config: Config) type {
     const loader = config.loader;
@@ -556,10 +560,9 @@ pub fn ProgrammableAsicBlock(comptime config: Config) type {
             const part_we = try mb.wire("part_we", 1);
             const part_ack = try mb.wire("part_ack", 1);
             const fifo_hit = b.and_(host_we, b.ge(host_addr, b.lit(8, tx_fifo_host_addr)));
-            const cfg_hit = b.and_(host_we, b.eq(host_addr, b.lit(8, config_host_addr)));
-            const cfg_bits = @bitSizeOf(isa.Config);
-            const core_cfg = try mb.reg("core_cfg", cfg_bits, @as(u16, @bitCast(isa.Config{})));
-            try mb.seq(domain, &.{b.when(cfg_hit, &.{b.assign(core_cfg, b.trunc(host_wdata, cfg_bits))}, &.{})});
+            const regs = try zihdl.registers.bank(mb, domain, HostRegisters, host_register_addresses, .{ .we = host_we, .addr = host_addr, .wdata = host_wdata });
+            const cfg_hit = regs.hit;
+            const core_cfg = regs.values.core_cfg;
             try mb.assign(tx_we, b.and_(fifo_hit, b.not(outs.tx_full)));
             try mb.assign(part_we, b.and_(b.and_(host_we, b.not(fifo_hit)), b.not(cfg_hit)));
             try mb.assign(host_ack, b.ternary(fifo_hit, b.not(outs.tx_full), b.ternary(cfg_hit, b.lit(1, 1), part_ack)));
@@ -690,6 +693,10 @@ test "programmable asic block elaborates single and split partitions" {
         try std.testing.expect(std.mem.indexOf(u8, v, "module sky130_sram_1kbyte_1rw1r_32x256_8") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module zio_timing_unit") != null);
         try std.testing.expect(std.mem.indexOf(u8, v, "module i2c_slave_loader_42") != null);
+        // The core configuration register decodes its host address and resets
+        // to the default isa.Config (0x18).
+        try std.testing.expect(std.mem.indexOf(u8, v, "(host_addr == 8'd244)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v, "core_cfg <= 16'd24") != null);
         const sram_instances = std.mem.count(u8, v, "sky130_sram_1kbyte_1rw1r_32x256_8 u_");
         const expected: usize = if (partition == .single) 1 else 2;
         try std.testing.expectEqual(expected, sram_instances);

@@ -81,3 +81,18 @@ Write the immediate `value` to `target`.
 | `value` | `[20:16]` | 0..31 |
 | `target` | `[23:21]` | `PINS`=0, `PIN_DIRS`=1, `X`=2, `Y`=3 |
 | `reserved` | `[27:24]` | reserved, must be 0 |
+
+## Host registers
+
+Word writes through the host loader (programmable ASIC).
+
+### `core_cfg` at 0xF4 (reset 0x18)
+
+| Field | Bits | Values |
+|---|---|---|
+| `jmp_pin` | `[1:0]` | 0..3 |
+| `in_shift_right` | `[2:2]` | 0..1 |
+| `out_shift_right` | `[3:3]` | 0..1 |
+| `autopush` | `[4:4]` | 0..1 |
+| `push_threshold` | `[9:5]` | 0..31 |
+| `reserved` | `[15:10]` | reserved, must be 0 |
