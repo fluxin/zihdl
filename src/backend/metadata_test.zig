@@ -43,7 +43,7 @@ test "design.json exports hierarchy, widths, enums, clocks, memories and asserti
             const mem = try mb.mem(8, "code", 16, .{ .init_file = "code.hex", .read = .sync });
             const sm = try StateMachine(State, .IDLE, .binary).create(mb, "state");
             const b = mb.exprs();
-            const rdata_r = try mb.syncRead(mem, domain, 1, b.trunc(ins.d, 4));
+            const rdata_r = try mb.readPort(mem, "r", .{ .domain = domain, .addr = b.trunc(ins.d, 4) });
             try mb.assign(outs.q, ins.d);
             try mb.assign(outs.rdata, rdata_r);
             try mb.seq(domain, &.{
@@ -372,11 +372,11 @@ test "design.json records memory storage intent and access ports" {
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-            const program = try mb.mem(32, "program_mem", 64, .{ .storage = .registers });
+            const program = try mb.mem(32, "program_mem", 64, .{ .read = .sync, .storage = .registers });
             try mb.seq(domain, &.{b.when(ins.we, &.{b.memWrite(program, ins.waddr, ins.wdata)}, &.{})});
-            try mb.assign(outs.i0, try mb.syncRead(program, domain, 1, ins.pc0));
-            try mb.assign(outs.i1, try mb.syncRead(program, domain, 1, ins.pc1));
-            try mb.assign(outs.i2, try mb.syncRead(program, domain, 1, ins.pc2));
+            try mb.assign(outs.i0, try mb.readPort(program, "i0", .{ .domain = domain, .addr = ins.pc0 }));
+            try mb.assign(outs.i1, try mb.readPort(program, "i1", .{ .domain = domain, .addr = ins.pc1 }));
+            try mb.assign(outs.i2, try mb.readPort(program, "i2", .{ .domain = domain, .addr = ins.pc2 }));
         }
     };
     var design = Design.init(alloc);
@@ -390,7 +390,7 @@ test "design.json records memory storage intent and access ports" {
     const decl = std.mem.indexOf(u8, v, "program_mem [0:63];").?;
     try std.testing.expect(attr < decl);
     // Three registered read ports, uniquely named.
-    try std.testing.expect(std.mem.indexOf(u8, v, "program_mem_rdata2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "program_mem_i2_rdata") != null);
 }
 
 test "design.json refuses input timing on a clock with no declared domain" {

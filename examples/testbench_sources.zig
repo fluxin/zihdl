@@ -6,6 +6,7 @@ const divmod_case = @import("testing/divmod_case.zig");
 const cdc_case = @import("testing/cdc_case.zig");
 const spi_case = @import("testing/spi_case.zig");
 const i2c_cases = @import("testing/i2c_cases.zig");
+const feature_cases = @import("testing/feature_cases.zig");
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -17,4 +18,5 @@ pub fn main(init: std.process.Init) !void {
     try cdc_case.generate(alloc, init.io);
     try spi_case.generate(alloc, init.io);
     try i2c_cases.generate(alloc, init.io);
+    try feature_cases.generate(alloc, init.io);
 }

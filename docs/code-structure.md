@@ -22,11 +22,12 @@ backend/             artifact writers and HDL targets
    verilog.zig          Verilog-2001 target (portable default)
    systemverilog.zig    SystemVerilog target
    metadata.zig         design.json sidecar
-   sdc.zig              SDC constraints
+   sdc.zig              SDC constraints lowered from authored timing intent
+   meminit.zig          generated memory contents ($readmemh files)
    provenance.zig       optional operation/group/source-map collector
    backend.zig          Target hub + emission options
-blocks/              elemental reusable IP (SRAM, ROM/RAM wrappers, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter, timer, arbiter/crossbar, AXI4-Lite register slave)
-lib.zig              conveniences: registers, streams, CDC, encoders, FSMs
+blocks/              elemental reusable IP (SRAM, ROM/RAM wrappers, sync + async FIFO, CDC bridge/bundled data/mailboxes/reset sync, UART, SPI target, I2C target, 10BASE-T serializer, shift reg, edge det, counter, timer, arbiter/crossbar, AXI4-Lite register slave, register bank generator, clock divider and clock gate)
+lib.zig              conveniences: registers, streams, CDC, encoders, FSMs, temporal properties
 cdc.zig              structural clock-domain-crossing lint over elaborated designs
 netlist.zig          the IR: Scope, handles, Expr/Stmt, ModuleBuilder, Design
 root.zig             module root; exports netlist, lib, blocks, backend, cdc
@@ -157,6 +158,7 @@ These are load-bearing; tests and review should reject changes that break them.
 | `zig build arbiter` | Icarus-replays round-robin fairness and crossbar contention witnesses |
 | `zig build axi4-lite` | Icarus-replays independent AW/W and read/write response handshakes |
 | `zig build divmod` | Emits, lints and Icarus-replays the division/remainder fixtures (signal-driven probe + folded constants, zero-divisor x case) |
+| `zig build features` | Lints and Icarus-replays the arrays, edges, memory-port, property (including a failing trace), clock-generation and register-bank witnesses |
 | `zig build tb`, `zio` | Generated testbench and ZIO witness bundles |
 
 ## Tests

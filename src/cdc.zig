@@ -5,10 +5,9 @@
 //! sequential processes in a different clock domain, unless the capture is a
 //! recognized crossing:
 //!
-//!   * the destination is declared as a synchronizer stage (input timing chain
-//!     or clock reset-release chain) for the captured data bit: a stage
-//!     declared without a bit exempts the whole signal, a per-bit stage only
-//!     its own bit, or
+//!   * the destination is declared as an input timing chain synchronizer
+//!     stage for the captured data bit: a stage declared without a bit exempts
+//!     the whole signal, a per-bit stage only its own bit, or
 //!   * the destination bit is a structurally recognized first flop of a
 //!     two-flop synchronizer (assigned in one domain, never observed
 //!     combinationally and read only through direct captures in that same
@@ -309,20 +308,15 @@ const ModuleLint = struct {
         return ownedUnion(self.owned, idx);
     }
 
-    /// Data bits of symbol `idx` covered by declared synchronizer stages, from
-    /// input-timing chains and clock reset-release chains alike. Atomic: a
-    /// stage without a bit covers the whole signal, a per-bit stage its bit.
+    /// Data bits of symbol `idx` covered by declared input-timing synchronizer
+    /// stages. Atomic: a stage without a bit covers the whole signal, a per-bit
+    /// stage its bit. Reset-release chains need no coverage: `finish()` proves
+    /// their first stage samples a constant and the rest sample in-domain.
     fn declaredBits(self: *const ModuleLint, idx: usize) Mask {
         const width = self.module.scope.symbols.items[idx].width;
         var covered: Mask = 0;
         for (self.module.timing) |intent| {
             for (intent.stages) |stage| {
-                if (stage.signal.scope != self.module.scope or stage.signal.idx != idx) continue;
-                covered |= stageCoverage(stage, width);
-            }
-        }
-        for (self.module.clocks) |clock| {
-            for (clock.release_synchronizer) |stage| {
                 if (stage.signal.scope != self.module.scope or stage.signal.idx != idx) continue;
                 covered |= stageCoverage(stage, width);
             }
@@ -1532,7 +1526,7 @@ test "CDC lint reports only uncovered bits of a per-bit asynchronous vector" {
     try std.testing.expectEqual(@as(?u8, 2), crossings[0].bit);
 }
 
-test "CDC lint honors a per-bit reset-release stage and flags its sibling" {
+test "CDC lint finds no crossing in a reset-release chain and flags its sibling" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1546,7 +1540,7 @@ test "CDC lint honors a per-bit reset-release stage and flags its sibling" {
             b_rst_n: Signal(1),
             a_in: Signal(1),
         };
-        pub const Outputs = struct { q: Signal(1), peek: Signal(1) };
+        pub const Outputs = struct { q: Signal(1), peek: Signal(1), other: Signal(1) };
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
@@ -1571,16 +1565,16 @@ test "CDC lint honors a per-bit reset-release stage and flags its sibling" {
             const a_q = try mb.reg("a_q", 1, 0);
             try mb.seq(a, &.{bld.assign(a_q, ins.a_in.expr())});
             const b_other = try mb.reg("b_other", 1, 0);
-            try mb.seq(b, &.{
-                bld.assign(b_sync0, a_q.expr()),
+            try mb.seqReset(ins.b_clk, .{ .signal = ins.b_rst_n, .kind = .async_low }, &.{
+                bld.assign(b_sync0, 1),
                 bld.assign(b_sync1, b_sync0.expr()),
-                bld.assign(b_other, a_q.expr()),
             });
-            // Reading the declared stage combinationally keeps it out of the
-            // structural two-flop recognition, so only the release declaration
-            // can exempt its capture.
+            try mb.seq(b, &.{bld.assign(b_other, a_q.expr())});
+            // Reading the first stage combinationally keeps it out of the
+            // structural two-flop recognition; the chain needs no exemption.
             try mb.assign(outs.peek, b_sync0.expr());
             try mb.assign(outs.q, b_sync1.expr());
+            try mb.assign(outs.other, b_other.expr());
         }
     };
 
@@ -1588,7 +1582,7 @@ test "CDC lint honors a per-bit reset-release stage and flags its sibling" {
     _ = try design.elaborate(Fixture);
     const crossings = try lint(alloc, &design);
     defer alloc.free(crossings);
-    // The declared per-bit release stages cover their capture; the undeclared
+    // The chain samples a constant and then itself; the unsynchronized
     // sibling keeps the whole-signal row.
     try std.testing.expectEqual(@as(usize, 1), crossings.len);
     try std.testing.expectEqual(Kind.unsynchronized_capture, crossings[0].kind);
@@ -1955,6 +1949,8 @@ test "CDC lint unions declared stages across hierarchy levels" {
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const p_stage = try mb.reg("p_stage", 1, 0);
+            // The declared parent stage is a real flop on the raw input.
+            try mb.seq(.{ .clk = ins.clk, .rst_n = ins.rst_n }, &.{mb.exprs().assign(p_stage, ins.raw_in)});
             _ = try mb.instantiate(Child, "u_child", .{
                 .clk = ins.clk,
                 .rst_n = ins.rst_n,

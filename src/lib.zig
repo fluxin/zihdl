@@ -89,6 +89,36 @@ pub fn rotr(mb: *ModuleBuilder, x: anytype, comptime n: usize) netlist.Expr(@Typ
     return rotl(mb, x, W - n);
 }
 
+/// Right rotate by a runtime amount: by `n mod W` for every `n`, as bits
+/// `[m, m + W)` of `{x, x}` with `m = n mod W`.
+pub fn rotrDyn(mb: *ModuleBuilder, x: anytype, n: anytype) netlist.Expr(@TypeOf(x).width) {
+    const W = @TypeOf(x).width;
+    const b = mb.exprs();
+    if (W == 1) return b.resize(x, 1);
+    return b.sliceDyn(b.concat(.{ x, x }), rotateAmount(b, W, n), W);
+}
+
+/// Left rotate by a runtime amount: by `n mod W` for every `n`, as a right
+/// rotate by `W - m`; `m = 0` selects bits `[W, 2W)`, which is `x` itself.
+pub fn rotlDyn(mb: *ModuleBuilder, x: anytype, n: anytype) netlist.Expr(@TypeOf(x).width) {
+    const W = @TypeOf(x).width;
+    const b = mb.exprs();
+    if (W == 1) return b.resize(x, 1);
+    const m = rotateAmount(b, W, n);
+    const AW = @TypeOf(m).width + 1;
+    return b.sliceDyn(b.concat(.{ x, x }), b.sub(b.lit(AW, W), b.zext(m, AW)), W);
+}
+
+/// `n mod W` in `ceil(log2 W)` bits: free when every value of `n` is already
+/// below `W` or `W` is a power of two, a constant remainder otherwise.
+fn rotateAmount(b: netlist.ExprBuilder, comptime W: usize, n: anytype) netlist.Expr(std.math.log2_int_ceil(usize, W)) {
+    const AW = comptime std.math.log2_int_ceil(usize, W);
+    const NW = @TypeOf(n).width;
+    if (comptime (@as(u128, 1) << NW) <= W) return b.zext(n, AW);
+    if (comptime std.math.isPowerOfTwo(W)) return b.trunc(n, AW);
+    return b.trunc(b.mod(n, b.lit(NW, W)), AW);
+}
+
 // ============================================================================
 // Temporal helpers (assertion support without SVA)
 // ============================================================================
@@ -127,6 +157,156 @@ pub fn changed(mb: *ModuleBuilder, name: []const u8, src: anytype, domain: Clock
     const prev = try past(mb, try memberName(mb, name, "past"), src, domain);
     const b = mb.exprs();
     return b.ne(src, prev.expr());
+}
+
+// ============================================================================
+// Temporal properties: bounded sequences over history registers
+// ============================================================================
+
+/// A delay inside a sequence tuple: `cycles(n)` is SVA's `##n`.
+pub const Cycles = struct { n: usize };
+
+pub fn cycles(n: usize) Cycles {
+    return .{ .n = n };
+}
+
+/// Where the consequent starts relative to the antecedent's last cycle:
+/// `.overlapping` is SVA's `|->` (same cycle), `.next` is `|=>` (one later).
+pub const Implication = enum { overlapping, next };
+
+const PropertyKind = enum { assert_, assume_ };
+
+/// One condition of a lowered sequence, at its cycle offset from the start.
+const Term = struct {
+    offset: usize,
+    cond: netlist.AnyExpr,
+    consequent: bool,
+};
+
+/// Asserts the bounded implication `antecedent |-> consequent` (or `|=>`) on
+/// `domain`, reported as `name`. A sequence is a tuple of 1-bit conditions
+/// and `cycles(n)` delays, so `.{ req, cycles(1), gnt }` is `req ##1 gnt`;
+/// conditions with no delay between them hold in the same cycle. The
+/// property lowers to one history chain per condition and one immediate
+/// assertion, so every simulator and oasic's checker read the same two-state
+/// semantics. History resets to zero: the property is vacuous until its
+/// window has filled after reset.
+pub fn assertProperty(mb: *ModuleBuilder, name: []const u8, domain: ClockDomain, antecedent: anytype, implication: Implication, consequent: anytype) !void {
+    try property(mb, .assert_, name, domain, antecedent, implication, consequent);
+}
+
+/// `assertProperty` as an assumption, for formal environments.
+pub fn assumeProperty(mb: *ModuleBuilder, name: []const u8, domain: ClockDomain, antecedent: anytype, implication: Implication, consequent: anytype) !void {
+    try property(mb, .assume_, name, domain, antecedent, implication, consequent);
+}
+
+/// Covers the sequence: reached when its last condition holds with every
+/// earlier condition held at its offset.
+pub fn coverSequence(mb: *ModuleBuilder, name: []const u8, domain: ClockDomain, sequence: anytype) !void {
+    var terms = std.ArrayList(Term).empty;
+    defer terms.deinit(mb.allocator);
+    const span = try sequenceTerms(mb, sequence, 0, false, false, &terms);
+    const b = mb.exprs();
+    const sampled = try lowerTerms(mb, name, domain, terms.items, span);
+    try mb.seq(domain, &.{b.cover_(sampled.antecedent, name)});
+}
+
+fn property(mb: *ModuleBuilder, kind: PropertyKind, name: []const u8, domain: ClockDomain, antecedent: anytype, implication: Implication, consequent: anytype) !void {
+    var terms = std.ArrayList(Term).empty;
+    defer terms.deinit(mb.allocator);
+    const ante_span = try sequenceTerms(mb, antecedent, 0, false, false, &terms);
+    const start = ante_span + @intFromBool(implication == .next);
+    const span = try sequenceTerms(mb, consequent, start, true, true, &terms);
+    const b = mb.exprs();
+    const sampled = try lowerTerms(mb, name, domain, terms.items, span);
+    const holds = b.or_(b.not(sampled.antecedent), sampled.consequent);
+    try mb.seq(domain, &.{switch (kind) {
+        .assert_ => b.assert_(holds, name),
+        .assume_ => b.assume_(holds, name),
+    }});
+}
+
+/// Appends a sequence tuple's conditions at offsets from `base`; returns the
+/// offset of its last cycle. A sequence needs a condition (delays alone would
+/// hold vacuously), and only a consequent may start with a delay: at the
+/// start of an antecedent or covered sequence it would only shift the cycle
+/// the match is counted from.
+fn sequenceTerms(mb: *ModuleBuilder, sequence: anytype, base: usize, consequent: bool, comptime leading_delay: bool, terms: *std.ArrayList(Term)) !usize {
+    const fields = @typeInfo(@TypeOf(sequence)).@"struct".field_names;
+    comptime {
+        const types = @typeInfo(@TypeOf(sequence)).@"struct".field_types;
+        var conditions: usize = 0;
+        for (types) |T| conditions += @intFromBool(T != Cycles);
+        if (conditions == 0) @compileError("a sequence needs at least one condition; delays alone hold vacuously");
+        if (!leading_delay and types[0] == Cycles) @compileError("an antecedent or covered sequence cannot start with a delay; it only shifts the start cycle");
+    }
+    var offset = base;
+    inline for (fields) |field| {
+        const item = @field(sequence, field);
+        if (@TypeOf(item) == Cycles) {
+            offset += item.n;
+        } else {
+            comptime if (@TypeOf(item).width != 1) @compileError("sequence conditions must be 1 bit");
+            try terms.append(mb.allocator, .{ .offset = offset, .cond = mb.intern(item), .consequent = consequent });
+        }
+    }
+    return offset;
+}
+
+/// Samples every term at the property's last cycle (`span`): a term at
+/// `offset` is its condition delayed by `span - offset` edges. Each distinct
+/// condition gets one shift chain as deep as its oldest sample, sized before
+/// any register is declared and shifted by a single process.
+fn lowerTerms(mb: *ModuleBuilder, name: []const u8, domain: ClockDomain, terms: []const Term, span: usize) !struct { antecedent: netlist.Expr(1), consequent: netlist.Expr(1) } {
+    const alloc = mb.allocator;
+    const ctx = netlist.ExprContext{};
+    // Size: one entry per distinct condition with its deepest delay.
+    const Chain = struct { cond: netlist.AnyExpr, depth: usize, first: usize = 0 };
+    var chains = std.ArrayList(Chain).empty;
+    defer chains.deinit(alloc);
+    const chain_of = try alloc.alloc(usize, terms.len);
+    defer alloc.free(chain_of);
+    for (terms, chain_of) |term, *slot| {
+        const delay = span - term.offset;
+        slot.* = for (chains.items, 0..) |*chain, ci| {
+            if (ctx.eql(chain.cond, term.cond)) {
+                chain.depth = @max(chain.depth, delay);
+                break ci;
+            }
+        } else blk: {
+            try chains.append(alloc, .{ .cond = term.cond, .depth = delay });
+            break :blk chains.items.len - 1;
+        };
+    }
+    // Fill: declare every stage once, shift them all in one process.
+    var total: usize = 0;
+    for (chains.items) |*chain| {
+        chain.first = total;
+        total += chain.depth;
+    }
+    const stages = try alloc.alloc(Signal(1), total);
+    defer alloc.free(stages);
+    const shifts = try alloc.alloc(Stmt, total);
+    defer alloc.free(shifts);
+    const b = mb.exprs();
+    for (chains.items, 0..) |chain, ci| {
+        for (0..chain.depth) |k| {
+            const stage = try mb.reg(try std.fmt.allocPrint(alloc, "{s}_h{d}_{d}", .{ name, ci, k + 1 }), 1, 0);
+            stages[chain.first + k] = stage;
+            shifts[chain.first + k] = if (k == 0) b.assign(stage, netlist.Expr(1){ .e = chain.cond }) else b.assign(stage, stages[chain.first + k - 1]);
+        }
+    }
+    if (total > 0) try mb.seq(domain, shifts);
+    var antecedent: ?netlist.Expr(1) = null;
+    var consequent: ?netlist.Expr(1) = null;
+    for (terms, chain_of) |term, ci| {
+        const delay = span - term.offset;
+        const chain = chains.items[ci];
+        const sample = if (delay == 0) netlist.Expr(1){ .e = term.cond } else stages[chain.first + delay - 1].expr();
+        const acc = if (term.consequent) &consequent else &antecedent;
+        acc.* = if (acc.*) |prev| b.and_(prev, sample) else sample;
+    }
+    return .{ .antecedent = antecedent orelse b.lit(1, 1), .consequent = consequent orelse b.lit(1, 1) };
 }
 
 // ============================================================================
@@ -332,7 +512,7 @@ pub fn resetSyncStages(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype,
     const b = mb.exprs();
     const s0 = try mb.reg(try memberName(mb, name, "sync0"), 1, 0);
     const s1 = try mb.reg(try memberName(mb, name, "sync1"), 1, 0);
-    try mb.seqReset(domain.clk, .{ .signal = raw_rst_n, .kind = .async_low }, &.{
+    try mb.seqReset(netlist.ActiveEdge{ .clk = domain.clk, .edge = domain.edge }, .{ .signal = raw_rst_n, .kind = .async_low }, &.{
         b.assign(s0, 1),
         b.assign(s1, s0.expr()),
     });
@@ -342,6 +522,25 @@ pub fn resetSyncStages(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype,
 /// `resetSyncStages` returning only the synchronized release output.
 pub fn resetSync(mb: *ModuleBuilder, name: []const u8, raw_rst_n: anytype, domain: ClockDomain) !Signal(1) {
     return (try resetSyncStages(mb, name, raw_rst_n, domain)).out;
+}
+
+/// Lowers `ResetPolicy.release = .synchronous`: builds the two-stage release
+/// chain on `raw.clk` from the raw active-low reset `raw.rst_n`, records the
+/// released domain (asynchronous assertion, synchronous release, the chain as
+/// its `release_synchronizer`) and returns it. Clock every process of the
+/// domain with the returned value: its `rst_n` is the released reset, which is
+/// what `Design.validateResetRelease` checks a synchronous-release domain for.
+pub fn releasedDomain(mb: *ModuleBuilder, name: []const u8, raw: ClockDomain) !ClockDomain {
+    if (raw.reset.polarity != .active_low or raw.reset.assertion != .asynchronous) return error.InvalidResetPolicy;
+    const chain = try resetSyncStages(mb, name, raw.rst_n, raw);
+    var domain = raw;
+    domain.rst_n = chain.out;
+    domain.reset.release = .synchronous;
+    domain.release_synchronizer = &.{ .{ .signal = chain.sync0.ref, .bit = 0 }, .{ .signal = chain.sync1.ref, .bit = 0 } };
+    try mb.addClockDomain(domain);
+    // The recorded row owns a copy of the chain; return that, not the literal.
+    domain.release_synchronizer = mb.clocks.items[mb.clocks.items.len - 1].release_synchronizer;
+    return domain;
 }
 
 // ============================================================================
@@ -545,6 +744,187 @@ test "CDC helpers emit a toggle synchronizer and an async-assert reset chain" {
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_pulse = (evt_q2 ^ evt_q3);") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(posedge dst_clk or negedge src_rst_n) begin") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "assign synced_rst_n = rst_sync1;") != null);
+}
+
+test "synchronous reset release is lowered by releasedDomain and checked across hierarchy" {
+    const Child = struct {
+        pub const name = "release_child";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            // The child claims a synchronously released reset from its parent.
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .reset = .{ .release = .synchronous } };
+            try mb.addClockDomain(domain);
+            try mb.assign(outs.q, try regNext(mb, "q_r", ins.d, domain));
+        }
+    };
+    const Top = struct {
+        fn Make(comptime released: bool) type {
+            return struct {
+                pub const name = if (released) "release_top_ok" else "release_top_raw";
+                pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+                pub const Outputs = struct { q: Signal(1) };
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const outs = try mb.declareOutputs(Outputs);
+                    const raw = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+                    const rst = if (released) (try releasedDomain(mb, "por", raw)).rst_n else ins.rst_n;
+                    _ = try mb.instantiate(Child, "u_child", .{ .clk = ins.clk, .rst_n = rst, .d = ins.d }, .{ .q = outs.q }, .{});
+                }
+            };
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ok = Design.init(alloc);
+    const top = try ok.elaborate(Top.Make(true));
+    try std.testing.expectEqual(@as(usize, 2), top.clocks[0].release_synchronizer.len);
+    try std.testing.expectEqualStrings("por_sync1", top.clocks[0].rst_n.name());
+    const rtl = try verilog.emitDesign(alloc, &ok, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(posedge clk or negedge rst_n) begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "por_sync1 <= por_sync0;") != null);
+
+    // The same child claim fed by the raw top-level reset is rejected.
+    var raw = Design.init(alloc);
+    try std.testing.expectError(error.UnsynchronizedResetRelease, raw.elaborate(Top.Make(false)));
+}
+
+test "reset release checks the clock, the chain and the edge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A reset released on clk_a claimed by a domain on clk_b, in one module.
+    const SameModule = struct {
+        pub const name = "release_wrong_clock";
+        pub const Inputs = struct { clk_a: Signal(1), clk_b: Signal(1), rst_n: Signal(1), d: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = try releasedDomain(mb, "rel_a", .{ .name = "a", .clk = ins.clk_a, .rst_n = ins.rst_n });
+            const b = ClockDomain{ .name = "b", .clk = ins.clk_b, .rst_n = a.rst_n, .reset = .{ .release = .synchronous } };
+            try mb.addClockDomain(b);
+            try mb.assign(outs.q, try regNext(mb, "q_r", ins.d, b));
+        }
+    };
+    var same = Design.init(alloc);
+    try std.testing.expectError(error.UnsynchronizedResetRelease, same.elaborate(SameModule));
+
+    // The same mismatch across an instance boundary.
+    const Child = struct {
+        pub const name = "release_child_b";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .reset = .{ .release = .synchronous } };
+            try mb.addClockDomain(domain);
+            try mb.assign(outs.q, try regNext(mb, "q_r", ins.d, domain));
+        }
+    };
+    const Cross = struct {
+        pub const name = "release_cross";
+        pub const Inputs = struct { clk_a: Signal(1), clk_b: Signal(1), rst_n: Signal(1), d: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const a = try releasedDomain(mb, "rel_a", .{ .name = "a", .clk = ins.clk_a, .rst_n = ins.rst_n });
+            _ = try mb.instantiate(Child, "u_b", .{ .clk = ins.clk_b, .rst_n = a.rst_n, .d = ins.d }, .{ .q = outs.q }, .{});
+        }
+    };
+    var cross = Design.init(alloc);
+    try std.testing.expectError(error.UnsynchronizedResetRelease, cross.elaborate(Cross));
+
+    // A declared chain whose stages run on another clock, and a domain reset
+    // that is neither the chain's raw reset nor its final stage.
+    const BadChain = struct {
+        fn Make(comptime wrong_clock: bool) type {
+            return struct {
+                pub const name = if (wrong_clock) "release_chain_clock" else "release_chain_reset";
+                pub const Inputs = struct { clk: Signal(1), other: Signal(1), rst_n: Signal(1), other_rst_n: Signal(1) };
+                pub const Outputs = struct {};
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const stage_clock = if (wrong_clock) ins.other else ins.clk;
+                    const chain = try resetSyncStages(mb, "rel", ins.rst_n, .{ .clk = stage_clock, .rst_n = ins.rst_n });
+                    try mb.addClockDomain(.{
+                        .clk = ins.clk,
+                        .rst_n = if (wrong_clock) ins.rst_n else ins.other_rst_n,
+                        .reset = .{ .release = .synchronous },
+                        .release_synchronizer = &.{ .{ .signal = chain.sync0.ref, .bit = 0 }, .{ .signal = chain.sync1.ref, .bit = 0 } },
+                    });
+                }
+            };
+        }
+    };
+    inline for (.{ true, false }) |wrong_clock| {
+        var bad = Design.init(alloc);
+        try std.testing.expectError(error.InvalidTimingIntent, bad.elaborate(BadChain.Make(wrong_clock)));
+    }
+
+    // A one-flop chain, a data shift register and stages reset to the
+    // released level are not release synchronizers; the faultless hand-built
+    // chain is.
+    const Fault = enum { none, one_stage, data_input, reset_level };
+    const HandChain = struct {
+        fn Make(comptime fault: Fault) type {
+            return struct {
+                pub const name = "release_chain_" ++ @tagName(fault);
+                pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+                pub const Outputs = struct {};
+                pub fn build(mb: *ModuleBuilder) !void {
+                    const ins = try mb.declareInputs(Inputs);
+                    const b = mb.exprs();
+                    const asserted: u64 = if (fault == .reset_level) 1 else 0;
+                    const s0 = try mb.reg("s0", 1, asserted);
+                    const s1 = try mb.reg("s1", 1, asserted);
+                    try mb.seqReset(ins.clk, .{ .signal = ins.rst_n, .kind = .async_low }, &.{
+                        b.assign(s0, if (fault == .data_input) ins.d.expr() else b.lit(1, 1)),
+                        b.assign(s1, s0.expr()),
+                    });
+                    const stages: []const netlist.SyncStage = &.{ .{ .signal = s0.ref, .bit = 0 }, .{ .signal = s1.ref, .bit = 0 } };
+                    try mb.addClockDomain(.{
+                        .clk = ins.clk,
+                        .rst_n = if (fault == .one_stage) s0 else s1,
+                        .reset = .{ .release = .synchronous },
+                        .release_synchronizer = if (fault == .one_stage) stages[0..1] else stages,
+                    });
+                }
+            };
+        }
+    };
+    var good = Design.init(alloc);
+    _ = try good.elaborate(HandChain.Make(.none));
+    inline for (.{ Fault.one_stage, Fault.data_input, Fault.reset_level }) |fault| {
+        var bad = Design.init(alloc);
+        try std.testing.expectError(error.InvalidTimingIntent, bad.elaborate(HandChain.Make(fault)));
+    }
+
+    // A falling-edge domain gets a falling-edge release chain.
+    const Falling = struct {
+        pub const name = "release_falling";
+        pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+        pub const Outputs = struct { q: Signal(1) };
+        pub fn build(mb: *ModuleBuilder) !void {
+            const ins = try mb.declareInputs(Inputs);
+            const outs = try mb.declareOutputs(Outputs);
+            const domain = try releasedDomain(mb, "por", .{ .clk = ins.clk, .rst_n = ins.rst_n, .edge = .falling });
+            try mb.assign(outs.q, try regNext(mb, "q_r", ins.d, domain));
+        }
+    };
+    var falling = Design.init(alloc);
+    _ = try falling.elaborate(Falling);
+    const rtl = try verilog.emitDesign(alloc, &falling, .{});
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(negedge clk or negedge rst_n) begin\n        if (!rst_n) begin\n            por_sync0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "always @(negedge clk or negedge por_sync1) begin") != null);
 }
 
 test "register and synchronizer helpers preserve signed declarations" {

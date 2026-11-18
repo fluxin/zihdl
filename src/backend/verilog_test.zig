@@ -462,7 +462,6 @@ test "read/write port honors write_first semantics" {
             en: Signal(1),
             addr: Signal(4),
             we: Signal(1),
-            waddr: Signal(4),
             wdata: Signal(16),
         };
         pub const Outputs = struct { rdata: Signal(16) };
@@ -470,8 +469,8 @@ test "read/write port honors write_first semantics" {
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const mem = try mb.mem(16, "rf", 16, .{ .write_mode = .write_first });
-            const rd = try mb.readWritePort(mem, .{ .clk = ins.clk, .rst_n = ins.rst_n }, ins.en, ins.addr, ins.we, ins.waddr, ins.wdata);
+            const mem = try mb.mem(16, "rf", 16, .{ .read = .sync, .write_mode = .write_first });
+            const rd = try mb.readWritePort(mem, "a", .{ .domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n }, .en = ins.en, .addr = ins.addr, .we = ins.we, .wdata = ins.wdata });
             try mb.assign(outs.rdata, rd);
         }
     };
@@ -483,7 +482,6 @@ test "read/write port honors write_first semantics" {
     const en = try top.input("en", 1);
     const addr = try top.input("addr", 4);
     const we = try top.input("we", 1);
-    const waddr = try top.input("waddr", 4);
     const wdata = try top.input("wdata", 16);
     _ = try top.instantiate(Rw, "u_rw", .{
         .clk = clk,
@@ -491,14 +489,14 @@ test "read/write port honors write_first semantics" {
         .en = en,
         .addr = addr,
         .we = we,
-        .waddr = waddr,
         .wdata = wdata,
     }, .{}, .{});
     _ = try top.finish();
 
+    // Write-first: a write returns the new word through the read register.
     const v = try verilog.emitDesign(alloc, &design, .{});
-    try std.testing.expect(std.mem.indexOf(u8, v, "if ((we && (waddr == addr))) begin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v, "rf[waddr] <= wdata;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "rf_a_rdata <= wdata;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v, "rf[addr] <= wdata;") != null);
 }
 
 test "black box emits verbatim and is shared across instances" {
@@ -1796,6 +1794,7 @@ test "declared signed ports, wires and registers emit signed declarations" {
             const outs = try mb.declareOutputs(Outputs);
             const b = mb.exprs();
             const acc = try mb.signedReg("acc", 8, 0);
+            try mb.comb(&.{b.assign(acc, ins.a)});
             const w = try mb.signedWire("w", 8);
             try mb.assign(w, b.add(ins.a, acc));
             try mb.assign(outs.q, w);

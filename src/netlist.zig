@@ -47,13 +47,44 @@ pub const MemStorage = enum {
 };
 
 pub const MemOpts = struct {
+    /// Read behavior of the memory's read ports: registered or combinational.
     read: ReadKind = .comb,
     storage: MemStorage = .any,
+    /// Read-during-write behavior of a read/write port.
     write_mode: WriteMode = .read_first,
+    /// Hex file loaded by `$readmemh`. With `init_words` it is the path the
+    /// generated contents are written to (`backend.meminit.files`).
     init_file: ?[]const u8 = null,
+    /// Initial contents generated from Zig, word 0 first (memory width at
+    /// most 64 bits). Words past the end are zero, so every entry is defined.
+    init_words: []const u64 = &.{},
     /// Declares the memory signed: the emitted memory and every `memRead`
     /// expression are signed, so consumers need no `asSigned` reinterpretation.
     signed: bool = false,
+};
+
+pub const MemPortKind = enum { read, write, read_write };
+
+/// One declared memory port, recorded on the module so `design.json` can
+/// describe the memory to a macro mapper. Built by `readPort`, `writePort`
+/// and `readWritePort`.
+pub const MemPort = struct {
+    mem: SymRef,
+    name: []const u8,
+    kind: MemPortKind,
+    /// Port clock; null for a combinational read port.
+    clk: ?SymRef = null,
+    edge: ClockEdge = .rising,
+    /// Byte-enable bits of a writing port; 0 when it writes whole words.
+    byte_enables: usize = 0,
+    /// Read data of a reading port.
+    rdata: ?SymRef = null,
+    /// Address, write enable and lane enables (null: every lane) of a
+    /// writing port, kept so a later port on the same clock yields the lanes
+    /// this one writes.
+    addr: AnyExpr,
+    we: ?AnyExpr = null,
+    be: ?AnyExpr = null,
 };
 
 pub const Symbol = struct {
@@ -70,8 +101,18 @@ pub const Symbol = struct {
     write_mode: WriteMode = .read_first,
     storage: MemStorage = .any,
     init_file: ?[]const u8 = null,
+    /// Generated initial contents (see `MemOpts.init_words`).
+    init_words: []const u64 = &.{},
     /// Elaboration reached no live reader or driver; backends may omit it.
     dead: bool = false,
+    /// Authored source location (`Module.source_locs`, 1-based); 0 = none.
+    loc: u32 = 0,
+};
+
+/// A Zig source position recorded by `ModuleBuilder.at(@src())`.
+pub const SourceLoc = struct {
+    file: []const u8,
+    line: u32,
 };
 
 /// A handle to a symbol inside a module Scope.
@@ -317,6 +358,41 @@ fn shiftWidth(comptime W: usize) usize {
     return @max(1, std.math.log2_int_ceil(usize, W));
 }
 
+/// Each 8-bit lane of `new` where its bit of `lanes` is set, of `old`
+/// elsewhere. Built from lane slices, so it holds at any width.
+fn mergeLanes(b: ExprBuilder, comptime W: usize, lanes: anytype, new: anytype, old: anytype) Expr(W) {
+    const L = (W + 7) / 8;
+    if (L == 1) return b.ternary(lanes, new, old);
+    const Parts = comptime blk: {
+        var types: [L]type = undefined;
+        for (0..L) |i| {
+            const lane = L - 1 - i;
+            types[i] = Expr(@min(lane * 8 + 7, W - 1) - lane * 8 + 1);
+        }
+        break :blk @Tuple(&types);
+    };
+    var parts: Parts = undefined;
+    inline for (0..L) |i| {
+        const lane = L - 1 - i;
+        const lo = lane * 8;
+        const hi = @min(lo + 7, W - 1);
+        parts[i] = b.ternary(b.bit(lanes, lane), b.slice(new, hi, lo), b.slice(old, hi, lo));
+    }
+    return b.concat(parts);
+}
+
+/// Elements of an `N`-element array an `IW`-bit index can reach.
+fn reachable(comptime N: usize, comptime IW: usize) usize {
+    return if (IW >= 64) N else @min(N, @as(u64, 1) << IW);
+}
+
+/// Element width of an array of hardware values (`[N]Signal(W)`, `[N]Expr(W)`).
+fn arrayElemWidth(comptime T: type) usize {
+    const info = @typeInfo(T);
+    if (info != .array) @compileError("expected an array of hardware values, not " ++ @typeName(T));
+    return valWidth(info.array.child);
+}
+
 fn tupleWidth(comptime T: type) usize {
     return comptime blk: {
         var total: usize = 0;
@@ -352,6 +428,9 @@ fn SignalHandle(comptime W: usize, comptime signed_flag: bool) type {
 
         pub fn bit(self: @This(), comptime idx: usize) Expr(1) {
             comptime std.debug.assert(idx < W);
+            // A 1-bit value is a scalar in every target: selecting it is
+            // illegal, and its only bit is the value itself.
+            if (W == 1) return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .ref = self.ref } } };
             return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = .{ .sym = self.ref }, .index = idx } } } };
         }
 
@@ -359,7 +438,20 @@ fn SignalHandle(comptime W: usize, comptime signed_flag: bool) type {
         /// vector; use `asSigned` on the result to reinterpret.
         pub fn slice(self: @This(), comptime hi: usize, comptime lo: usize) Expr(hi - lo + 1) {
             comptime std.debug.assert(hi >= lo and hi < W);
+            if (W == 1) return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .ref = self.ref } } };
             return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = .{ .sym = self.ref }, .hi = hi, .lo = lo } } } };
+        }
+
+        /// This clock, capturing on its falling edge (`seqNoReset`/`seqReset`).
+        pub fn negedge(self: @This()) ActiveEdge {
+            comptime if (W != 1) @compileError("negedge needs a 1-bit clock");
+            return .{ .clk = .{ .ref = self.ref }, .edge = .falling };
+        }
+
+        /// This clock, capturing on its rising edge (the default).
+        pub fn posedge(self: @This()) ActiveEdge {
+            comptime if (W != 1) @compileError("posedge needs a 1-bit clock");
+            return .{ .clk = .{ .ref = self.ref }, .edge = .rising };
         }
     };
 }
@@ -653,7 +745,10 @@ fn foldNode(x: *const AnyExpr) ?u64 {
             for (items) |item| {
                 total += item.width;
                 if (total > 64) return null;
-                out = (out << @intCast(item.width)) | ((item.known orelse return null) & maskOf(item.width));
+                const v = (item.known orelse return null) & maskOf(item.width);
+                // A 64-bit item is the whole word; shifting a u64 by 64 is
+                // not defined.
+                out = if (item.width >= 64) v else (out << @intCast(item.width)) | v;
             }
             break :blk out & res_mask;
         },
@@ -846,6 +941,15 @@ pub const ExprBuilder = struct {
         }
         const v: u64 = value;
         return .{ .width = W, .is_signed = false, .known = v, .node = .{ .lit = v } };
+    }
+
+    /// A `W`-bit operand from a bare or typed Zig integer or a hardware value
+    /// of exactly `W` bits.
+    fn operand(self: ExprBuilder, comptime W: usize, x: anytype) Expr(W) {
+        if (@TypeOf(x) == comptime_int) return self.lit(W, x);
+        if (comptime isZigInt(@TypeOf(x))) return .{ .e = self.typedLit(W, x) };
+        comptime if (valWidth(@TypeOf(x)) != W) @compileError(std.fmt.comptimePrint("operand must be {d} bits", .{W}));
+        return .{ .e = asAny(x) };
     }
 
     /// Condition operand: bare integers become 1-bit literals, typed values
@@ -1083,15 +1187,22 @@ pub const ExprBuilder = struct {
         return .{ .expr = self.dup(xe) };
     }
 
-    pub fn bit(self: ExprBuilder, sig: anytype, index: usize) Expr(1) {
-        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = self.selectBase(sig), .index = index } } } };
+    pub fn bit(self: ExprBuilder, sig: anytype, position: usize) Expr(1) {
+        // A 1-bit value is a scalar in every target; its only bit is itself.
+        if (asAny(sig).width == 1 and position == 0) {
+            var whole = asAny(sig);
+            whole.is_signed = false;
+            whole.hash = 0;
+            return .{ .e = whole };
+        }
+        return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit = .{ .base = self.selectBase(sig), .index = position } } } };
     }
 
     /// Dynamic bit select. An index narrower than the select needs is
     /// zero-extended so the emitted select is lint-clean (Verilator WIDTH).
-    pub fn bitDyn(self: ExprBuilder, sig: anytype, index: anytype) Expr(1) {
+    pub fn bitDyn(self: ExprBuilder, sig: anytype, position: anytype) Expr(1) {
         const IW = comptime shiftWidth(valWidth(@TypeOf(sig)));
-        const ie = if (comptime valWidth(@TypeOf(index)) < IW) self.zext(index, IW).e else asAny(index);
+        const ie = if (comptime valWidth(@TypeOf(position)) < IW) self.zext(position, IW).e else asAny(position);
         return .{ .e = .{ .width = 1, .is_signed = false, .node = .{ .bit_dyn = .{ .base = self.selectBase(sig), .index = self.dup(ie) } } } };
     }
 
@@ -1101,7 +1212,57 @@ pub const ExprBuilder = struct {
                 @compileError("slice bounds out of range");
             }
         }
+        if (asAny(sig).width == 1 and hi == 0 and lo == 0) {
+            var whole = asAny(sig);
+            whole.is_signed = false;
+            whole.hash = 0;
+            return .{ .e = whole };
+        }
         return .{ .e = .{ .width = hi - lo + 1, .is_signed = false, .node = .{ .slice = .{ .base = self.selectBase(sig), .hi = hi, .lo = lo } } } };
+    }
+
+    /// Bits `[lo, lo + W)` of `x` with a runtime start `lo` (Verilog's
+    /// `x[lo +: W]`). Bits at or past the width of `x` read as zero, so an
+    /// out-of-range select has one defined two-state value in simulation and
+    /// synthesis. Lowered as a logical shift and a truncation.
+    pub fn sliceDyn(self: ExprBuilder, x: anytype, lo: anytype, comptime W: usize) Expr(W) {
+        const XW = comptime valWidth(@TypeOf(x));
+        const base = self.asUnsigned(x);
+        if (comptime XW < W) return self.trunc(self.shr(self.zext(base, W), lo), W);
+        return self.trunc(self.shr(base, lo), W);
+    }
+
+    /// Element `idx` of an array of same-width hardware values, selected at
+    /// runtime. An index past the last element reads zero; elements the
+    /// index cannot reach are left out. The elements are packed at a
+    /// power-of-two stride and selected with `sliceDyn`, which synthesizes to
+    /// a log-depth mux.
+    pub fn index(self: ExprBuilder, items: anytype, idx: anytype) Expr(arrayElemWidth(@TypeOf(items))) {
+        const W = comptime arrayElemWidth(@TypeOf(items));
+        const N = comptime reachable(@typeInfo(@TypeOf(items)).array.len, valWidth(@TypeOf(idx)));
+        const s = comptime std.math.log2_int_ceil(usize, @max(W, 1));
+        const S = comptime @as(usize, 1) << s;
+        const list = self.allocator.alloc(AnyExpr, N) catch @panic("zihdl: expression arena out of memory");
+        for (items[0..N], 0..) |item, i| {
+            const elem = if (comptime S == W) self.asUnsigned(item) else self.zext(self.asUnsigned(item), S);
+            list[N - 1 - i] = self.dup(elem.e).*;
+        }
+        const packed_vec = Expr(N * S){ .e = .{ .width = N * S, .is_signed = false, .node = .{ .concat = list } } };
+        const IW = comptime valWidth(@TypeOf(idx));
+        const offset = if (comptime s == 0) Expr(IW){ .e = asAny(idx) } else self.concat(.{ idx, self.lit(s, 0) });
+        var picked = self.sliceDyn(packed_vec, offset, W);
+        picked.e.is_signed = comptime typeIsSigned(@typeInfo(@TypeOf(items)).array.child);
+        return picked;
+    }
+
+    /// Procedural write of `value` to element `idx` of an array of registers:
+    /// a `case` over the index, so an index past the last element writes
+    /// nothing. Elements the index cannot reach get no branch.
+    pub fn indexAssign(self: ExprBuilder, items: anytype, idx: anytype, value: anytype) Stmt {
+        const N = comptime reachable(@typeInfo(@TypeOf(items)).array.len, valWidth(@TypeOf(idx)));
+        const branches = self.allocator.alloc(CaseBranch, N) catch @panic("zihdl: expression arena out of memory");
+        for (items[0..N], 0..) |item, i| branches[i] = self.caseBranch(i, &.{self.assign(item, value)});
+        return .{ .case_block = .{ .sel = self.intern(idx), .cases = branches } };
     }
 
     pub fn zext(self: ExprBuilder, x: anytype, comptime NW: usize) Expr(NW) {
@@ -1125,6 +1286,8 @@ pub const ExprBuilder = struct {
         comptime {
             if (NW > valWidth(@TypeOf(x))) @compileError("trunc target must not be wider than source");
         }
+        // Equal width is the value itself: no `[0:0]` select on a scalar.
+        if (comptime NW == valWidth(@TypeOf(x))) return .{ .e = xe };
         return .{ .e = .{ .width = NW, .is_signed = xe.is_signed, .node = .{ .trunc = self.dup(xe) } } };
     }
 
@@ -1244,6 +1407,10 @@ pub const ExprBuilder = struct {
     pub fn memWriteBytes(self: ExprBuilder, mem: anytype, addr: anytype, src: anytype, be: anytype) Stmt {
         const W = comptime valWidth(@TypeOf(mem));
         const bytes = (W + 7) / 8;
+        comptime {
+            if (@TypeOf(src) != comptime_int and valWidth(@TypeOf(src)) != W) @compileError("memory write data width must match memory width");
+            if (@TypeOf(be) != comptime_int and valWidth(@TypeOf(be)) != bytes) @compileError("byte enables need one bit per 8-bit lane of the memory");
+        }
         return .{ .mem_write_bytes = .{
             .mem = asRef(mem),
             .addr = self.intern(addr),
@@ -1317,12 +1484,29 @@ pub const ResetSpec = struct {
 
 pub const Sensitivity = union(enum) {
     comb,
-    edge: struct { clk: SymRef, rst: ?ResetSpec },
+    /// Clocked process: `active` selects the clock edge its flops capture on.
+    edge: struct { clk: SymRef, rst: ?ResetSpec, active: ClockEdge = .rising },
 };
+
+/// A clock signal paired with the edge a process captures on. Built by
+/// `Signal(1).negedge()`/`posedge()`; plain `Signal(1)` clocks are rising.
+pub const ActiveEdge = struct {
+    clk: Signal(1),
+    edge: ClockEdge,
+};
+
+/// Clock reference and active edge of a `seqNoReset`/`seqReset` clock
+/// argument: a `Signal(1)` (rising) or an `ActiveEdge`.
+fn clockArg(clk: anytype) struct { ref: SymRef, edge: ClockEdge } {
+    if (@TypeOf(clk) == ActiveEdge) return .{ .ref = clk.clk.ref, .edge = clk.edge };
+    return .{ .ref = asRef(clk), .edge = .rising };
+}
 
 pub const Process = struct {
     sensitivity: Sensitivity,
     stmts: []const Stmt,
+    /// Authored source location (`Module.source_locs`, 1-based); 0 = none.
+    loc: u32 = 0,
 };
 
 pub const Connection = struct {
@@ -1364,11 +1548,15 @@ pub const Instance = struct {
     /// Resolved family shape for `instantiateShape` instances; empty for plain
     /// instantiations.
     shape: []const ShapeField = &.{},
+    /// Authored source location (`Module.source_locs`, 1-based); 0 = none.
+    loc: u32 = 0,
 };
 
 pub const Assign = struct {
     dst: SymRef,
     src: AnyExpr,
+    /// Authored source location (`Module.source_locs`, 1-based); 0 = none.
+    loc: u32 = 0,
 };
 
 // ============================================================================
@@ -1386,6 +1574,8 @@ pub const ClockDomain = struct {
     rst_n: Signal(1),
     power: PowerDomain = .{},
     freq_hz: u64 = 120_000_000,
+    /// Edge the domain's flops capture on; `seq` and the memory ports use it.
+    edge: ClockEdge = .rising,
     reset: ResetPolicy = .{},
     /// Declared reset-release synchronizer chain (v2 timing metadata), first
     /// stage first. Stages resolve against the declaring module's scope and
@@ -1395,6 +1585,21 @@ pub const ClockDomain = struct {
     /// Authored relationship to a reference clock (v2 timing metadata); null
     /// keeps the relationship undeclared.
     relationship: ?ClockRelationship = null,
+};
+
+/// A clock this module generates on one of its output ports by dividing an
+/// input clock (`ModuleBuilder.addGeneratedClock`). SDC export traces `source`
+/// up the hierarchy and emits `create_generated_clock` on the instance pin.
+pub const GeneratedClock = struct {
+    name: []const u8,
+    /// Output port carrying the generated clock.
+    output: SymRef,
+    /// Input clock port it is derived from.
+    source: SymRef,
+    /// Source periods per generated period: 1 or an even number, so the
+    /// generated clock keeps a 50% duty cycle and its edges stay on source
+    /// rising edges.
+    divide_by: u32,
 };
 
 /// Reset polarity and assertion/release policy for a clock domain. `polarity`
@@ -1657,6 +1862,17 @@ pub const Module = struct {
     timing: []const InputTiming = &.{},
     /// Authored per-output timing intent (loads; v2 metadata sidecar).
     output_timing: []const OutputTiming = &.{},
+    /// Declared memory ports, in declaration order.
+    mem_ports: []const MemPort = &.{},
+    /// Source locations named by `loc` fields (`loc = i + 1`).
+    source_locs: []const SourceLoc = &.{},
+    /// Clocks generated on this module's output ports.
+    generated_clocks: []const GeneratedClock = &.{},
+
+    /// The recorded source location of a `loc` field, if any.
+    pub fn sourceLoc(self: *const Module, loc: u32) ?SourceLoc {
+        return if (loc == 0 or loc > self.source_locs.len) null else self.source_locs[loc - 1];
+    }
 };
 
 // ============================================================================
@@ -1681,6 +1897,25 @@ pub fn collectAssigned(alloc: std.mem.Allocator, stmts: []const Stmt, list: *std
             },
         }
     }
+}
+
+/// Source of the first assignment to `dst` in a statement tree.
+fn findAssignSource(stmts: []const Stmt, dst: SymRef) ?AnyExpr {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .assign => |a| if (symEql(a.dst, dst)) return a.src,
+            .if_then => |it| {
+                if (findAssignSource(it.then_stmts, dst)) |src| return src;
+                if (findAssignSource(it.else_stmts, dst)) |src| return src;
+            },
+            .case_block => |cb| {
+                for (cb.cases) |c| if (findAssignSource(c.stmts, dst)) |src| return src;
+                if (findAssignSource(cb.default_stmts, dst)) |src| return src;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn addUniqueSym(alloc: std.mem.Allocator, list: *std.ArrayList(SymRef), ref: SymRef) !void {
@@ -2407,7 +2642,8 @@ fn bundleFieldDir(comptime S: type, comptime field_name: []const u8, comptime in
 fn bundleLeafCount(comptime T: type) usize {
     return comptime blk: {
         if (isSignalHandle(T)) break :blk 1;
-        if (@typeInfo(T) != .@"struct") @compileError("bundle value must be Signal(W) or a nested struct, not " ++ @typeName(T));
+        if (@typeInfo(T) == .array) break :blk @typeInfo(T).array.len * bundleLeafCount(@typeInfo(T).array.child);
+        if (@typeInfo(T) != .@"struct") @compileError("bundle value must be Signal(W), an array or a nested struct, not " ++ @typeName(T));
         var count: usize = 0;
         for (@typeInfo(T).@"struct".field_types) |field_type| count += bundleLeafCount(field_type);
         break :blk count;
@@ -2418,7 +2654,8 @@ fn bundleLeafCount(comptime T: type) usize {
 fn validatePortBundle(comptime T: type, comptime label: []const u8) void {
     comptime {
         if (isSignalHandle(T)) return;
-        if (@typeInfo(T) != .@"struct") @compileError(label ++ " must be Signal(W) or a nested struct bundle");
+        if (@typeInfo(T) == .array) return validatePortBundle(@typeInfo(T).array.child, label ++ "[]");
+        if (@typeInfo(T) != .@"struct") @compileError(label ++ " must be Signal(W), an array or a nested struct bundle");
         if (@hasDecl(T, "dirs")) {
             const Dirs = @TypeOf(T.dirs);
             if (@typeInfo(Dirs) != .@"struct") @compileError(label ++ ": dirs must be a struct of PortDir values");
@@ -2628,7 +2865,89 @@ pub const Design = struct {
         const mod = self.findModule(BlockType.name).?;
         mod.is_top = true;
         try self.validateTimingHierarchy();
+        try self.validateResetRelease();
         return mod;
+    }
+
+    /// `ResetPolicy.release = .synchronous` is a checked claim, not a label:
+    /// the domain's reset must be the final stage of a declared reset-release
+    /// chain (`ClockDomain.release_synchronizer`) clocked by the same clock
+    /// net and edge as the domain, reached through plain assignments,
+    /// instance outputs and instance inputs. A top-level input is the one
+    /// place the claim stays external, because only the environment can
+    /// release it. A row that declares its own chain is checked structurally
+    /// by `finish()`. `lib.releasedDomain` builds a conforming chain.
+    pub fn validateResetRelease(self: *const Design) !void {
+        for (self.modules.items) |module| {
+            for (module.clocks) |clock| {
+                if (clock.reset.release != .synchronous or clock.release_synchronizer.len > 0) continue;
+                if (!self.resetReleased(module, clock.rst_n.ref, clock.clk.ref, clock.edge, 0)) {
+                    std.log.warn("zihdl: clock domain '{s}' in module '{s}' declares a synchronous reset release, but '{s}' is not driven by a release synchronizer on clock '{s}' (use lib.releasedDomain)", .{ clock.name, module.name, clock.rst_n.name(), clock.clk.name() });
+                    return error.UnsynchronizedResetRelease;
+                }
+            }
+        }
+    }
+
+    /// True when `signal` in `module` is released by a declared chain on
+    /// clock net `clk` (a symbol of `module`) and `edge`. The clock is mapped
+    /// through instance connections alongside the reset.
+    fn resetReleased(self: *const Design, module: *const Module, signal: SymRef, clk: SymRef, edge: ClockEdge, depth: usize) bool {
+        if (depth > 64) return false;
+        for (module.clocks) |clock| {
+            const chain = clock.release_synchronizer;
+            if (chain.len > 0 and hierarchySymEqual(chain[chain.len - 1].signal, signal))
+                return hierarchySymEqual(clock.clk.ref, clk) and clock.edge == edge;
+        }
+        switch (signal.kind()) {
+            .wire, .output => {
+                for (module.assigns) |a| {
+                    if (!hierarchySymEqual(a.dst, signal)) continue;
+                    return a.src.node == .ref and self.resetReleased(module, a.src.node.ref, clk, edge, depth + 1);
+                }
+                for (module.instances) |inst| {
+                    for (inst.connections) |conn| {
+                        if (conn.direction != .output or !hierarchySymEqual(conn.signal, signal)) continue;
+                        const child = self.findModule(inst.module_name) orelse return false;
+                        const port = child.scope.find(conn.port_name) orelse return false;
+                        // Any child input fed by our clock net may be the
+                        // chain's clock.
+                        for (inst.connections) |clk_conn| {
+                            if (clk_conn.direction != .input or !hierarchySymEqual(clk_conn.signal, clk)) continue;
+                            const child_clk = child.scope.find(clk_conn.port_name) orelse continue;
+                            if (self.resetReleased(child, port, child_clk, edge, depth + 1)) return true;
+                        }
+                        return false;
+                    }
+                }
+                return false;
+            },
+            .input => {
+                // Every instantiation must deliver a reset released on the
+                // net it connects to our clock port.
+                var instantiated = false;
+                for (self.modules.items) |parent| {
+                    for (parent.instances) |inst| {
+                        if (!std.mem.eql(u8, inst.module_name, module.name)) continue;
+                        if (clk.kind() != .input) return false;
+                        const parent_signal = instanceParentSignal(inst, signal.name()) orelse return false;
+                        const parent_clk = instanceParentSignal(inst, clk.name()) orelse return false;
+                        if (!self.resetReleased(parent, parent_signal, parent_clk, edge, depth + 1)) return false;
+                        instantiated = true;
+                    }
+                }
+                if (instantiated) return true;
+                // A root input: only the environment can release it, so it
+                // counts only when this root itself claims the release on
+                // this clock.
+                for (module.clocks) |clock| {
+                    if (clock.reset.release == .synchronous and hierarchySymEqual(clock.rst_n.ref, signal) and
+                        hierarchySymEqual(clock.clk.ref, clk) and clock.edge == edge) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
     }
 
     /// Validates authored timing intent across instances with the same
@@ -2988,6 +3307,11 @@ pub const ModuleBuilder = struct {
     fold_log: std.ArrayList(FoldEvent),
     timing: std.ArrayList(InputTiming),
     output_timing: std.ArrayList(OutputTiming),
+    mem_ports: std.ArrayList(MemPort),
+    source_locs: std.ArrayList(SourceLoc),
+    generated_clocks: std.ArrayList(GeneratedClock),
+    /// Location recorded on what is declared next (`at`); 0 = none.
+    loc: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, design: *Design, name: []const u8) !ModuleBuilder {
         return .{
@@ -3006,6 +3330,9 @@ pub const ModuleBuilder = struct {
             .fold_log = .empty,
             .timing = .empty,
             .output_timing = .empty,
+            .mem_ports = .empty,
+            .source_locs = .empty,
+            .generated_clocks = .empty,
         };
     }
 
@@ -3021,6 +3348,26 @@ pub const ModuleBuilder = struct {
         self.fold_log.deinit(self.allocator);
         self.timing.deinit(self.allocator);
         self.output_timing.deinit(self.allocator);
+        self.mem_ports.deinit(self.allocator);
+        self.source_locs.deinit(self.allocator);
+        self.generated_clocks.deinit(self.allocator);
+    }
+
+    /// Records `src` (pass `@src()`) as the Zig source location of every
+    /// declaration, assignment, process and instance built after this call,
+    /// until the next `at`. Backends emit it as a `// @[file:line]` comment, so
+    /// a lint or timing report on an RTL line leads back to the Zig line.
+    /// Modules that never call it emit unchanged RTL.
+    pub fn at(self: *ModuleBuilder, src: anytype) !void {
+        if (self.source_locs.items.len > 0) {
+            const last = self.source_locs.items[self.source_locs.items.len - 1];
+            if (last.line == src.line and std.mem.eql(u8, last.file, src.file)) {
+                self.loc = @intCast(self.source_locs.items.len);
+                return;
+            }
+        }
+        try self.source_locs.append(self.allocator, .{ .file = src.file, .line = src.line });
+        self.loc = @intCast(self.source_locs.items.len);
     }
 
     pub fn exprs(self: *ModuleBuilder) ExprBuilder {
@@ -3067,6 +3414,7 @@ pub const ModuleBuilder = struct {
     fn declareLeaf(self: *ModuleBuilder, comptime T: type, kind: SymbolKind, name: []const u8, init_val: u64) !T {
         const ref = try self.scope.add(kind, name, valWidth(T), init_val, 0);
         self.scope.symbols.items[ref.idx].is_signed = typeIsSigned(T);
+        self.scope.symbols.items[ref.idx].loc = self.loc;
         return T.make(ref);
     }
 
@@ -3125,15 +3473,38 @@ pub const ModuleBuilder = struct {
         return self.declareLeaf(T, .reg, name, init_val);
     }
 
+    /// `N` registers named `name_0` .. `name_{N-1}`, all reset to `init_val`;
+    /// index them at runtime with `ExprBuilder.index`/`indexAssign`.
+    pub fn regArray(self: *ModuleBuilder, name: []const u8, comptime N: usize, comptime W: usize, init_val: u64) ![N]Signal(W) {
+        var items: [N]Signal(W) = undefined;
+        for (&items, 0..) |*item, i| item.* = try self.reg(try self.indexedName(name, i), W, init_val);
+        return items;
+    }
+
+    /// `N` wires named `name_0` .. `name_{N-1}`.
+    pub fn wireArray(self: *ModuleBuilder, name: []const u8, comptime N: usize, comptime W: usize) ![N]Signal(W) {
+        var items: [N]Signal(W) = undefined;
+        for (&items, 0..) |*item, i| item.* = try self.wire(try self.indexedName(name, i), W);
+        return items;
+    }
+
+    fn indexedName(self: *ModuleBuilder, prefix: []const u8, i: usize) ![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ prefix, i });
+    }
+
     /// Non-overridable named constant.
     pub fn constant(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
-        return .{ .ref = try self.scope.add(.constant, name, W, val, 0) };
+        const ref = try self.scope.add(.constant, name, W, val, 0);
+        self.scope.symbols.items[ref.idx].loc = self.loc;
+        return .{ .ref = ref };
     }
 
     /// Overridable module parameter, advertised via the block's `Params`
     /// schema and overridden at instantiation.
     pub fn moduleParam(self: *ModuleBuilder, name: []const u8, comptime W: usize, val: u64) !Param(W) {
-        return .{ .ref = try self.scope.add(.module_param, name, W, val, 0) };
+        const ref = try self.scope.add(.module_param, name, W, val, 0);
+        self.scope.symbols.items[ref.idx].loc = self.loc;
+        return .{ .ref = ref };
     }
 
     /// Registers a named group of encoded values (FSM states, opcodes, field
@@ -3155,6 +3526,13 @@ pub const ModuleBuilder = struct {
         try self.addEnumGroup(name, @max(1, @bitSizeOf(E)), &entries, null);
     }
 
+    /// Declares that output port `clock.output` carries a clock generated from
+    /// input `clock.source` (SDC `create_generated_clock`, design.json
+    /// `generated_clocks`). Checked by `finish()`.
+    pub fn addGeneratedClock(self: *ModuleBuilder, clock: GeneratedClock) !void {
+        try self.generated_clocks.append(self.allocator, clock);
+    }
+
     /// Records a clock domain for timing metadata (SDC export). The declared
     /// reset-release chain is copied so the caller's slice may be temporary.
     pub fn addClockDomain(self: *ModuleBuilder, domain: ClockDomain) !void {
@@ -3164,12 +3542,27 @@ pub const ModuleBuilder = struct {
     }
 
     pub fn mem(self: *ModuleBuilder, comptime W: usize, name: []const u8, depth: usize, opts: MemOpts) !Mem(W) {
+        if (opts.init_words.len > 0) {
+            if (W > 64 or opts.init_file == null or opts.init_words.len > depth) {
+                std.log.warn("zihdl: memory '{s}' generated contents need width <= 64, an init_file path and at most depth ({d}) words", .{ name, depth });
+                return error.InvalidMemoryInit;
+            }
+            for (opts.init_words) |word| {
+                if (W < 64 and word >> @intCast(W) != 0) {
+                    std.log.warn("zihdl: memory '{s}' initial word 0x{x} does not fit {d} bits", .{ name, word, W });
+                    return error.InvalidMemoryInit;
+                }
+            }
+        }
         const ref = try self.scope.add(.mem, name, W, 0, depth);
-        self.scope.symbols.items[ref.idx].read_kind = opts.read;
-        self.scope.symbols.items[ref.idx].write_mode = opts.write_mode;
-        self.scope.symbols.items[ref.idx].storage = opts.storage;
-        self.scope.symbols.items[ref.idx].init_file = opts.init_file;
-        self.scope.symbols.items[ref.idx].is_signed = opts.signed;
+        const sym = &self.scope.symbols.items[ref.idx];
+        sym.read_kind = opts.read;
+        sym.write_mode = opts.write_mode;
+        sym.storage = opts.storage;
+        sym.init_file = opts.init_file;
+        sym.init_words = try self.allocator.dupe(u64, opts.init_words);
+        sym.is_signed = opts.signed;
+        sym.loc = self.loc;
         return .{ .ref = ref, .depth = depth };
     }
 
@@ -3202,19 +3595,28 @@ pub const ModuleBuilder = struct {
         inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
             const full = try self.scopedName(prefix, field_name);
             const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
-            if (comptime isSignalHandle(field_type)) {
-                @field(result, field_name) = switch (dir) {
-                    .input => try self.declareLeaf(field_type, .input, full, 0),
-                    .output => try self.declareLeaf(field_type, .output, full, 0),
-                    .inout => @compileError("bundle leaves cannot be inout"),
-                };
-            } else if (@typeInfo(field_type) == .@"struct") {
-                @field(result, field_name) = try self.declarePortStruct(field_type, full, dir, flip);
-            } else {
-                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
-            }
+            @field(result, field_name) = try self.declarePortValue(field_type, full, dir, flip);
         }
         return result;
+    }
+
+    /// One bundle value as ports: a leaf, a nested struct, or an array whose
+    /// elements are named `name_0` .. `name_{N-1}`.
+    fn declarePortValue(self: *ModuleBuilder, comptime T: type, name: []const u8, comptime dir: PortDir, comptime flip: bool) !T {
+        if (comptime isSignalHandle(T)) return switch (dir) {
+            .input => self.declareLeaf(T, .input, name, 0),
+            .output => self.declareLeaf(T, .output, name, 0),
+            .inout => @compileError("bundle leaves cannot be inout"),
+        };
+        switch (@typeInfo(T)) {
+            .@"struct" => return self.declarePortStruct(T, name, dir, flip),
+            .array => |a| {
+                var items: T = undefined;
+                for (&items, 0..) |*item, i| item.* = try self.declarePortValue(a.child, try self.indexedName(name, i), dir, flip);
+                return items;
+            },
+            else => @compileError("bundle field '" ++ name ++ "' must be Signal(W), an array or a nested struct"),
+        }
     }
 
     pub fn declareInputs(self: *ModuleBuilder, comptime Inputs: type) !Inputs {
@@ -3237,16 +3639,22 @@ pub const ModuleBuilder = struct {
         if (@typeInfo(S) != .@"struct") @compileError("bundles must be structs, not " ++ @typeName(S));
         var result: S = undefined;
         inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
-            const full = try self.scopedName(prefix, field_name);
-            if (comptime isSignalHandle(field_type)) {
-                @field(result, field_name) = try self.declareLeaf(field_type, .wire, full, 0);
-            } else if (@typeInfo(field_type) == .@"struct") {
-                @field(result, field_name) = try self.wireStruct(field_type, full);
-            } else {
-                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
-            }
+            @field(result, field_name) = try self.wireValue(field_type, try self.scopedName(prefix, field_name));
         }
         return result;
+    }
+
+    fn wireValue(self: *ModuleBuilder, comptime T: type, name: []const u8) !T {
+        if (comptime isSignalHandle(T)) return self.declareLeaf(T, .wire, name, 0);
+        switch (@typeInfo(T)) {
+            .@"struct" => return self.wireStruct(T, name),
+            .array => |a| {
+                var items: T = undefined;
+                for (&items, 0..) |*item, i| item.* = try self.wireValue(a.child, try self.indexedName(name, i));
+                return items;
+            },
+            else => @compileError("bundle field '" ++ name ++ "' must be Signal(W), an array or a nested struct"),
+        }
     }
 
     fn scopedName(self: *ModuleBuilder, prefix: []const u8, name: []const u8) ![]const u8 {
@@ -3280,14 +3688,31 @@ pub const ModuleBuilder = struct {
         if (@typeInfo(S) != .@"struct") @compileError("bundle must be a struct");
         inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
             const path = comptime if (prefix.len == 0) field_name else prefix ++ "." ++ field_name;
-            if (comptime isSignalHandle(field_type)) {
-                try members.append(self.allocator, .{ .ref = asRef(@field(value, field_name)), .path = path });
-                width.* += field_type.width;
-            } else if (@typeInfo(field_type) == .@"struct") {
-                try self.collectBundleMembers(field_type, @field(value, field_name), path, members, width);
-            } else {
-                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
-            }
+            try self.collectBundleValue(field_type, @field(value, field_name), path, members, width);
+        }
+    }
+
+    /// Array elements join the member list as `path_0` .. `path_{N-1}`, the
+    /// same suffix their ports and wires carry.
+    fn collectBundleValue(
+        self: *ModuleBuilder,
+        comptime T: type,
+        value: T,
+        comptime path: []const u8,
+        members: *std.ArrayList(BundleMember),
+        width: *usize,
+    ) !void {
+        if (comptime isSignalHandle(T)) {
+            try members.append(self.allocator, .{ .ref = asRef(value), .path = path });
+            width.* += T.width;
+            return;
+        }
+        switch (@typeInfo(T)) {
+            .@"struct" => try self.collectBundleMembers(T, value, path, members, width),
+            .array => |a| inline for (0..a.len) |i| {
+                try self.collectBundleValue(a.child, value[i], path ++ std.fmt.comptimePrint("_{d}", .{i}), members, width);
+            },
+            else => @compileError("bundle field '" ++ path ++ "' must be Signal(W), an array or a nested struct"),
         }
     }
 
@@ -3307,6 +3732,13 @@ pub const ModuleBuilder = struct {
             }
             if (flip) return self.assign(src, dst);
             return self.assign(dst, src);
+        }
+        if (comptime @typeInfo(S) == .array) {
+            comptime {
+                if (@typeInfo(D) != .array or @typeInfo(D).array.len != @typeInfo(S).array.len) @compileError("connect: array shapes differ");
+            }
+            for (src, dst) |s_item, d_item| try self.connectStruct(@typeInfo(S).array.child, s_item, @typeInfo(D).array.child, d_item, flip);
+            return;
         }
         comptime {
             if (@typeInfo(S) != .@"struct" or @typeInfo(D) != .@"struct") @compileError("connect: both sides must be bundles of Signal(W)");
@@ -3331,7 +3763,7 @@ pub const ModuleBuilder = struct {
         const W = comptime valWidth(@TypeOf(dst));
         if (@TypeOf(src) == comptime_int) {
             const lit = self.exprs().lit(W, src);
-            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e });
+            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e, .loc = self.loc });
             return;
         }
         comptime {
@@ -3341,7 +3773,7 @@ pub const ModuleBuilder = struct {
                     std.fmt.comptimePrint("{d}", .{valWidth(@TypeOf(src))}) ++ " bits");
             }
         }
-        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src) });
+        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src), .loc = self.loc });
     }
 
     /// Continuous assignment; widths are checked again by `validate`.
@@ -3349,44 +3781,53 @@ pub const ModuleBuilder = struct {
         const W = comptime valWidth(@TypeOf(dst));
         if (@TypeOf(src) == comptime_int) {
             const lit = self.exprs().lit(W, src);
-            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e });
+            try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = lit.e, .loc = self.loc });
             return;
         }
-        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src) });
+        try self.assigns.append(self.allocator, .{ .dst = asRef(dst), .src = self.intern(src), .loc = self.loc });
     }
 
     pub fn seq(self: *ModuleBuilder, domain: ClockDomain, stmts: []const Stmt) !void {
-        try self.addProcess(.{ .edge = .{
-            .clk = domain.clk.ref,
-            .rst = .{ .signal = domain.rst_n.ref, .kind = resetKindOf(domain.reset) },
-        } }, stmts);
+        try self.addProcess(domainSensitivity(domain), stmts);
     }
 
+    /// Clocked process without reset. `clk` is a `Signal(1)` (rising edge) or
+    /// an `ActiveEdge` such as `clk.negedge()`.
     pub fn seqNoReset(self: *ModuleBuilder, clk: anytype, stmts: []const Stmt) !void {
-        try self.addProcess(.{ .edge = .{ .clk = asRef(clk), .rst = null } }, stmts);
+        const c = clockArg(clk);
+        try self.addProcess(.{ .edge = .{ .clk = c.ref, .rst = null, .active = c.edge } }, stmts);
     }
 
     /// Clocked process with an explicit reset kind (async/sync, polarity).
     pub fn seqReset(self: *ModuleBuilder, clk: anytype, reset: Reset, stmts: []const Stmt) !void {
+        const c = clockArg(clk);
         try self.addProcess(.{ .edge = .{
-            .clk = asRef(clk),
+            .clk = c.ref,
             .rst = .{ .signal = reset.signal.ref, .kind = reset.kind },
+            .active = c.edge,
         } }, stmts);
     }
 
     /// Clocked process gated by a clock enable (reset applies regardless of en).
     pub fn seqEnable(self: *ModuleBuilder, domain: ClockDomain, en: anytype, stmts: []const Stmt) !void {
-        try self.addProcessEnabled(.{ .edge = .{
-            .clk = domain.clk.ref,
-            .rst = .{ .signal = domain.rst_n.ref, .kind = resetKindOf(domain.reset) },
-        } }, en, stmts);
+        try self.addProcessEnabled(domainSensitivity(domain), en, stmts);
     }
 
     pub fn seqResetEnable(self: *ModuleBuilder, clk: anytype, reset: Reset, en: anytype, stmts: []const Stmt) !void {
+        const c = clockArg(clk);
         try self.addProcessEnabled(.{ .edge = .{
-            .clk = asRef(clk),
+            .clk = c.ref,
             .rst = .{ .signal = reset.signal.ref, .kind = reset.kind },
+            .active = c.edge,
         } }, en, stmts);
+    }
+
+    fn domainSensitivity(domain: ClockDomain) Sensitivity {
+        return .{ .edge = .{
+            .clk = domain.clk.ref,
+            .rst = .{ .signal = domain.rst_n.ref, .kind = resetKindOf(domain.reset) },
+            .active = domain.edge,
+        } };
     }
 
     pub fn comb(self: *ModuleBuilder, stmts: []const Stmt) !void {
@@ -3395,7 +3836,7 @@ pub const ModuleBuilder = struct {
 
     fn addProcess(self: *ModuleBuilder, sensitivity: Sensitivity, stmts: []const Stmt) !void {
         const copy = try self.allocator.dupe(Stmt, stmts);
-        try self.processes.append(self.allocator, .{ .sensitivity = sensitivity, .stmts = copy });
+        try self.processes.append(self.allocator, .{ .sensitivity = sensitivity, .stmts = copy, .loc = self.loc });
     }
 
     fn addProcessEnabled(self: *ModuleBuilder, sensitivity: Sensitivity, en: anytype, stmts: []const Stmt) !void {
@@ -3414,64 +3855,173 @@ pub const ModuleBuilder = struct {
         return domain;
     }
 
-    /// Simple synchronous read port: `rdata <= mem[addr]` when `en`.
-    pub fn syncRead(self: *ModuleBuilder, memory: anytype, domain: ClockDomain, en: anytype, addr: anytype) !Signal(valWidth(@TypeOf(memory))) {
+    /// Read port of `memory`. A registered memory (`MemOpts.read = .sync`)
+    /// needs `.domain` and loads `{mem}_{name}_rdata` on the domain's edge
+    /// when `.en` (default 1) is high; a combinational memory drives the
+    /// read-data wire continuously from `.addr`. A read port returns the
+    /// stored word: a same-cycle write through another port is seen a cycle
+    /// later (read-during-write semantics belong to `readWritePort`).
+    pub fn readPort(self: *ModuleBuilder, memory: anytype, name: []const u8, spec: anytype) !Signal(valWidth(@TypeOf(memory))) {
         const W = comptime valWidth(@TypeOf(memory));
-        // Each registered read is its own port; the first keeps `<mem>_rdata`
-        // and later ports of the same memory are numbered.
-        var rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
-        var port: usize = 1;
-        while (self.scope.find(rname) != null) : (port += 1) {
-            rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata{d}", .{ memory.ref.name(), port });
-        }
-        const rdata = try self.reg(rname, W, 0);
+        try self.checkPortName(memory.ref, name);
         const b = self.exprs();
-        try self.seq(domain, &.{
-            b.when(en, &.{b.assign(rdata, b.memRead(memory, addr))}, &.{}),
+        const rname = try std.fmt.allocPrint(self.allocator, "{s}_{s}_rdata", .{ memory.ref.name(), name });
+        const addr = self.intern(spec.addr);
+        var port = MemPort{ .mem = memory.ref, .name = name, .kind = .read, .addr = addr };
+        // `.domain` selects a registered port; it must match the memory.
+        const registered = memory.ref.symbol().read_kind == .sync;
+        const rdata = if (comptime @hasField(@TypeOf(spec), "domain")) blk: {
+            if (!registered) return memPortError(memory.ref, name, "a combinational memory's read port takes no .domain");
+            const domain: ClockDomain = spec.domain;
+            const r = try self.reg(rname, W, 0);
+            const load = b.assign(r, b.memRead(memory, spec.addr));
+            try self.seq(domain, &.{if (comptime @hasField(@TypeOf(spec), "en")) b.when(spec.en, &.{load}, &.{}) else load});
+            port.clk = domain.clk.ref;
+            port.edge = domain.edge;
+            break :blk r;
+        } else blk: {
+            comptime if (@hasField(@TypeOf(spec), "en")) @compileError("a combinational read port has no enable");
+            if (registered) return memPortError(memory.ref, name, "a registered memory's read port needs .domain");
+            const w = try self.wire(rname, W);
+            try self.assign(w, b.memRead(memory, spec.addr));
+            break :blk w;
+        };
+        port.rdata = rdata.ref;
+        try self.mem_ports.append(self.allocator, port);
+        return rdata;
+    }
+
+    /// Write port of `memory` on `.domain`: writes `.wdata` at `.addr` when
+    /// `.we` is high, byte-masked by `.be` (one bit per 8-bit lane) when
+    /// given. A memory may have any number of write ports. When two on the
+    /// same clock write one address in the same cycle, each lane goes to the
+    /// port declared first that writes it, so disjoint lanes both land.
+    /// Writes from different clocks to one address at once have no defined
+    /// order (as in silicon).
+    pub fn writePort(self: *ModuleBuilder, memory: anytype, name: []const u8, spec: anytype) !void {
+        const W = comptime valWidth(@TypeOf(memory));
+        try self.checkPortName(memory.ref, name);
+        const domain: ClockDomain = spec.domain;
+        const b = self.exprs();
+        const raw_we = Expr(1){ .e = b.cond1(spec.we) };
+        const be: ?Expr(laneCount(W)) = if (comptime @hasField(@TypeOf(spec), "be")) b.operand(laneCount(W), spec.be) else null;
+        const write = try self.lowerWrite(W, memory, name, domain, raw_we, self.intern(spec.addr), b.operand(W, spec.wdata), be);
+        try self.addProcess(.{ .edge = .{ .clk = domain.clk.ref, .rst = null, .active = domain.edge } }, &.{write.stmt});
+        try self.mem_ports.append(self.allocator, .{
+            .mem = memory.ref,
+            .name = name,
+            .kind = .write,
+            .clk = domain.clk.ref,
+            .edge = domain.edge,
+            .byte_enables = if (be != null) laneCount(W) else 0,
+            .addr = self.intern(spec.addr),
+            .we = self.intern(raw_we),
+            .be = if (be) |e| self.intern(e) else null,
+        });
+    }
+
+    /// Single-address read/write port on `.domain` (a registered memory):
+    /// when `.en` (default 1) is high it reads `.addr` into
+    /// `{mem}_{name}_rdata` and, when `.we` is also high, writes `.wdata`
+    /// (byte-masked by `.be` when given). A same-cycle read of the written
+    /// word follows the memory's `write_mode`: old data (`read_first`), the
+    /// word as written (`write_first`: the new lanes over the stored ones) or
+    /// the previous read data (`no_change`).
+    pub fn readWritePort(self: *ModuleBuilder, memory: anytype, name: []const u8, spec: anytype) !Signal(valWidth(@TypeOf(memory))) {
+        const W = comptime valWidth(@TypeOf(memory));
+        try self.checkPortName(memory.ref, name);
+        const domain: ClockDomain = spec.domain;
+        const b = self.exprs();
+        if (memory.ref.symbol().read_kind != .sync) return memPortError(memory.ref, name, "a read/write port needs a registered memory (MemOpts.read = .sync)");
+        const rname = try std.fmt.allocPrint(self.allocator, "{s}_{s}_rdata", .{ memory.ref.name(), name });
+        const rdata = try self.reg(rname, W, 0);
+        const en: ?Expr(1) = if (comptime @hasField(@TypeOf(spec), "en")) Expr(1){ .e = b.cond1(spec.en) } else null;
+        const port_we = Expr(1){ .e = b.cond1(spec.we) };
+        const raw_we = if (en) |e| b.and_(e, port_we) else port_we;
+        const be: ?Expr(laneCount(W)) = if (comptime @hasField(@TypeOf(spec), "be")) b.operand(laneCount(W), spec.be) else null;
+        const wdata = b.operand(W, spec.wdata);
+        const write = try self.lowerWrite(W, memory, name, domain, raw_we, self.intern(spec.addr), wdata, be);
+        const old = b.memRead(memory, spec.addr);
+        const read = b.assign(rdata, old);
+        const access = switch (memory.ref.symbol().write_mode) {
+            .read_first => read,
+            .write_first => b.when(write.we, &.{b.assign(rdata, if (write.lanes) |lanes| mergeLanes(b, W, lanes, wdata, old) else wdata)}, &.{read}),
+            .no_change => b.when(b.not(write.we), &.{read}, &.{}),
+        };
+        // The read register resets with the domain; the array write sits in
+        // its own reset-free process so synthesis infers a memory.
+        try self.seq(domain, &.{if (en) |e| b.when(e, &.{access}, &.{}) else access});
+        try self.addProcess(.{ .edge = .{ .clk = domain.clk.ref, .rst = null, .active = domain.edge } }, &.{write.stmt});
+        try self.mem_ports.append(self.allocator, .{
+            .mem = memory.ref,
+            .name = name,
+            .kind = .read_write,
+            .clk = domain.clk.ref,
+            .edge = domain.edge,
+            .byte_enables = if (be != null) laneCount(W) else 0,
+            .rdata = rdata.ref,
+            .addr = self.intern(spec.addr),
+            .we = self.intern(raw_we),
+            .be = if (be) |e| self.intern(e) else null,
         });
         return rdata;
     }
 
-    /// Combined read/write port honoring the memory's write mode.
-    pub fn readWritePort(
-        self: *ModuleBuilder,
-        memory: anytype,
-        domain: ClockDomain,
-        en: anytype,
-        addr: anytype,
-        we: anytype,
-        waddr: anytype,
-        wdata: anytype,
-    ) !Signal(valWidth(@TypeOf(memory))) {
-        const W = comptime valWidth(@TypeOf(memory));
-        // Each registered read is its own port; the first keeps `<mem>_rdata`
-        // and later ports of the same memory are numbered.
-        var rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata", .{memory.ref.name()});
-        var port: usize = 1;
-        while (self.scope.find(rname) != null) : (port += 1) {
-            rname = try std.fmt.allocPrint(self.allocator, "{s}_rdata{d}", .{ memory.ref.name(), port });
-        }
-        const rdata = try self.reg(rname, W, 0);
-        const b = self.exprs();
-        const collision = b.and_(we, b.eq(waddr, addr));
-        const read = b.when(en, &.{b.assign(rdata, b.memRead(memory, addr))}, &.{});
+    fn laneCount(comptime W: usize) usize {
+        return (W + 7) / 8;
+    }
 
-        const stmts: []const Stmt = switch (memory.ref.symbol().write_mode) {
-            .read_first => &.{
-                read,
-                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
-            },
-            .write_first => &.{
-                b.when(collision, &.{b.assign(rdata, wdata)}, &.{read}),
-                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
-            },
-            .no_change => &.{
-                b.when(b.not(collision), &.{read}, &.{}),
-                b.when(we, &.{b.memWrite(memory, waddr, wdata)}, &.{}),
-            },
-        };
-        try self.seq(domain, stmts);
-        return rdata;
+    /// The write statement of a new port and its effective enables. Earlier
+    /// write ports of the same memory on the same clock and edge keep the
+    /// lanes they write at a colliding address: with one lane, or when neither
+    /// side has lane enables, the new port yields the whole word; otherwise it
+    /// becomes a lane-masked write without those lanes.
+    fn lowerWrite(
+        self: *ModuleBuilder,
+        comptime W: usize,
+        memory: anytype,
+        name: []const u8,
+        domain: ClockDomain,
+        raw_we: Expr(1),
+        addr: AnyExpr,
+        wdata: Expr(W),
+        be: ?Expr(laneCount(W)),
+    ) !struct { stmt: Stmt, we: Expr(1), lanes: ?Expr(laneCount(W)) } {
+        const L = comptime laneCount(W);
+        const b = self.exprs();
+        var we = raw_we;
+        var lanes = be;
+        for (self.mem_ports.items) |port| {
+            const other_we = port.we orelse continue;
+            const clk = port.clk orelse continue;
+            if (!symEql(port.mem, memory.ref) or !symEql(clk, domain.clk.ref) or port.edge != domain.edge) continue;
+            if (port.addr.width != addr.width) return memPortError(memory.ref, name, "write ports on one clock must use the same address width");
+            const same_addr = AnyExpr{ .width = 1, .is_signed = false, .node = .{ .bin_op = .{ .op = .eq, .lhs = b.dup(port.addr), .rhs = b.dup(addr) } } };
+            const collide = b.and_(Expr(1){ .e = other_we }, Expr(1){ .e = same_addr });
+            if (L == 1 or (port.be == null and lanes == null)) {
+                const taken = if (port.be) |other_be| b.and_(collide, Expr(1){ .e = other_be }) else collide;
+                we = b.and_(we, b.not(taken));
+            } else {
+                const ones = b.fill(b.lit(1, 1), L);
+                const taken = b.ternary(collide, if (port.be) |other_be| Expr(L){ .e = other_be } else ones, b.lit(L, 0));
+                lanes = b.band(lanes orelse ones, b.bitNot(taken));
+            }
+        }
+        const stmt = if (lanes) |l| b.when(we, &.{b.memWriteBytes(memory, addr, wdata, l)}, &.{}) else b.when(we, &.{b.memWrite(memory, addr, wdata)}, &.{});
+        return .{ .stmt = stmt, .we = we, .lanes = lanes };
+    }
+
+    /// Port names name the read-data register and the `design.json` row, so
+    /// they are unique per memory.
+    fn checkPortName(self: *ModuleBuilder, memory: SymRef, name: []const u8) !void {
+        for (self.mem_ports.items) |port| {
+            if (symEql(port.mem, memory) and std.mem.eql(u8, port.name, name)) return memPortError(memory, name, "duplicate port name");
+        }
+    }
+
+    fn memPortError(memory: SymRef, name: []const u8, why: []const u8) error{InvalidMemoryPort} {
+        std.log.warn("zihdl: memory '{s}' port '{s}': {s}", .{ memory.name(), name, why });
+        return error.InvalidMemoryPort;
     }
 
     /// Instantiates a reusable block. Definitions build on first use and are
@@ -3527,6 +4077,7 @@ pub const ModuleBuilder = struct {
             .instance_name = instance_name,
             .connections = conns,
             .params = param_list,
+            .loc = self.loc,
         });
         return result;
     }
@@ -3597,19 +4148,39 @@ pub const ModuleBuilder = struct {
             }
             const full = try self.scopedName(prefix, field_name);
             const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
-            const actual = @field(binding, field_name);
-            if (comptime isSignalHandle(field_type)) {
-                comptime {
-                    if (!isSignalHandle(@TypeOf(actual))) @compileError("input '" ++ field_name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
-                    if (field_type.width != @TypeOf(actual).width) @compileError("Port width mismatch on input '" ++ field_name ++ "' for module '" ++ block_name ++ "'");
-                }
-                conns[idx.*] = .{ .port_name = full, .signal = asRef(actual), .direction = dir };
-                idx.* += 1;
-            } else if (@typeInfo(field_type) == .@"struct") {
-                try self.addInputConnections(field_type, block_name, actual, full, dir, flip, conns, idx);
-            } else {
-                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
+            try self.addInputValue(field_type, block_name, @field(binding, field_name), full, dir, flip, conns, idx);
+        }
+    }
+
+    fn addInputValue(
+        self: *ModuleBuilder,
+        comptime T: type,
+        comptime block_name: []const u8,
+        actual: anytype,
+        port: []const u8,
+        comptime dir: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+    ) !void {
+        if (comptime isSignalHandle(T)) {
+            comptime {
+                if (!isSignalHandle(@TypeOf(actual))) @compileError("input of '" ++ block_name ++ "' must be bound to a Signal(W) handle, not " ++ @typeName(@TypeOf(actual)));
+                if (T.width != @TypeOf(actual).width) @compileError("Port width mismatch on an input of module '" ++ block_name ++ "'");
             }
+            conns[idx.*] = .{ .port_name = port, .signal = asRef(actual), .direction = dir };
+            idx.* += 1;
+            return;
+        }
+        switch (@typeInfo(T)) {
+            .@"struct" => try self.addInputConnections(T, block_name, actual, port, dir, flip, conns, idx),
+            .array => |a| {
+                comptime {
+                    if (@typeInfo(@TypeOf(actual)) != .array or @typeInfo(@TypeOf(actual)).array.len != a.len) @compileError("array input of '" ++ block_name ++ "' must be bound to an array of the same length");
+                }
+                for (actual, 0..) |item, i| try self.addInputValue(a.child, block_name, item, try self.indexedName(port, i), dir, flip, conns, idx);
+            },
+            else => @compileError("bundle field of '" ++ block_name ++ "' must be Signal(W), an array or a nested struct"),
         }
     }
 
@@ -3631,30 +4202,80 @@ pub const ModuleBuilder = struct {
             const full = try self.scopedName(prefix, field_name);
             const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
             if (@hasField(@TypeOf(binding), field_name)) {
-                const bound = @field(binding, field_name);
-                if (comptime isSignalHandle(field_type)) {
-                    comptime {
-                        if (!isSignalHandle(@TypeOf(bound))) @compileError("output '" ++ field_name ++ "' of '" ++ block_name ++ "' must be bound to a Signal(W) handle");
-                        if (field_type.width != @TypeOf(bound).width) @compileError("Output binding width mismatch on '" ++ field_name ++ "'");
-                    }
-                    conns[idx.*] = .{ .port_name = full, .signal = asRef(bound), .direction = dir };
-                    idx.* += 1;
-                    @field(result, field_name) = bound;
-                } else {
-                    var sub: field_type = undefined;
-                    try self.addOutputConnections(field_type, block_name, bound, instance_name, full, dir, flip, conns, idx, &sub);
-                    @field(result, field_name) = sub;
-                }
-            } else if (comptime isSignalHandle(field_type)) {
-                const w = try self.instanceWire(field_type, instance_name, full);
-                conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
-                idx.* += 1;
-                @field(result, field_name) = w;
+                @field(result, field_name) = try self.boundOutputValue(field_type, block_name, @field(binding, field_name), instance_name, full, dir, flip, conns, idx);
             } else {
-                var sub: field_type = undefined;
-                try self.addGeneratedOutputs(field_type, instance_name, full, dir, flip, conns, idx, &sub);
-                @field(result, field_name) = sub;
+                @field(result, field_name) = try self.generatedOutputValue(field_type, instance_name, full, dir, flip, conns, idx);
             }
+        }
+    }
+
+    fn boundOutputValue(
+        self: *ModuleBuilder,
+        comptime T: type,
+        comptime block_name: []const u8,
+        bound: anytype,
+        instance_name: []const u8,
+        port: []const u8,
+        comptime dir: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+    ) !T {
+        if (comptime isSignalHandle(T)) {
+            comptime {
+                if (!isSignalHandle(@TypeOf(bound))) @compileError("output of '" ++ block_name ++ "' must be bound to a Signal(W) handle, not " ++ @typeName(@TypeOf(bound)));
+                if (T.width != @TypeOf(bound).width) @compileError("Output binding width mismatch on module '" ++ block_name ++ "'");
+            }
+            conns[idx.*] = .{ .port_name = port, .signal = asRef(bound), .direction = dir };
+            idx.* += 1;
+            return bound;
+        }
+        switch (@typeInfo(T)) {
+            .@"struct" => {
+                var sub: T = undefined;
+                try self.addOutputConnections(T, block_name, bound, instance_name, port, dir, flip, conns, idx, &sub);
+                return sub;
+            },
+            .array => |a| {
+                comptime {
+                    if (@typeInfo(@TypeOf(bound)) != .array or @typeInfo(@TypeOf(bound)).array.len != a.len) @compileError("array output of '" ++ block_name ++ "' must be bound to an array of the same length");
+                }
+                var items: T = undefined;
+                for (&items, bound, 0..) |*item, b, i| item.* = try self.boundOutputValue(a.child, block_name, b, instance_name, try self.indexedName(port, i), dir, flip, conns, idx);
+                return items;
+            },
+            else => @compileError("bundle field of '" ++ block_name ++ "' must be Signal(W), an array or a nested struct"),
+        }
+    }
+
+    fn generatedOutputValue(
+        self: *ModuleBuilder,
+        comptime T: type,
+        instance_name: []const u8,
+        port: []const u8,
+        comptime dir: PortDir,
+        comptime flip: bool,
+        conns: []Connection,
+        idx: *usize,
+    ) !T {
+        if (comptime isSignalHandle(T)) {
+            const w = try self.instanceWire(T, instance_name, port);
+            conns[idx.*] = .{ .port_name = port, .signal = w.ref, .direction = dir };
+            idx.* += 1;
+            return w;
+        }
+        switch (@typeInfo(T)) {
+            .@"struct" => {
+                var sub: T = undefined;
+                try self.addGeneratedOutputs(T, instance_name, port, dir, flip, conns, idx, &sub);
+                return sub;
+            },
+            .array => |a| {
+                var items: T = undefined;
+                for (&items, 0..) |*item, i| item.* = try self.generatedOutputValue(a.child, instance_name, try self.indexedName(port, i), dir, flip, conns, idx);
+                return items;
+            },
+            else => @compileError("bundle field '" ++ port ++ "' must be Signal(W), an array or a nested struct"),
         }
     }
 
@@ -3672,18 +4293,7 @@ pub const ModuleBuilder = struct {
         inline for (@typeInfo(S).@"struct".field_names, @typeInfo(S).@"struct".field_types) |field_name, field_type| {
             const full = try self.scopedName(prefix, field_name);
             const dir = comptime bundleFieldDir(S, field_name, inherited, flip);
-            if (comptime isSignalHandle(field_type)) {
-                const w = try self.instanceWire(field_type, instance_name, full);
-                conns[idx.*] = .{ .port_name = full, .signal = w.ref, .direction = dir };
-                idx.* += 1;
-                @field(result, field_name) = w;
-            } else if (@typeInfo(field_type) == .@"struct") {
-                var sub: field_type = undefined;
-                try self.addGeneratedOutputs(field_type, instance_name, full, dir, flip, conns, idx, &sub);
-                @field(result, field_name) = sub;
-            } else {
-                @compileError("bundle field '" ++ field_name ++ "' must be Signal(W) or a nested struct");
-            }
+            @field(result, field_name) = try self.generatedOutputValue(field_type, instance_name, full, dir, flip, conns, idx);
         }
     }
 
@@ -3809,8 +4419,18 @@ pub const ModuleBuilder = struct {
 
         for (drivers, 0..) |count, i| {
             const sym = self.scope.symbols.items[i];
-            if (count > 1) {
-                std.log.err("zihdl: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
+            // A memory may be written by one process, or by one process per
+            // declared write port.
+            var allowed: usize = 1;
+            if (sym.kind == .mem) {
+                var writers: usize = 0;
+                for (self.mem_ports.items) |port| {
+                    if (port.mem.idx == i and port.kind != .read) writers += 1;
+                }
+                allowed = @max(allowed, writers);
+            }
+            if (count > allowed) {
+                std.log.warn("zihdl: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
                 return error.MultipleDrivers;
             }
             if (sym.kind == .output and count == 0) {
@@ -3915,6 +4535,21 @@ pub const ModuleBuilder = struct {
     /// unknown rather than inferred.
     fn validateTimingIntent(self: *ModuleBuilder) !void {
         try self.validateClockTiming();
+        for (self.generated_clocks.items, 0..) |gc, i| {
+            const ok_output = gc.output.scope == self.scope and gc.output.kind() == .output and gc.output.width() == 1;
+            const ok_source = gc.source.scope == self.scope and gc.source.kind() == .input and gc.source.width() == 1;
+            const ok_ratio = gc.divide_by == 1 or (gc.divide_by >= 2 and gc.divide_by % 2 == 0);
+            if (!ok_output or !ok_source or !ok_ratio) {
+                std.log.warn("zihdl: generated clock '{s}' in module '{s}' needs a 1-bit output, a 1-bit input source and divide_by 1 or even", .{ gc.name, self.name });
+                return error.InvalidTimingIntent;
+            }
+            for (self.generated_clocks.items[0..i]) |other| {
+                if (std.mem.eql(u8, other.name, gc.name) or symEql(other.output, gc.output)) {
+                    std.log.warn("zihdl: duplicate generated clock '{s}' in module '{s}'", .{ gc.name, self.name });
+                    return error.InvalidTimingIntent;
+                }
+            }
+        }
         for (self.timing.items, 0..) |intent, i| {
             if (intent.signal.scope != self.scope or intent.signal.kind() != .input) {
                 std.log.warn("zihdl: timing intent for '{s}' in module '{s}' must reference an input port of this module", .{ intent.signal.name(), self.name });
@@ -4085,6 +4720,7 @@ pub const ModuleBuilder = struct {
                         }
                     }
                 }
+                try self.validateReleaseChain(clock);
             }
             if (clock.relationship) |rel| {
                 if (rel.related_to) |ref| {
@@ -4113,6 +4749,69 @@ pub const ModuleBuilder = struct {
                 }
             }
         }
+    }
+
+    /// A declared reset-release chain is real hardware: every stage is a flop
+    /// on the row's clock and edge, asynchronously reset by one raw reset;
+    /// each later stage samples the previous one; and the row's reset is that
+    /// raw reset (the chain's own row) or the final stage (a released
+    /// domain's row).
+    fn validateReleaseChain(self: *ModuleBuilder, clock: ClockDomain) !void {
+        const chain = clock.release_synchronizer;
+        // One flop leaves its own output exposed to the asynchronous release.
+        if (chain.len < 2) return self.chainError(clock, chain[0].signal, "is the only stage; a release synchronizer needs at least two");
+        var raw: ?SymRef = null;
+        var assigned = std.ArrayList(SymRef).empty;
+        defer assigned.deinit(self.allocator);
+        for (chain, 0..) |stage, si| {
+            const proc = for (self.processes.items) |proc| {
+                assigned.clearRetainingCapacity();
+                try collectAssigned(self.allocator, proc.stmts, &assigned);
+                const hit = for (assigned.items) |r| {
+                    if (symEql(r, stage.signal)) break true;
+                } else false;
+                if (hit) break proc;
+            } else return self.chainError(clock, stage.signal, "is never assigned");
+            const e = switch (proc.sensitivity) {
+                .edge => |e| e,
+                .comb => return self.chainError(clock, stage.signal, "is not a flop"),
+            };
+            if (!symEql(e.clk, clock.clk.ref) or e.active != clock.edge) return self.chainError(clock, stage.signal, "is not clocked by the domain's clock and edge");
+            const rst = e.rst orelse return self.chainError(clock, stage.signal, "has no asynchronous reset");
+            if (rst.kind != .async_low and rst.kind != .async_high) return self.chainError(clock, stage.signal, "has no asynchronous reset");
+            if (raw) |r| {
+                if (!symEql(r, rst.signal)) return self.chainError(clock, stage.signal, "is reset by a different signal than the first stage");
+            } else raw = rst.signal;
+            // Every stage resets to the asserted level and the first samples
+            // the released level, so the chain shifts release in after reset.
+            const released: u64 = if (rst.kind == .async_low) 1 else 0;
+            const bit: u6 = @intCast(stage.bit orelse 0);
+            if ((stage.signal.symbol().init_val >> bit) & 1 == released) return self.chainError(clock, stage.signal, "does not reset to the asserted level");
+            const src = findAssignSource(proc.stmts, stage.signal) orelse return self.chainError(clock, stage.signal, "is not assigned directly");
+            if (si == 0) {
+                const tied = switch (src.node) {
+                    .lit => |v| (v >> bit) & 1 == released,
+                    else => false,
+                };
+                if (!tied) return self.chainError(clock, stage.signal, "(the first stage) does not sample the released reset level");
+            } else {
+                const prev = chain[si - 1].signal;
+                const from_prev = switch (src.node) {
+                    .ref => |r| symEql(r, prev),
+                    .bit => |bt| bt.base == .sym and symEql(bt.base.sym, prev),
+                    else => false,
+                };
+                if (!from_prev) return self.chainError(clock, stage.signal, "does not sample the previous stage");
+            }
+        }
+        const r = raw.?;
+        if (!symEql(clock.rst_n.ref, r) and !symEql(clock.rst_n.ref, chain[chain.len - 1].signal))
+            return self.chainError(clock, clock.rst_n.ref, "(the domain reset) is neither the chain's raw reset nor its final stage");
+    }
+
+    fn chainError(self: *ModuleBuilder, clock: ClockDomain, signal: SymRef, why: []const u8) error{InvalidTimingIntent} {
+        std.log.warn("zihdl: reset-release chain of clock domain '{s}' in module '{s}': '{s}' {s}", .{ clock.name, self.name, signal.name(), why });
+        return error.InvalidTimingIntent;
     }
 
     /// Validates one authored output load: finite and non-negative, whether it
@@ -4253,11 +4952,30 @@ pub const ModuleBuilder = struct {
         self.processes = kept_processes;
     }
 
+    /// A register something reads but no process assigns would hold `x` in
+    /// every simulator; two-state designs reject it.
+    fn checkLiveRegistersDriven(self: *ModuleBuilder) !void {
+        var assigned = std.ArrayList(SymRef).empty;
+        defer assigned.deinit(self.allocator);
+        for (self.processes.items) |proc| try collectAssigned(self.allocator, proc.stmts, &assigned);
+        for (self.scope.symbols.items, 0..) |sym, i| {
+            if (sym.kind != .reg or sym.dead) continue;
+            const driven = for (assigned.items) |r| {
+                if (r.idx == i) break true;
+            } else false;
+            if (!driven) {
+                std.log.warn("zihdl: register '{s}' in module '{s}' is read but never assigned", .{ sym.name, self.name });
+                return error.UndrivenRegister;
+            }
+        }
+    }
+
     pub fn finish(self: *ModuleBuilder) !*Module {
         try self.markRegisters();
         try self.validate();
         try self.validateTimingIntent();
         try self.eliminateDead();
+        try self.checkLiveRegistersDriven();
 
         const mod = try self.allocator.create(Module);
         mod.* = .{
@@ -4274,6 +4992,9 @@ pub const ModuleBuilder = struct {
             .folds = try self.fold_log.toOwnedSlice(self.allocator),
             .timing = try self.timing.toOwnedSlice(self.allocator),
             .output_timing = try self.output_timing.toOwnedSlice(self.allocator),
+            .mem_ports = try self.mem_ports.toOwnedSlice(self.allocator),
+            .source_locs = try self.source_locs.toOwnedSlice(self.allocator),
+            .generated_clocks = try self.generated_clocks.toOwnedSlice(self.allocator),
         };
         try self.design.register(mod);
         return mod;
@@ -4394,8 +5115,8 @@ test "block families specialize child shape from parent parameters" {
                     const outs = try mb.declareOutputs(Outputs);
                     const domain = ClockDomain{ .name = "sys", .clk = ins.clk, .rst_n = ins.rst_n };
                     try mb.addClockDomain(domain);
-                    const mem = try mb.mem(shape.WIDTH, "mem", shape.DEPTH, .{});
-                    const rdata = try mb.readWritePort(mem, domain, 1, ins.addr, ins.we, ins.addr, ins.wdata);
+                    const mem = try mb.mem(shape.WIDTH, "mem", shape.DEPTH, .{ .read = .sync });
+                    const rdata = try mb.readWritePort(mem, "a", .{ .domain = domain, .addr = ins.addr, .we = ins.we, .wdata = ins.wdata });
                     try mb.assign(outs.rdata, rdata);
                 }
             };

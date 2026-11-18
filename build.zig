@@ -828,6 +828,66 @@ pub fn build(b: *std.Build) void {
     b.step("verify-jane-street-puzzle", "Replay the generated key against the sibling GDS simulator and solution VCD")
         .dependOn(&jane_puzzle_check.step);
 
+    // 0.1 feature witnesses: arrays, edges, multi-port memories, properties,
+    // clock generation and the register bank on each bus. Every RTL file is
+    // linted, every bench replayed; the property bench also has a failing
+    // trace that must trip the assertion.
+    const features_exe = b.addExecutable(.{
+        .name = "zihdl_features_witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/blocks/features_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zihdl", .module = mod }},
+        }),
+    });
+    const features_gen = b.addRunArtifact(features_exe);
+    const features_step = b.step("features", "Lint and replay the 0.1 feature witnesses");
+    const feature_cases = [_]struct { rtl: []const u8, tb: []const u8, assertions: bool = false }{
+        .{ .rtl = "arrays", .tb = "feature_arrays_tb" },
+        .{ .rtl = "edges", .tb = "feature_edges_tb" },
+        .{ .rtl = "dpram", .tb = "feature_dpram_tb" },
+        .{ .rtl = "wprio", .tb = "feature_wprio_tb" },
+        .{ .rtl = "lanes", .tb = "feature_lanes_tb" },
+        .{ .rtl = "props", .tb = "feature_props_tb", .assertions = true },
+        .{ .rtl = "clocks", .tb = "feature_clocks_tb" },
+        .{ .rtl = "regbank_axi4_lite", .tb = "regbank_axi4_lite_tb" },
+        .{ .rtl = "regbank_apb", .tb = "regbank_apb_tb" },
+        .{ .rtl = "regbank_wishbone", .tb = "regbank_wishbone_tb" },
+    };
+    for (feature_cases) |case| {
+        // Both HDL backends: Verilog-2001 under -g2001 (SystemVerilog when the
+        // bench enables assertions), SystemVerilog under -g2012.
+        for ([_][]const u8{ "v", "sv" }) |ext| {
+            const sv = std.mem.eql(u8, ext, "sv");
+            const rtl = b.fmt("out/features/{s}.{s}", .{ case.rtl, ext });
+            const lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", rtl });
+            lint.step.dependOn(&features_gen.step);
+            features_step.dependOn(&lint.step);
+            const image = b.fmt("out/features/{s}_{s}_iv", .{ case.tb, ext });
+            const tb = b.fmt("out/testbenches/{s}.v", .{case.tb});
+            const compile = if (case.assertions)
+                b.addSystemCommand(&.{ "iverilog", "-g2012", "-DZIHDL_ASSERT", "-s", case.tb, "-o", image, rtl, tb })
+            else if (sv)
+                b.addSystemCommand(&.{ "iverilog", "-g2012", "-s", case.tb, "-o", image, rtl, tb })
+            else
+                b.addSystemCommand(&.{ "iverilog", "-g2001", "-s", case.tb, "-o", image, rtl, tb });
+            compile.step.dependOn(&features_gen.step);
+            compile.step.dependOn(&testbench_sources_gen.step);
+            // A bench passes on its message with no assertion error logged.
+            const run = b.addSystemCommand(&.{ "sh", "-c", b.fmt("vvp {s} > {s}.log 2>&1; status=$?; cat {s}.log; [ $status -eq 0 ] && grep -q PASS {s}.log && ! grep -q ERROR {s}.log", .{ image, image, image, image, image }) });
+            run.step.dependOn(&compile.step);
+            features_step.dependOn(&run.step);
+        }
+    }
+    const props_fail_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-DZIHDL_ASSERT", "-s", "feature_props_fail_tb", "-o", "out/features/feature_props_fail_iv", "out/features/props.v", "out/testbenches/feature_props_fail_tb.v" });
+    props_fail_compile.step.dependOn(&features_gen.step);
+    props_fail_compile.step.dependOn(&testbench_sources_gen.step);
+    const props_fail_run = b.addSystemCommand(&.{ "sh", "-c", "vvp out/features/feature_props_fail_iv > out/features/feature_props_fail.log 2>&1; grep -q 'ERROR: .*grant_completes' out/features/feature_props_fail.log && echo 'FEATURE PROPS FAILING TRACE CAUGHT'" });
+    props_fail_run.step.dependOn(&props_fail_compile.step);
+    features_step.dependOn(&props_fail_run.step);
+    verify_step.dependOn(features_step);
+
     for ([_]*std.Build.Step{
         &async_fifo_compile.step,   &uart_compile.step,     &spi_compile.step,
         &i2c_wit_compile.step,      &cdc_compile.step,      &divmod_compile.step,

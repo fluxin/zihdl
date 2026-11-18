@@ -82,15 +82,17 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
         };
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(out, allocator, "    {s} signed {s}{s}\n", .{ dir_str, sym.name, comma });
+                try render.appendFmt(out, allocator, "    {s} signed {s}{s}", .{ dir_str, sym.name, comma });
             } else {
-                try render.appendFmt(out, allocator, "    {s} signed [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+                try render.appendFmt(out, allocator, "    {s} signed [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(out, allocator, "    {s}        {s}{s}\n", .{ dir_str, sym.name, comma });
+            try render.appendFmt(out, allocator, "    {s}        {s}{s}", .{ dir_str, sym.name, comma });
         } else {
-            try render.appendFmt(out, allocator, "    {s} [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+            try render.appendFmt(out, allocator, "    {s} [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
         }
+        try render.appendLoc(out, allocator, module, sym.loc);
+        try render.appendStr(out, allocator, "\n");
     }
     try render.appendStr(out, allocator, ");\n\n");
 
@@ -114,15 +116,17 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
         if (sym.kind != .wire or sym.dead) continue;
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(out, allocator, "    wire signed {s};\n", .{sym.name});
+                try render.appendFmt(out, allocator, "    wire signed {s};", .{sym.name});
             } else {
-                try render.appendFmt(out, allocator, "    wire signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+                try render.appendFmt(out, allocator, "    wire signed [{d}:0]  {s};", .{ sym.width - 1, sym.name });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(out, allocator, "    wire        {s};\n", .{sym.name});
+            try render.appendFmt(out, allocator, "    wire        {s};", .{sym.name});
         } else {
-            try render.appendFmt(out, allocator, "    wire [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            try render.appendFmt(out, allocator, "    wire [{d}:0]  {s};", .{ sym.width - 1, sym.name });
         }
+        try render.appendLoc(out, allocator, module, sym.loc);
+        try render.appendStr(out, allocator, "\n");
         wrote_section = true;
     }
     if (wrote_section) try render.appendStr(out, allocator, "\n");
@@ -146,23 +150,27 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
         if (sym.kind != .reg or sym.dead) continue;
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(out, allocator, "    reg signed {s};\n", .{sym.name});
+                try render.appendFmt(out, allocator, "    reg signed {s};", .{sym.name});
             } else {
-                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s};", .{ sym.width - 1, sym.name });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(out, allocator, "    reg         {s};\n", .{sym.name});
+            try render.appendFmt(out, allocator, "    reg         {s};", .{sym.name});
         } else {
-            try render.appendFmt(out, allocator, "    reg [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            try render.appendFmt(out, allocator, "    reg [{d}:0]  {s};", .{ sym.width - 1, sym.name });
         }
+        try render.appendLoc(out, allocator, module, sym.loc);
+        try render.appendStr(out, allocator, "\n");
         wrote_section = true;
     }
     if (wrote_section) try render.appendStr(out, allocator, "\n");
 
     // Memories (+ optional $readmemh init)
     wrote_section = false;
-    for (module.scope.symbols.items) |sym| {
+    for (module.scope.symbols.items, 0..) |sym, sym_idx| {
         if (sym.kind != .mem or sym.dead) continue;
+        const multi_clock = render.memoryMultiClock(module, sym_idx);
+        if (multi_clock) try render.appendStr(out, allocator, "    /* verilator lint_off MULTIDRIVEN */\n");
         switch (sym.storage) {
             .any => {},
             .registers => try render.appendStr(out, allocator, "    (* ram_style = \"logic\" *)\n"),
@@ -171,15 +179,18 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
         }
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(out, allocator, "    reg signed {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
+                try render.appendFmt(out, allocator, "    reg signed {s} [0:{d}];", .{ sym.name, sym.depth - 1 });
             } else {
-                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
+                try render.appendFmt(out, allocator, "    reg signed [{d}:0]  {s} [0:{d}];", .{ sym.width - 1, sym.name, sym.depth - 1 });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(out, allocator, "    reg         {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
+            try render.appendFmt(out, allocator, "    reg         {s} [0:{d}];", .{ sym.name, sym.depth - 1 });
         } else {
-            try render.appendFmt(out, allocator, "    reg [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
+            try render.appendFmt(out, allocator, "    reg [{d}:0]  {s} [0:{d}];", .{ sym.width - 1, sym.name, sym.depth - 1 });
         }
+        try render.appendLoc(out, allocator, module, sym.loc);
+        try render.appendStr(out, allocator, "\n");
+        if (multi_clock) try render.appendStr(out, allocator, "    /* verilator lint_on MULTIDRIVEN */\n");
         if (sym.init_file) |file| {
             try render.appendStr(out, allocator, "    initial begin\n");
             try render.appendFmt(out, allocator, "        $readmemh(\"{s}\", {s});\n", .{ file, sym.name });
@@ -202,13 +213,15 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
     for (module.assigns) |a| {
         try render.appendFmt(out, allocator, "    assign {s} = ", .{a.dst.name()});
         try render.emitExprTo(out, &renderer, a.src);
-        try render.appendStr(out, allocator, ";\n");
+        try render.appendStr(out, allocator, ";");
+        try render.appendLoc(out, allocator, module, a.loc);
+        try render.appendStr(out, allocator, "\n");
     }
     if (module.assigns.len > 0) try render.appendStr(out, allocator, "\n");
 
     // Instances
     for (module.instances) |inst| {
-        try render.emitInstanceHeader(out, allocator, inst);
+        try render.emitInstanceHeader(out, allocator, module, inst);
         for (inst.connections, 0..) |conn, c_idx| {
             const comma = if (c_idx + 1 == inst.connections.len) "" else ",";
             try render.emitConnection(out, allocator, conn.port_name, conn.signal.name(), comma);

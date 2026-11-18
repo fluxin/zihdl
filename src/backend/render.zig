@@ -179,6 +179,12 @@ pub const Renderer = struct {
                     try self.forceSelectBases(module, a.addr);
                     try self.forceSelectBases(module, a.src);
                     try self.forceSelectBases(module, a.be);
+                    // Several lanes are emitted as per-lane selects of the
+                    // enable and the data, which only a named vector allows.
+                    if (a.mem.width() > 8) {
+                        if (a.be.node != .ref) try self.forceWholeExpr(module, a.be);
+                        if (a.src.node != .ref) try self.forceWholeExpr(module, a.src);
+                    }
                 },
                 .if_then => |it| {
                     try self.forceSelectBases(module, it.cond);
@@ -414,6 +420,21 @@ fn isHoistable(expr: ir.AnyExpr) bool {
     };
 }
 
+/// True when memory `sym_idx` is written by ports on more than one clock
+/// (a true dual-clock RAM). Its writers are separate processes by
+/// construction, so the declaration carries a lint waiver.
+pub fn memoryMultiClock(module: *const ir.Module, sym_idx: usize) bool {
+    var first: ?ir.MemPort = null;
+    for (module.mem_ports) |port| {
+        if (port.mem.idx != sym_idx or port.kind == .read) continue;
+        const clk = port.clk orelse continue;
+        if (first) |f| {
+            if (f.clk.?.idx != clk.idx or f.edge != port.edge) return true;
+        } else first = port;
+    }
+    return false;
+}
+
 pub fn isPort(kind: ir.SymbolKind) bool {
     return switch (kind) {
         .input, .output, .inout => true,
@@ -448,23 +469,28 @@ pub fn emitProcess(
     switch (proc.sensitivity) {
         .comb => {
             switch (dialect) {
-                .verilog2001 => try appendStr(out, alloc, "    always @(*) begin\n"),
-                .systemverilog => try appendStr(out, alloc, "    always_comb begin\n"),
+                .verilog2001 => try appendStr(out, alloc, "    always @(*) begin"),
+                .systemverilog => try appendStr(out, alloc, "    always_comb begin"),
             }
+            try appendLoc(out, alloc, module, proc.loc);
+            try appendStr(out, alloc, "\n");
             for (proc.stmts) |s| try emitStmt(out, r, s, 2, "=", assertions);
             try appendStr(out, alloc, "    end\n\n");
         },
         .edge => |e| {
             const keyword: []const u8 = if (dialect == .systemverilog) "always_ff " else "always ";
+            const clk_edge: []const u8 = if (e.active == .falling) "negedge" else "posedge";
             if (e.rst) |rst| {
                 const active_low = rst.kind == .async_low or rst.kind == .sync_low;
                 const is_async = rst.kind == .async_low or rst.kind == .async_high;
                 if (is_async) {
                     const edge: []const u8 = if (active_low) "negedge" else "posedge";
-                    try appendFmt(out, alloc, "    {s}@(posedge {s} or {s} {s}) begin\n", .{ keyword, r.symName(e.clk), edge, r.symName(rst.signal) });
+                    try appendFmt(out, alloc, "    {s}@({s} {s} or {s} {s}) begin", .{ keyword, clk_edge, r.symName(e.clk), edge, r.symName(rst.signal) });
                 } else {
-                    try appendFmt(out, alloc, "    {s}@(posedge {s}) begin\n", .{ keyword, r.symName(e.clk) });
+                    try appendFmt(out, alloc, "    {s}@({s} {s}) begin", .{ keyword, clk_edge, r.symName(e.clk) });
                 }
+                try appendLoc(out, alloc, module, proc.loc);
+                try appendStr(out, alloc, "\n");
                 if (active_low) {
                     try appendFmt(out, alloc, "        if (!{s}) begin\n", .{r.symName(rst.signal)});
                 } else {
@@ -491,7 +517,9 @@ pub fn emitProcess(
                 try appendStr(out, alloc, "        end\n");
                 try appendStr(out, alloc, "    end\n\n");
             } else {
-                try appendFmt(out, alloc, "    {s}@(posedge {s}) begin\n", .{ keyword, r.symName(e.clk) });
+                try appendFmt(out, alloc, "    {s}@({s} {s}) begin", .{ keyword, clk_edge, r.symName(e.clk) });
+                try appendLoc(out, alloc, module, proc.loc);
+                try appendStr(out, alloc, "\n");
                 for (proc.stmts) |s| try emitStmt(out, r, s, 2, "<=", assertions);
                 try appendStr(out, alloc, "    end\n\n");
             }
@@ -499,12 +527,17 @@ pub fn emitProcess(
     }
 }
 
-/// Emits `module inst (` or `module #( .PARAM(value), ... ) inst (`.
-pub fn emitInstanceHeader(out: *std.ArrayList(u8), alloc: std.mem.Allocator, inst: ir.Instance) !void {
+/// Emits `module inst (` or `module #( .PARAM(value), ... ) inst (`, with the
+/// instance's source location on the first line.
+pub fn emitInstanceHeader(out: *std.ArrayList(u8), alloc: std.mem.Allocator, module: *const ir.Module, inst: ir.Instance) !void {
     if (inst.params.len == 0) {
-        try appendFmt(out, alloc, "    {s} {s} (\n", .{ inst.module_name, inst.instance_name });
+        try appendFmt(out, alloc, "    {s} {s} (", .{ inst.module_name, inst.instance_name });
+        try appendLoc(out, alloc, module, inst.loc);
+        try appendStr(out, alloc, "\n");
     } else {
-        try appendFmt(out, alloc, "    {s} #(\n", .{inst.module_name});
+        try appendFmt(out, alloc, "    {s} #(", .{inst.module_name});
+        try appendLoc(out, alloc, module, inst.loc);
+        try appendStr(out, alloc, "\n");
         for (inst.params, 0..) |p, p_idx| {
             const comma = if (p_idx + 1 == inst.params.len) "" else ",";
             if (p.symbol) |ref| {
@@ -576,19 +609,37 @@ pub fn emitStmt(out: *std.ArrayList(u8), r: *Renderer, stmt: Stmt, indent: usize
             try appendStr(out, alloc, ";\n");
         },
         .mem_write_bytes => |mw| {
-            var byte: usize = 0;
-            while (byte * 8 < mw.mem.width()) : (byte += 1) {
-                const lo = byte * 8;
-                const hi = @min(lo + 7, mw.mem.width() - 1);
-                if (byte > 0) try emitIndent(out, alloc, indent);
+            const width = mw.mem.width();
+            if (width <= 8) {
+                // One lane: its enable gates the whole word, no selects.
                 try appendStr(out, alloc, "if (");
                 try emitExprTo(out, r, mw.be);
+                try appendStr(out, alloc, ") begin\n");
+                try emitIndent(out, alloc, indent + 1);
+                try appendFmt(out, alloc, "{s}[", .{r.symName(mw.mem)});
+                try emitExprTo(out, r, mw.addr);
+                try appendFmt(out, alloc, "] {s} ", .{op});
+                try emitExprTo(out, r, mw.src);
+                try appendStr(out, alloc, ";\n");
+                try emitIndent(out, alloc, indent);
+                try appendStr(out, alloc, "end\n");
+                return;
+            }
+            var byte: usize = 0;
+            while (byte * 8 < width) : (byte += 1) {
+                const lo = byte * 8;
+                const hi = @min(lo + 7, width - 1);
+                if (byte > 0) try emitIndent(out, alloc, indent);
+                try appendStr(out, alloc, "if (");
+                // `prepare` made `be` and `src` symbols or hoisted temps, so the
+                // raw form is a selectable name (never `$signed(...)`).
+                try emitRawTo(out, r, mw.be, true);
                 try appendFmt(out, alloc, "[{d}]) begin\n", .{byte});
                 try emitIndent(out, alloc, indent + 1);
                 try appendFmt(out, alloc, "{s}[", .{r.symName(mw.mem)});
                 try emitExprTo(out, r, mw.addr);
                 try appendFmt(out, alloc, "][{d}:{d}] {s} ", .{ hi, lo, op });
-                try emitExprTo(out, r, mw.src);
+                try emitRawTo(out, r, mw.src, true);
                 try appendFmt(out, alloc, "[{d}:{d}];\n", .{ hi, lo });
                 try emitIndent(out, alloc, indent);
                 try appendStr(out, alloc, "end\n");
@@ -782,6 +833,15 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
             const k = expr.width - n.width;
             if (k == 0) {
                 try emitExprTo(out, r, n.*);
+            } else if (n.width == 1) {
+                // A 1-bit value is its own sign bit; a scalar has no `[0]`.
+                try appendStr(out, alloc, "{{");
+                try appendFmt(out, alloc, "{d}", .{k});
+                try appendStr(out, alloc, "{");
+                try emitRawTo(out, r, n.*, record);
+                try appendStr(out, alloc, "}}, ");
+                try emitRawTo(out, r, n.*, record);
+                try appendStr(out, alloc, "}");
             } else switch (n.*.node) {
                 .ref, .slice, .bit, .bit_dyn => {
                     try appendStr(out, alloc, "{{");
@@ -875,6 +935,13 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
         },
     }
     if (record) r.recordOccurrence(expr, r.occurrence, start, out.items.len);
+}
+
+/// ` // @[file:line]` for an authored source location (`ModuleBuilder.at`);
+/// nothing when the item has none, so unmarked designs emit unchanged text.
+pub fn appendLoc(out: *std.ArrayList(u8), alloc: std.mem.Allocator, module: *const ir.Module, loc: u32) !void {
+    const l = module.sourceLoc(loc) orelse return;
+    try appendFmt(out, alloc, " // @[{s}:{d}]", .{ l.file, l.line });
 }
 
 pub fn appendStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {

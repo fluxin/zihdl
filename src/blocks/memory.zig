@@ -53,8 +53,13 @@ pub fn RamBlock(comptime depth: usize, comptime width: usize, comptime mode: net
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
             const mem = try mb.mem(width, "contents", depth, .{ .read = .sync, .write_mode = mode });
-            const write = mb.exprs().and_(ins.en.expr(), ins.we.expr());
-            const data = try mb.readWritePort(mem, .{ .clk = ins.clk, .rst_n = ins.rst_n }, ins.en.expr(), ins.addr.expr(), write, ins.addr.expr(), ins.wdata.expr());
+            const data = try mb.readWritePort(mem, "a", .{
+                .domain = netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n },
+                .en = ins.en,
+                .we = ins.we,
+                .addr = ins.addr,
+                .wdata = ins.wdata,
+            });
             try mb.assignExpr(outs.rdata, data.expr());
         }
     };

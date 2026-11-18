@@ -30,11 +30,17 @@ artifact or in the checker (`oasic`), not in the design.
 | `output reg [7:0] y` | `y: Signal(8)` in `Outputs` + `mb.reg("y_r", 8, 0)` / `mb.output(...)` |
 | `assign y = a & b;` | `try mb.assign(y, b.band(a, b))` |
 | `always @(posedge clk)` | `try mb.seq(domain, &.{ ... })` |
+| `always @(negedge clk)` | `ClockDomain{ ..., .edge = .falling }` with `mb.seq`, or `mb.seqNoReset(clk.negedge(), ...)` |
 | `always @(posedge clk or negedge rst_n)` with reset branch | `try mb.seq(domain, ...)` — the reset branch is generated per process from the signals the process assigns |
 | `if (en) q <= d;` | `b.when(en, &.{b.assign(q, d)}, &.{})` |
 | `case (state) ... endcase` | `lib.StateMachine(...)` + `arm`/`case_`/`run`, or `b.case_(...)` |
 | `parameter W = 8;` / `#(.W(16))` | Structural widths are comptime Zig args; value parameters use `ParamSpec(W)` and `Params` + `.W = 16` at the instance site |
 | `generate` / `for` | Comptime `inline for` in `build()`; the IR has no generate construct |
+| `wire [7:0] lanes [0:3]` / `lanes[i]` | `lanes: [4]Signal(8)` in a bundle or `mb.wireArray`/`regArray`; `b.index(lanes, i)` reads, `b.indexAssign(lanes, i, v)` writes |
+| `x[lo +: W]` | `b.sliceDyn(x, lo, W)` (bits past the end read zero) |
+| `reg [W-1:0] ram [0:D-1]` with ports | `mb.mem(W, "ram", D, .{ ... })` plus `mb.readPort` / `writePort` / `readWritePort`, one per port and clock |
+| `$readmemh` of computed data | `MemOpts.init_words` plus `backend.meminit.files` |
+| `assert property (@(posedge clk) a ##1 b \|=> c)` | `lib.assertProperty(mb, "name", domain, .{ a, lib.cycles(1), b }, .next, .{c})` |
 | `$signed(x)` / `>>>` | `b.asSigned(x)`, `b.sext(...)`, `b.shr(...)` (emits `>>>` when the operand is signed) |
 | `'z` / tristate | Not modeled; use separate `out`/`oe`/`in` signals for bidirectional pads |
 | `module m#(...) ( .a(a) ) u1 (...);` | `try mb.instantiate(M, "u1", .{ .a = a }, .{ .y = y }, .{ .W = 16 })` |
@@ -185,9 +191,11 @@ simulator or waveform debugger of its own.
 - Behavioral testbenches, `$display`/`$finish`, file I/O, and `initial`
   blocks: keep them in a Verilog testbench (foreign source) or generate
   stimulus for an external player.
-- Concurrent SVA, coverage, and UVM: assertions are immediate and structural;
-  formal proof belongs to `oasic`.
+- Unbounded or ranged SVA (`##[m:n]`, repetition), functional coverage
+  models and UVM: bounded `##n` properties lower to history registers through
+  `lib.assertProperty`; formal proof belongs to `oasic`.
 - Four-state semantics, `x`-propagation and `z`/tristate: only two-state
   signals exist. Model bidirectionality with explicit `in`/`out`/`oe` pins.
-- Vendor inference pragmas and timing constraints beyond SDC clocks,
-  uncertainty and false paths.
+- Vendor inference pragmas and multicycle-path exceptions. Clocks, generated
+  clocks, asynchronous clock groups, IO delays, input transitions and loads
+  are lowered from authored timing intent.

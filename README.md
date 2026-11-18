@@ -221,6 +221,92 @@ rejects contradictions between a descendant and its ancestor or between
 siblings sharing a net; consumers still perform the actual constraint
 resolution.
 
+## Authoring features
+
+**Constraints from intent.** `backend.sdc` lowers everything the top module
+authors: `create_clock` per domain, `create_generated_clock` for every
+generated clock in the hierarchy (on its instance pin, or on the port when the
+top generates it, sourced from the declared top clock or generated pin it
+traces to; anything else is an error), `set_clock_groups -asynchronous` for declared
+non-synchronous clock relationships, `set_input_delay` from arrival windows,
+`set_output_delay` from required windows, `set_input_transition` from input
+slew (rescaled to `Options.library_slew_threshold`, which is required once a
+slew is declared) and `set_load` from output loads. A required window is
+absolute within the cycle: data launched on the reference clock's rising edge
+must arrive between `phase + min` and `phase + max`, where `phase` is 0 for the
+rising and half a period for the falling edge; every delay is emitted against
+the rising edge (`max` lowers to `period - (phase + max)`, `min` to
+`-(phase + min)`), which STA tools and oasic's SDC reader agree on. An IO
+window on a clock with no domain is an error rather than a dropped line.
+
+**Reset release is checked.** `ResetPolicy.release = .synchronous` must be
+backed by a declared release chain on the domain's own clock net and edge:
+`Design.elaborate` follows the domain's reset (and its clock, through the same
+instance connections) through assignments, instance outputs and instance
+inputs to the final stage of a `release_synchronizer`, and fails with
+`error.UnsynchronizedResetRelease` otherwise. Only a top-level input stays an
+external claim. A declared chain must be real: at least two stages, every
+stage a flop on the row's clock and edge, asynchronously reset by one raw
+reset to the asserted level, the first sampling the released level and each
+later stage the previous one. `lib.releasedDomain` builds the chain and returns
+the released domain.
+
+**Signal arrays.** `[N]Signal(W)` fields are legal anywhere in `Inputs`,
+`Outputs` and bundles (ports `name_0` .. `name_{N-1}`), and
+`mb.regArray`/`wireArray` declare them. `b.index(items, i)` reads element `i`
+at runtime and `b.indexAssign(items, i, v)` writes it (elements the index
+cannot reach get no branch); `b.sliceDyn(x, lo, W)` is `x[lo +: W]`, and
+`lib.rotlDyn`/`rotrDyn` rotate by `n mod W` for any runtime `n`. Out-of-range
+reads return zero, so every select has one two-state value, and a register
+that is read but never assigned fails elaboration instead of simulating as
+`x`.
+
+**Clock edges.** `ClockDomain.edge = .falling` makes `seq`, `seqEnable` and
+the memory ports capture on the falling edge; `seqNoReset`/`seqReset` take
+`clk.negedge()`.
+
+**Memory ports.** `mb.readPort`, `mb.writePort` and `mb.readWritePort` are the
+one memory port model: each records a port row (`memories[].ports` in
+`design.json`), takes its own clock domain and optional byte enables, and a
+memory may have any number of them, so true dual-port and dual-clock RAMs
+come from the same primitive. When write ports on one clock hit the same
+address in one cycle, each byte lane goes to the earliest port that writes
+it, so disjoint lanes both land; a read/write port follows the memory's
+`write_mode`, merging lanes for a byte-masked write-first read at any width. Array writes sit in reset-free processes so synthesis
+infers a memory (Yosys infers one true dual-port `$mem_v2` for the witness).
+`MemOpts.init_words` generates initial contents from Zig:
+`backend.meminit.files` returns the exact `$readmemh` file (every entry
+written, zero past the data) and `design.json` records its SHA-256.
+
+**Source locations.** `mb.at(@src())` stamps later declarations, assignments,
+processes and instances; both HDL backends end those lines with
+`// @[file:line]`. Modules that never call it emit unchanged RTL.
+
+**Temporal properties.** `lib.assertProperty`, `assumeProperty` and
+`coverSequence` take bounded sequences, tuples of 1-bit conditions and
+`lib.cycles(n)` delays (`.{ req, lib.cycles(1), gnt }` is `req ##1 gnt`), with
+`.overlapping` (`|->`) or `.next` (`|=>`) implication. A sequence needs at least
+one condition, and only a consequent may start with a delay; both are compile
+errors otherwise. They lower to one shared history chain per condition and one
+immediate assertion, so every simulator and oasic see the same two-state
+semantics.
+
+**Clock generation.** `blocks.ClockDividerBlock(n)` divides by an even `n`
+from a flop and declares its output as a generated clock;
+`blocks.ClockGateBlock(technology)` wraps the technology's ICG cell
+(`sky130_fd_sc_hd__dlclkp_1`, `sg13g2_lgcp_1`) under `SYNTHESIS` and its
+latch-and-AND function otherwise.
+
+**Register banks.** `blocks.RegisterBankBlock(spec, bus)` turns one typed
+register/field table (`rw`, `ro`, `w1c`, `w1p` fields with byte-strobed
+writes) into an AXI4-Lite, APB or Wishbone slave with hardware-facing field
+ports, plus `cHeader` and `regmapJson` (`zihdl.regmap/1`) for software.
+
+`zig build features` emits every witness through both HDL backends, lints
+each with Verilator and replays each in Icarus, including a byte-lane witness
+across 1-, 8-, 16- and 72-bit memories and a property trace that must trip its
+assertion.
+
 ## Quick Start
 
 Install Zig 0.17.1 for generation and unit tests. `zig build verify` also
@@ -228,7 +314,7 @@ requires Verilator, Icarus Verilog and `vvp` on `PATH`. `oasic` is only needed
 for the separate replay commands above.
 
 RTL, protocol stimulus, and testbench checks are authored in Zig. `zig build
-testbenches` generates the 16 simulator cases under `out/testbenches/`; the
+testbenches` generates the 26 simulator cases under `out/testbenches/`; the
 additional ROM-driven witnesses use the same Zig models and a shared generated
 simulator shell. Generated `.v` and `.sv` files live under `out/`.
 
@@ -273,6 +359,9 @@ zig build axi4-lite
 # Division/remainder witness: operators and folded constants (iverilog)
 zig build divmod
 
+# Arrays, edges, memory ports, properties, clock generation, register banks
+zig build features
+
 # Lint and simulate every emitted artifact
 zig build verify
 
@@ -280,19 +369,20 @@ zig build verify
 zig build verify-oasic
 ```
 
-## Known gaps
+## Scope and remaining gaps
 
-The authoring API is closed for what this repository actually builds (the
-protocol emulator, the elemental blocks, the contract fixture). The remaining
-holes matter for general-purpose use; the detailed review is in
+zihdl owns elaboration and the artifacts it emits. Simulation, formal proof
+(including a formal CDC crossing check), synthesis, timing analysis, layout,
+netlist/GDS export and a command-line driver belong to
+[oasic](https://fluxin.com/oasic) and are not planned here. Two-state values
+are deliberate: there is no `x`/`z` and no tristate driving (`inout` ports
+exist; pads are modeled as in/out/oe). The API review is in
 [docs/api.md](docs/api.md#gaps-by-category).
 
-| Area | Gap |
+| Area | Still open |
 |---|---|
-| Expressions | `add`/`sub`/`mul`/`div`/`mod`/bitwise/comparisons extend unequal-width operands explicitly and are verified end-to-end through oasic; constant rotates are `lib.rotl`/`rotr` (no dynamic rotate); `slice` is comptime-only; signedness is declaration-level (`SignedSignal(W)`, `MemOpts.signed`, `SignedStream(W)`) and flows through lib register/synchronizer helpers, so `asSigned` is reinterpretation only; no `x`/`z` or tristate driving (`inout` ports exist but pads are modeled as in/out/oe) |
-| Parameterization | Widths/depths are comptime type arguments: block families declare a `Shape` schema and `instantiateShape` merges instance-site overrides, so a parent's comptime value parameter forwards into a child's shape (each distinct shape is its own checked module) and resolved shapes are recorded per instance in `design.json`; runtime `Param(W)` values stay 64-bit Verilog overrides and cannot size ports or memories, though a parent parameter or constant can be forwarded by name into a child override (`#(.CHILD(PARENT))`) |
-| Memory | One read and one write port per memory; no dual-port, banked or multidimensional memories; init is `$readmemh` from a file path only |
-| Clocking / CDC / IP | Async FIFO, pulse/reset/level synchronizers, a four-phase request/acknowledge bridge, a quasi-static bundled-data crossing, single-slot and FIFO-backed mailboxes, a single-clock UART, SPI target, I2C target loader, timer, initialized ROM, synchronous RAM, round-robin arbiter, ready/valid crossbar and AXI4-Lite register slave blocks and a structural CDC lint landed; the lint tracks domain ownership and structural first flops per data bit (first 64 bits, whole-signal fallbacks for unmappable shapes) and honors per-bit declared synchronizer stages; remaining: a formal (not just structural) crossing check; `ResetPolicy.release` itself still does not lower a synchronizer |
-| Timing / constraints | Output required times (with explicit clock and edge), clock relationships, reset-release topology and per-bit slew/load overrides are authored (v2), and hierarchy contradictions are rejected transitively through silent levels and siblings; per-bit values still have no consumer analysis and constraint resolution stays consumer-side; SDC has no IO delays, multicycle or generated clocks |
-| Verification | No in-tree simulator or reusable reference interpreter; immediate assertions only (no concurrent SVA); `oasic`'s Verilog front end is still landing, so `zig build sim` uses transitional iverilog |
-| Backends / packaging | Verilog-2001 and SystemVerilog only (no VHDL, structural netlist export or GDS); no standalone CLI; pre-release package version `0.0.0` |
+| Parameterization | Runtime `Param(W)` values are 64-bit Verilog overrides and cannot size ports or memories; widths and depths are comptime `Shape` values by design |
+| Timing / constraints | No multicycle paths; per-bit slew/load has no consumer analysis; SDC covers the top module's IO and generated clocks, and constraint resolution beyond that stays consumer-side |
+| Properties | Fixed `##n` delays only (no `##[m:n]` ranges or repetition); no native SVA emission |
+| Memory | One memory per declaration: banks and multidimensional storage are Zig arrays of memories; generated contents need a width of at most 64 bits |
+| Backends / packaging | Verilog-2001 and SystemVerilog only; pre-release package version `0.0.0` until 0.1.0 is tagged |

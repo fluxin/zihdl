@@ -38,10 +38,13 @@ Everything else hangs off that. The public surface is exported through
 | `ExprBuilder` (`mb.exprs()`) | canonicalizing expression/statement factory |
 | `Stmt`, `CaseBranch`, `CaseVal` | statement tree |
 | `ClockDomain`, `PowerDomain`, `ResetPolicy`, `Reset`, `ResetSpec` | clock/reset intent |
-| `MemOpts`, `ReadKind`, `WriteMode` | memory modes |
+| `MemOpts`, `ReadKind`, `WriteMode`, `MemPort`, `MemPortKind` | memory modes and declared ports |
 | `EnumGroup`, `EnumEntry`, `FsmInfo`, `Bundle`, `BundleMember` | metadata shapes |
 | `InputTiming`, `OutputTiming`, `SlewTiming`, `LoadValue`, `SyncStage` | timing intent |
 | `ClockRelation`, `ClockRelationship` | clock-domain relationship intent |
+| `ClockEdge`, `ActiveEdge` | active clock edge of a domain or process (`clk.negedge()`) |
+| `GeneratedClock` | a clock generated on an output port from an input clock |
+| `SourceLoc` | Zig source position recorded by `ModuleBuilder.at` |
 | `ForeignSource`, `BlackBox` | verbatim foreign modules with typed ports |
 | `FoldEvent`, `GroupTag` | provenance inputs |
 
@@ -49,14 +52,14 @@ Everything else hangs off that. The public surface is exported through
 
 | Group | Methods |
 |---|---|
-| Declarations | `input`, `signedInput`, `inout`, `outputPort`, `signedOutputPort`, `output`, `wire`, `signedWire`, `reg`, `signedReg`, `constant`, `moduleParam`, `mem` |
+| Declarations | `input`, `signedInput`, `inout`, `outputPort`, `signedOutputPort`, `output`, `wire`, `signedWire`, `reg`, `signedReg`, `regArray`, `wireArray`, `constant`, `moduleParam`, `mem` |
 | Bundles | `declareInputs`, `declareOutputs`, `declarePorts`, `wireBundle`, `connect` |
 | Assignment | `assign`, `assignExpr` |
 | Processes | `seq`, `seqNoReset`, `seqReset`, `seqEnable`, `seqResetEnable`, `comb` |
-| Memory ports | `syncRead`, `readWritePort` |
+| Memory ports | `readPort`, `writePort`, `readWritePort` (each records a `MemPort`; any number per memory, each on its own clock) |
 | Hierarchy | `instantiate` (typed `Inputs`/`Outputs` binding + `Params` overrides, literal or a parent `Param`/constant forwarded by name), `instantiateShape` (comptime `Shape` specialization forwarded to a child) |
-| Clocking | `addClockDomain`, `createClockDomain` |
-| Metadata | `addEnumGroup`, `addEnumType`, `tagGroup`, `addInputTiming`, `addOutputTiming` |
+| Clocking | `addClockDomain`, `createClockDomain`, `addGeneratedClock` |
+| Metadata | `addEnumGroup`, `addEnumType`, `tagGroup`, `addInputTiming`, `addOutputTiming`, `at` (source locations) |
 | Lifecycle | `init`, `deinit`, `exprs`, `intern`, `finish` |
 
 ### ExprBuilder methods
@@ -69,16 +72,19 @@ Everything else hangs off that. The public surface is exported through
 | Arithmetic | `add`, `sub`, `mul`, `div`, `mod` |
 | Compare | `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `slt`, `sle`, `sgt`, `sge` |
 | Shift | `shl`, `shr` (signed operands emit `>>>`) |
-| Select/concat | `ternary`, `mux`, `bit`, `bitDyn`, `slice`, `concat`, `fill` |
+| Select/concat | `ternary`, `mux`, `bit`, `bitDyn`, `slice`, `sliceDyn`, `index`, `concat`, `fill` |
 | Reductions | `andAll`, `orAll`, `xorAll` |
 | Memory | `memRead` |
-| Statements | `nop`, `assign`, `sliceAssign`, `memWrite`, `memWriteBytes`, `when`, `caseBranch`, `caseBranchSym`, `case_` |
+| Statements | `nop`, `assign`, `sliceAssign`, `indexAssign`, `memWrite`, `memWriteBytes`, `when`, `caseBranch`, `caseBranchSym`, `case_` |
 | Assertions | `assert_`, `assume_`, `cover_` (immediate, `ifdef`-guarded) |
 
 ### lib
 
-`regNext`, `regEnable`, `muxLookup`, `rotl`, `rotr`, `past`, `rose`, `fell`,
-`stable`, `changed` (the register/sync helpers mirror a signed source
+`regNext`, `regEnable`, `muxLookup`, `rotl`, `rotr`, `rotlDyn`, `rotrDyn`,
+`past`, `rose`, `fell`, `stable`, `changed`; `assertProperty`,
+`assumeProperty`, `coverSequence`, `cycles`, `Implication` (bounded temporal
+properties over history registers); `releasedDomain` (lowers a synchronous
+reset release) (the register/sync helpers mirror a signed source
 declaration, so their outputs stay signed); `Stream(W)` and
 `SignedStream(W)` with `streamSource`/`streamSink`/`streamWire`,
 `signedStreamSource`/`signedStreamSink`/`signedStreamWire`,
@@ -95,7 +101,8 @@ declaration, so their outputs stay signed); `Stream(W)` and
 `I2cSlaveLoaderBlock`, `ShiftRegisterBlock`, `EdgeDetectorBlock`,
 `CounterBlock`, `TimerBlock`, `RomBlock`, `RamBlock`,
 `RoundRobinArbiterBlock`, `StreamCrossbarBlock`,
-`Axi4LiteRegisterBlock`,
+`Axi4LiteRegisterBlock`, `RegisterBankBlock` (AXI4-Lite, APB or Wishbone, with
+`cHeader`/`regmapJson`), `ClockDividerBlock`, `ClockGateBlock`,
 `Ethernet10BaseTBlock`.
 
 ### cdc
@@ -128,7 +135,8 @@ downward. Descriptive only: the lint never changes RTL.
 | `verilog.emitModule` / `emitModuleInto` / `emitDesign` | Verilog-2001 (portable default) |
 | `systemverilog.emitModule` / `emitDesign` | SystemVerilog (`logic`, `always_*`, enums, packed struct bundles) |
 | `metadata.emitDesignJson` | `design.json`: hierarchy, widths, memories, bundles, enums/FSMs, clocks, assertions, timing intent (v1 default; v2 opt-in adds slew, per-bit slew/load, output load/required and clock relationship/reset-release topology), resolved per-instance `Shape` values, forwarded-parameter sources, provenance |
-| `sdc.emitDesignSdc` | `create_clock`, uncertainty, reset false paths |
+| `sdc.emitDesignSdc` | `create_clock`, `create_generated_clock`, uncertainty, asynchronous clock groups, input/output delays, input transitions, loads, reset false paths |
+| `meminit.files` | `$readmemh` files for memories with generated contents (`MemOpts.init_words`) |
 | `stimulus.Writer` | `oasic.stimulus/1` schedule: one header (top, clock, period, input/output bit order) plus per-cycle `drive`/`expect` rows shared by fixtures |
 | `provenance.Collector` | operation rows, authored groups, byte-exact RTL spans, artifact hash binding |
 | `timing_contract` fixture | the consumer contract fixture (RTL, v2 JSON, v1 projection, stimulus, manifest) |
@@ -158,12 +166,14 @@ downward. Descriptive only: the lint never changes RTL.
 
 ## Completeness verdict
 
-For the scope the repository actually exercises — the protocol emulator, the
-elemental blocks and the contract fixture — the authoring API is closed: every
-construct those designs use has a typed path, validation, and at least one
-artifact-level test. The remaining holes are listed below; prioritized work is
-in `PLAN.md`. They matter if zihdl is to become a general-purpose generator
-rather than the authoring half of this specific project.
+Every construct the repository builds has a typed path, validation and at
+least one artifact-level test, and the general-purpose constructs a generator
+needs beyond them (signal arrays with runtime indexing, falling-edge flops,
+multi-port and dual-clock memories with generated contents, bounded temporal
+properties, clock generation, register banks, source locations and SDC lowered
+from every authored timing intent) are witnessed by `zig build features`. The
+holes that remain are listed below; work that belongs to the checker is in
+`oasic`.
 
 ### Gaps by category
 
@@ -178,9 +188,14 @@ rather than the authoring half of this specific project.
   width-typed by the left operand and assignments force explicit extension, so
   the shift amount never inherits operator context.
 - Rotate has no operator: constant rotate is `lib.rotl`/`rotr` (slice
-  concatenation); dynamic rotate is built from shifts/ors.
-- No dynamic-width part-select: `slice` is comptime-only; `bitDyn` selects one
-  bit at runtime. Variable field extraction needs `shift`+`mask` today.
+  concatenation); runtime rotate is `lib.rotlDyn`/`rotrDyn`, a `sliceDyn` of
+  the doubled word.
+- `sliceDyn(x, lo, W)` is the variable-position part-select (`x[lo +: W]`) and
+  `index(items, i)` selects an element of a `[N]` array at runtime; both
+  lower to a logical shift and read zero past the end, so out-of-range selects
+  have one two-state value. Elements the index cannot reach are dropped from
+  `index` and `indexAssign`. The selected width is always comptime. A
+  register that is read but never assigned fails `finish()`.
 - Signedness is declaration-level through `SignedSignal(W)` for ports, wires
   and registers, `MemOpts.signed` for memories and `SignedStream(W)` for
   streams (the symbol records it and references inherit it), and
@@ -216,19 +231,31 @@ rather than the authoring half of this specific project.
   `design.json`.
 
 **Memory**
-- One read port plus one write path per memory (`syncRead`, `readWritePort`);
-  no true dual-port, banked or multi-address memories.
-- No multidimensional or nested memories; `MemOpts` covers read kind,
-  write mode and file init only.
-- Initialization is `$readmemh` from a file path; no inline data or generated
-  init content.
+- Ports are `readPort`, `writePort` and `readWritePort` (names unique per
+  memory); a memory takes any number, each on its own clock and edge, with
+  optional byte enables. When write ports on one clock write one address in
+  one cycle, each 8-bit lane goes to the earliest port that writes it; ports
+  on different clocks have no defined order on a same-instant collision, as
+  in silicon. A read port returns the stored word;
+  read-during-write behavior (`write_mode`) belongs to a read/write port.
+  Array writes are reset-free processes, so a write during reset lands.
+- Banked and multidimensional storage are Zig arrays of memories; there is no
+  nested memory type.
+- Initialization is `$readmemh`, from a checked-in file or from
+  `MemOpts.init_words` (width at most 64 bits), written by
+  `backend.meminit.files` with every entry defined and hashed in
+  `design.json`.
 
 **Clocking, reset, CDC**
-- `ResetRelease` is descriptive; `lib.resetSync` lowers an async-assert /
-  sync-release chain in place, and `blocks.ResetSyncBlock` packages the same
-  chain as a flat module that declares its `release_synchronizer` and is meant
-  to drive the released domain's reset. The policy field itself still does not
-  generate the chain.
+- `ResetRelease = .synchronous` is a checked claim: `Design.elaborate` traces
+  the domain's reset, with its clock net, to the final stage of a declared
+  `release_synchronizer` on the same clock and edge
+  (`error.UnsynchronizedResetRelease` otherwise); only a top-level input stays
+  external. `finish()` checks that a declared chain is at least two flops on
+  the row's clock and edge, reset by one raw asynchronous reset to the
+  asserted level, the first sampling the released level and each later stage
+  the previous one. `lib.releasedDomain` lowers the policy in place and
+  `blocks.ResetSyncBlock` packages the chain as a module.
 - `sync2`, `syncInput`, `pulseSync`, `AsyncFifoBlock`, `ReqAckBridgeBlock`,
   `BundledDataBlock`, `MailboxBlock` and `FifoMailboxBlock` cover level, edge,
   gray-pointer and bundled-data handshake crossings, and `cdc.lint` audits
@@ -236,7 +263,9 @@ rather than the authoring half of this specific project.
   metastability risk beyond structure, it tracks ownership and structural first
   flops per data bit but falls back to whole-signal reporting for shapes or
   widths it cannot map precisely, and a formal crossing proof is future work.
-- No clock divider/PLL/gating primitives; PLLs are foreign macros.
+- `ClockDividerBlock` (even ratios, a declared generated clock) and
+  `ClockGateBlock` (the technology ICG cell) cover clock generation; PLLs are
+  foreign macros. Domains and processes capture on either edge.
 - No multi-clock-domain structural check beyond per-process reset coverage and
   the opt-in `cdc.lint` pass.
 
@@ -248,15 +277,20 @@ rather than the authoring half of this specific project.
   rejected transitively through silent levels and siblings, but constraint
   resolution stays consumer-side and no consumer analysis reads per-bit values
   yet.
-- SDC emits clocks, uncertainty and reset false paths; no IO delays, generated
-  clocks or multicycle paths.
+- SDC lowers clocks, generated clocks, uncertainty, asynchronous clock
+  groups, input and output delays, input transitions (rescaled to the library's
+  slew thresholds) and loads, plus the explicit reset waiver. There are no
+  multicycle paths yet.
 
 **Verification-facing artifacts**
-- Assertions are immediate and structural only; no concurrent SVA, sequences
-  or coverage.
-- No in-tree simulator or reusable reference interpreter; each fixture carries
-  its own cycle model, and `oasic` is the long-term replay authority.
-- `design.json` has no physical/pin/power (UPF) or test/scan data.
+- Immediate assertions, plus bounded temporal properties (`##n` sequences
+  with `|->`/`|=>` implication, assumptions and sequence covers) lowered to
+  history registers; a sequence needs a condition and only a consequent may
+  start with a delay. No `##[m:n]` ranges, repetition or native SVA.
+- Simulation and proof belong to `oasic` (and to Verilator/Icarus for the
+  witnesses); each fixture carries its own cycle model.
+- `design.json` has no physical/pin/power (UPF) or test/scan data; scan
+  insertion and power intent belong to the physical flow.
 
 **IP library**
 - `UartBlock` (single-clock TX/RX, 5..8 data bits, mid-bit sampling),
@@ -267,11 +301,17 @@ rather than the authoring half of this specific project.
   AXI4-Lite single-register slave have RTL witnesses. The AXI4-Lite slave
   accepts independent AW/W channels in either order, applies byte strobes,
   and holds B/R responses under backpressure.
+- `RegisterBankBlock(spec, bus)` generates a multi-register slave from one
+  typed table (`rw`, `ro`, `w1c`, `w1p` fields) on AXI4-Lite, APB4 or
+  Wishbone classic, with field ports, a C header and a `zihdl.regmap/1` map;
+  each bus has an Icarus witness running the same software scenario.
 
 **Backends and packaging**
-- Verilog-2001 and SystemVerilog only: no VHDL, no structural netlist/cell
-  export, no GDS (physical lives in `oasic`), no C/RTL co-simulation model.
-- No standalone CLI; each design is its own Zig executable.
+- Verilog-2001 and SystemVerilog only. Netlist/cell export, GDS and a
+  command-line driver belong to `oasic`; each design is its own Zig
+  executable.
+- Generated RTL may carry `// @[file:line]` comments from `ModuleBuilder.at`;
+  designs that never call it emit unchanged bytes.
 - Package metadata ships the source, examples, documentation and MIT license
   (`build.zig.zon.paths`). The version remains `0.0.0` while the API is
   pre-release.

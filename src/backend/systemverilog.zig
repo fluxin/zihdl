@@ -229,26 +229,28 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
         if (sym.is_signed) {
             if (sym.kind == .inout) {
                 if (sym.width == 1) {
-                    try render.appendFmt(&out, allocator, "    {s} wire signed {s}{s}\n", .{ dir_str, sym.name, comma });
+                    try render.appendFmt(&out, allocator, "    {s} wire signed {s}{s}", .{ dir_str, sym.name, comma });
                 } else {
-                    try render.appendFmt(&out, allocator, "    {s} wire signed [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+                    try render.appendFmt(&out, allocator, "    {s} wire signed [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
                 }
             } else if (sym.width == 1) {
-                try render.appendFmt(&out, allocator, "    {s} logic signed {s}{s}\n", .{ dir_str, sym.name, comma });
+                try render.appendFmt(&out, allocator, "    {s} logic signed {s}{s}", .{ dir_str, sym.name, comma });
             } else {
-                try render.appendFmt(&out, allocator, "    {s} logic signed [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+                try render.appendFmt(&out, allocator, "    {s} logic signed [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
             }
         } else if (sym.kind == .inout) {
             if (sym.width == 1) {
-                try render.appendFmt(&out, allocator, "    {s} wire          {s}{s}\n", .{ dir_str, sym.name, comma });
+                try render.appendFmt(&out, allocator, "    {s} wire          {s}{s}", .{ dir_str, sym.name, comma });
             } else {
-                try render.appendFmt(&out, allocator, "    {s} wire [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+                try render.appendFmt(&out, allocator, "    {s} wire [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(&out, allocator, "    {s} logic         {s}{s}\n", .{ dir_str, sym.name, comma });
+            try render.appendFmt(&out, allocator, "    {s} logic         {s}{s}", .{ dir_str, sym.name, comma });
         } else {
-            try render.appendFmt(&out, allocator, "    {s} logic [{d}:0]  {s}{s}\n", .{ dir_str, sym.width - 1, sym.name, comma });
+            try render.appendFmt(&out, allocator, "    {s} logic [{d}:0]  {s}{s}", .{ dir_str, sym.width - 1, sym.name, comma });
         }
+        try render.appendLoc(&out, allocator, module, sym.loc);
+        try render.appendStr(&out, allocator, "\n");
     }
     try render.appendStr(&out, allocator, ");\n\n");
 
@@ -299,15 +301,17 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
         }
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(&out, allocator, "    logic signed {s};\n", .{sym.name});
+                try render.appendFmt(&out, allocator, "    logic signed {s};", .{sym.name});
             } else {
-                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s};", .{ sym.width - 1, sym.name });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(&out, allocator, "    logic         {s};\n", .{sym.name});
+            try render.appendFmt(&out, allocator, "    logic         {s};", .{sym.name});
         } else {
-            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s};", .{ sym.width - 1, sym.name });
         }
+        try render.appendLoc(&out, allocator, module, sym.loc);
+        try render.appendStr(&out, allocator, "\n");
         wrote_section = true;
     }
     if (wrote_section) try render.appendStr(&out, allocator, "\n");
@@ -331,34 +335,41 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
         if (sym.kind != .reg or sym.dead) continue;
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(&out, allocator, "    logic signed {s};\n", .{sym.name});
+                try render.appendFmt(&out, allocator, "    logic signed {s};", .{sym.name});
             } else {
-                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s};", .{ sym.width - 1, sym.name });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(&out, allocator, "    logic         {s};\n", .{sym.name});
+            try render.appendFmt(&out, allocator, "    logic         {s};", .{sym.name});
         } else {
-            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s};\n", .{ sym.width - 1, sym.name });
+            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s};", .{ sym.width - 1, sym.name });
         }
+        try render.appendLoc(&out, allocator, module, sym.loc);
+        try render.appendStr(&out, allocator, "\n");
         wrote_section = true;
     }
     if (wrote_section) try render.appendStr(&out, allocator, "\n");
 
     // Memories (+ optional $readmemh init)
     wrote_section = false;
-    for (module.scope.symbols.items) |sym| {
+    for (module.scope.symbols.items, 0..) |sym, sym_idx| {
         if (sym.kind != .mem or sym.dead) continue;
+        const multi_clock = render.memoryMultiClock(module, sym_idx);
+        if (multi_clock) try render.appendStr(&out, allocator, "    /* verilator lint_off MULTIDRIVEN */\n");
         if (sym.is_signed) {
             if (sym.width == 1) {
-                try render.appendFmt(&out, allocator, "    logic signed {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
+                try render.appendFmt(&out, allocator, "    logic signed {s} [0:{d}];", .{ sym.name, sym.depth - 1 });
             } else {
-                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
+                try render.appendFmt(&out, allocator, "    logic signed [{d}:0]  {s} [0:{d}];", .{ sym.width - 1, sym.name, sym.depth - 1 });
             }
         } else if (sym.width == 1) {
-            try render.appendFmt(&out, allocator, "    logic         {s} [0:{d}];\n", .{ sym.name, sym.depth - 1 });
+            try render.appendFmt(&out, allocator, "    logic         {s} [0:{d}];", .{ sym.name, sym.depth - 1 });
         } else {
-            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s} [0:{d}];\n", .{ sym.width - 1, sym.name, sym.depth - 1 });
+            try render.appendFmt(&out, allocator, "    logic [{d}:0]  {s} [0:{d}];", .{ sym.width - 1, sym.name, sym.depth - 1 });
         }
+        try render.appendLoc(&out, allocator, module, sym.loc);
+        try render.appendStr(&out, allocator, "\n");
+        if (multi_clock) try render.appendStr(&out, allocator, "    /* verilator lint_on MULTIDRIVEN */\n");
         if (sym.init_file) |file| {
             try render.appendStr(&out, allocator, "    initial begin\n");
             try render.appendFmt(&out, allocator, "        $readmemh(\"{s}\", {s});\n", .{ file, sym.name });
@@ -378,13 +389,15 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
     for (module.assigns) |a| {
         const src_str = try render.emitExpr(&renderer, a.src);
         defer allocator.free(src_str);
-        try render.appendFmt(&out, allocator, "    assign {s} = {s};\n", .{ renderer.symName(a.dst), src_str });
+        try render.appendFmt(&out, allocator, "    assign {s} = {s};", .{ renderer.symName(a.dst), src_str });
+        try render.appendLoc(&out, allocator, module, a.loc);
+        try render.appendStr(&out, allocator, "\n");
     }
     if (module.assigns.len > 0) try render.appendStr(&out, allocator, "\n");
 
     // Instances, with struct-bundle connections grouped
     for (module.instances) |inst| {
-        try render.emitInstanceHeader(&out, allocator, inst);
+        try render.emitInstanceHeader(&out, allocator, module, inst);
         const callee = calleeModule(module, inst.module_name);
         const consumed = try allocator.alloc(bool, inst.connections.len);
         defer allocator.free(consumed);

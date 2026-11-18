@@ -7,6 +7,7 @@ const std = @import("std");
 const ir = @import("../netlist.zig");
 const render = @import("render.zig");
 const provenance = @import("provenance.zig");
+const meminit = @import("meminit.zig");
 
 pub const schema = "zihdl.design/1";
 
@@ -143,7 +144,7 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
 
     try j.objectField("memories");
     try j.beginArray();
-    for (module.scope.symbols.items, 0..) |sym, sym_idx| {
+    for (module.scope.symbols.items, 0..) |*sym, sym_idx| {
         if (sym.kind != .mem) continue;
         try j.beginObject();
         try j.objectField("name");
@@ -169,6 +170,12 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(ports.writes);
         try j.objectField("init_file");
         try j.write(sym.init_file);
+        // Optional fields appear only when declared, keeping existing bytes.
+        if (sym.init_words.len > 0) {
+            try j.objectField("init_sha256");
+            try j.write(&(try meminit.hexDigest(allocator, sym)));
+        }
+        try writeMemPorts(j, module, sym_idx);
         try j.endObject();
     }
     try j.endArray();
@@ -252,6 +259,11 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.write(clock.rst_n.name());
         try j.objectField("freq_hz");
         try j.write(clock.freq_hz);
+        // Rising is the default and stays implicit, keeping existing bytes.
+        if (clock.edge == .falling) {
+            try j.objectField("edge");
+            try j.write("falling");
+        }
         try j.objectField("power_domain");
         try j.write(clock.power.name);
         try j.objectField("voltage_mv");
@@ -259,6 +271,25 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
         try j.endObject();
     }
     try j.endArray();
+
+    // Present only when declared, keeping existing bytes.
+    if (module.generated_clocks.len > 0) {
+        try j.objectField("generated_clocks");
+        try j.beginArray();
+        for (module.generated_clocks) |gc| {
+            try j.beginObject();
+            try j.objectField("name");
+            try j.write(gc.name);
+            try j.objectField("output");
+            try j.write(gc.output.name());
+            try j.objectField("source");
+            try j.write(gc.source.name());
+            try j.objectField("divide_by");
+            try j.write(gc.divide_by);
+            try j.endObject();
+        }
+        try j.endArray();
+    }
 
     try j.objectField("instances");
     try j.beginArray();
@@ -327,6 +358,34 @@ fn writeModule(j: *std.json.Stringify, allocator: std.mem.Allocator, module: *co
     try j.endArray();
 
     try j.endObject();
+}
+
+/// `ports` of one memory, only when ports were declared through
+/// `readPort`/`writePort`/`readWritePort`.
+fn writeMemPorts(j: *std.json.Stringify, module: *const ir.Module, sym_idx: usize) !void {
+    var any = false;
+    for (module.mem_ports) |port| any = any or port.mem.idx == sym_idx;
+    if (!any) return;
+    try j.objectField("ports");
+    try j.beginArray();
+    for (module.mem_ports) |port| {
+        if (port.mem.idx != sym_idx) continue;
+        try j.beginObject();
+        try j.objectField("name");
+        try j.write(port.name);
+        try j.objectField("kind");
+        try j.write(@tagName(port.kind));
+        try j.objectField("clock");
+        try j.write(if (port.clk) |clk| clk.name() else null);
+        try j.objectField("edge");
+        try j.write(@tagName(port.edge));
+        try j.objectField("byte_enables");
+        try j.write(port.byte_enables);
+        try j.objectField("rdata");
+        try j.write(if (port.rdata) |r| r.name() else null);
+        try j.endObject();
+    }
+    try j.endArray();
 }
 
 fn writeAssertions(

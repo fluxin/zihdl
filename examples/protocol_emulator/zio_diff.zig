@@ -77,9 +77,9 @@ pub const ZioDiffTop = struct {
         const outs = try mb.declareOutputs(Outputs);
         const b = mb.exprs();
         const domain = zihdl.netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
-        const program = try mb.mem(32, "program_mem", runs * program_words, .{ .init_file = "out/zio_diff_program.hex" });
+        const program = try mb.mem(32, "program_mem", runs * program_words, .{ .read = .sync, .init_file = "out/zio_diff_program.hex" });
         const pc = try mb.wire("fetch_pc", 8);
-        const inst = try mb.syncRead(program, domain, 1, b.concat(.{ ins.run, pc }));
+        const inst = try mb.readPort(program, "fetch", .{ .domain = domain, .addr = b.concat(.{ ins.run, pc }) });
         _ = try mb.instantiate(core.ZioTimingUnitBlock, "u_core", .{
             .clk = ins.clk,
             .rst_n = ins.rst_n,

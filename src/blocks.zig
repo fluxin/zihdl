@@ -16,6 +16,8 @@ pub const timer = @import("blocks/timer.zig");
 pub const memory = @import("blocks/memory.zig");
 pub const arbiter = @import("blocks/arbiter.zig");
 pub const axi4_lite = @import("blocks/axi4_lite.zig");
+pub const clock = @import("blocks/clock.zig");
+pub const regbank = @import("blocks/regbank.zig");
 
 pub const SramBlock = sram.SramBlock;
 pub const TtSramBlock = sram.TtSramBlock;
@@ -41,6 +43,9 @@ pub const RamBlock = memory.RamBlock;
 pub const RoundRobinArbiterBlock = arbiter.RoundRobinArbiterBlock;
 pub const StreamCrossbarBlock = arbiter.StreamCrossbarBlock;
 pub const Axi4LiteRegisterBlock = axi4_lite.Axi4LiteRegisterBlock;
+pub const ClockDividerBlock = clock.ClockDividerBlock;
+pub const ClockGateBlock = clock.ClockGateBlock;
+pub const RegisterBankBlock = regbank.RegisterBankBlock;
 
 test {
     _ = sram;
@@ -59,4 +64,6 @@ test {
     _ = memory;
     _ = arbiter;
     _ = axi4_lite;
+    _ = clock;
+    _ = regbank;
 }
