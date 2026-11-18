@@ -7,6 +7,10 @@
   SpinalHDL, with a small side-by-side example.
 - [Competitors and alternatives](competitors.md) — honest comparison against
   classical HDLs and host-language DSLs, and when zihdl is the wrong tool.
+- [Design decisions](decisions.md) — the choices that shape zihdl (two-state
+  values, errors at elaboration, the oasic split, versioned formats,
+  constraints from intent, memory ports, register layouts), why each was made
+  and what it costs.
 - [API review](api.md) — the complete authoring surface, the contracts behind
   it, and the current gap list.
 

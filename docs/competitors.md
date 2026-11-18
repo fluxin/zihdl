@@ -59,6 +59,7 @@ published package, no release process and no external user base.
    comparable to SpinalHDL/Chisel's structural checks.
 5. **No four-state semantics.** Only 0/1 exist; there is no `x`/`z` and no
    tristate expression. Verification of unknowns belongs to simulation tools.
+   The reasoning is in [decisions.md](decisions.md#1-two-state-values-no-x-no-z-no-internal-tristate).
 6. **Comptime parameters, not runtime generics.** Widths and depths are
    specialization-time decisions, mirroring Chisel's elaboration-time
    parameters but without a separate IR (`FIRRTL`) or an interpreter to debug.

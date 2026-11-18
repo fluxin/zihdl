@@ -396,8 +396,9 @@ zihdl owns elaboration and the artifacts it emits. Simulation, formal proof
 netlist/GDS export and a command-line driver belong to
 [oasic](https://fluxin.com/oasic) and are not planned here. Two-state values
 are deliberate: there is no `x`/`z` and no tristate driving (`inout` ports
-exist; pads are modeled as in/out/oe). The API review is in
-[docs/api.md](docs/api.md#gaps-by-category).
+exist; pads are modeled as in/out/oe). Why, and the other decisions behind
+zihdl's shape, are in [docs/decisions.md](docs/decisions.md). The API review
+is in [docs/api.md](docs/api.md#gaps-by-category).
 
 | Area | Still open |
 |---|---|
