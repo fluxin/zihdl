@@ -912,7 +912,7 @@ pub fn build(b: *std.Build) void {
     // Consumer replay is an explicit cross-repository gate. It uses the
     // generated metadata as well as RTL, so schema drift fails the build.
     const oasic_bin = b.option([]const u8, "oasic-bin", "Path to the oasic executable for verify-oasic") orelse "../oasic/oasic";
-    const verify_oasic = b.step("verify-oasic", "Replay contract and 60/120 MHz ZIO artifacts through oasic");
+    const verify_oasic = b.step("verify-oasic", "Replay contract and 60/120 MHz ZIO artifacts through oasic; with -Dsky130-lib/-lef, also synthesize and time the conformance bundle");
     const contract_v1_replay = b.addSystemCommand(&.{ oasic_bin, "-sim-verilog", "out/contract/timing_contract.v", "-stimulus", "out/contract/timing_contract.jsonl", "-design-json", "out/contract/timing_contract_v1.json" });
     contract_v1_replay.step.dependOn(&contract_gen.step);
     const contract_v2_replay = b.addSystemCommand(&.{ oasic_bin, "-sim-verilog", "out/contract/timing_contract.v", "-stimulus", "out/contract/timing_contract.jsonl", "-design-json", "out/contract/timing_contract.json" });
@@ -925,6 +925,21 @@ pub fn build(b: *std.Build) void {
         last_replay = &replay.step;
     }
     verify_oasic.dependOn(last_replay);
+    // Format conformance: oasic must parse, bind, synthesize and time the
+    // bundle that uses every SDC command and design.json field. It maps to
+    // the full sky130 HD library (the clock gate needs dlclkp), so it runs
+    // only when both library files are given, and says so when it is skipped.
+    const sky130_lib = b.option([]const u8, "sky130-lib", "sky130_fd_sc_hd Liberty (tt_025C_1v80) for the verify-oasic conformance gate");
+    const sky130_lef = b.option([]const u8, "sky130-lef", "sky130_fd_sc_hd LEF for the verify-oasic conformance gate");
+    if (sky130_lib != null and sky130_lef != null) {
+        const gate = b.addSystemCommand(&.{ oasic_bin, "-liberty", sky130_lib.?, "-lef", sky130_lef.?, "-synth", "out/conformance/conformance.v", "-synth-top", "conformance_top", "-sdc", "out/conformance/conformance.sdc", "-design-json", "out/conformance/conformance.json", "-sta" });
+        gate.step.dependOn(&features_gen.step);
+        gate.step.dependOn(last_replay);
+        verify_oasic.dependOn(&gate.step);
+    } else {
+        const skipped = b.addSystemCommand(&.{ "echo", "verify-oasic: conformance gate skipped; pass -Dsky130-lib=<sky130_fd_sc_hd__tt_025C_1v80.lib> -Dsky130-lef=<sky130_fd_sc_hd.lef>" });
+        verify_oasic.dependOn(&skipped.step);
+    }
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

@@ -58,7 +58,7 @@ pub fn ClockDividerBlock(comptime divide_by: u32) type {
 pub fn ClockGateBlock(comptime technology: Technology) type {
     const cell = switch (technology) {
         .sky130 => "sky130_fd_sc_hd__dlclkp_1",
-        .ihp_cmos5l => "sg13g2_lgcp_1",
+        .ihp_cmos5l => "sg13cmos5l_lgcp_1",
     };
     const module_name = "clock_gate_" ++ @tagName(technology);
     return netlist.BlackBox(.{
@@ -124,7 +124,7 @@ test "divider declares a generated clock and SDC sources it from the top port" {
     try std.testing.expect(std.mem.indexOf(u8, text, "create_generated_clock -name u_div2/div -source [get_ports {clk}] -divide_by 2 [get_pins {u_div2/clk_out}]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "create_generated_clock -name u_div8/div -source [get_pins {u_div2/clk_out}] -divide_by 4 [get_pins {u_div8/clk_out}]\n") != null);
     const rtl = try verilog.emitDesign(alloc, &design, .{});
-    try std.testing.expect(std.mem.indexOf(u8, rtl, "    sg13g2_lgcp_1 icg (.CLK(clk), .GATE(en), .GCLK(gclk));\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rtl, "    sg13cmos5l_lgcp_1 icg (.CLK(clk), .GATE(en), .GCLK(gclk));\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rtl, "count <= (count + 1'b1);") != null);
 }
 

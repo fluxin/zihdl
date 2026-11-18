@@ -7,9 +7,10 @@
 //! Clocks: `sys` (100 MHz, rising) and `sys_fall` (its falling edge) on
 //! `clk`, and `aux` (40 MHz, asynchronous to `sys`) on `aux_clk`. Generated
 //! clocks: one on a top-level port and two on instance pins (one sourced
-//! from a port, one from a pin). Memories: a registered dual-port macro RAM
-//! with read/write, write and read ports on both clocks and byte enables,
-//! and a combinational ROM in logic with generated contents. IO intent:
+//! from a port, one from a pin). Memories: a registered RAM in registers
+//! with read/write (byte enables) and write ports on one clock and a read
+//! port on the other, and a combinational ROM with generated contents. IO
+//! intent:
 //! synchronous input delay, rise/fall slew bounds (whole port and per bit),
 //! output required windows on both edges and output loads (whole port and
 //! per bit).
@@ -112,17 +113,18 @@ pub const Top = struct {
         const gate = try mb.instantiate(blocks.ClockGateBlock(.sky130), "u_gate", .{ .clk = ins.clk, .en = ins.en }, .{}, .{});
         _ = try mb.instantiate(Capture, "u_gated", .{ .clk = gate.gclk, .rst_n = ins.rst_n, .d = ins.d }, .{ .q = outs.gated_q }, .{});
 
-        // Every memory port kind across two clocks with byte enables: a true
-        // dual-port macro (register storage has one clock per word). It is
-        // written, so it has no initial contents; silicon has none.
-        const ram = try mb.mem(16, "ram", 8, .{ .read = .sync, .write_mode = .write_first, .storage = .macro });
+        // Every memory port kind with byte enables, in registers: both write
+        // ports on sys (register storage has one clock per word; they share
+        // one process), the read port on aux. It is written, so it has no
+        // initial contents; silicon has none.
+        const ram = try mb.mem(16, "ram", 8, .{ .read = .sync, .write_mode = .write_first, .storage = .registers });
         try mb.assign(outs.a_rdata, try mb.readWritePort(ram, "a", .{ .domain = sys, .we = ins.we, .addr = ins.addr, .wdata = ins.wdata, .be = ins.be }));
-        try mb.writePort(ram, "b", .{ .domain = aux, .we = ins.b_we, .addr = ins.b_addr, .wdata = ins.b_wdata });
+        try mb.writePort(ram, "b", .{ .domain = sys, .we = ins.b_we, .addr = ins.b_addr, .wdata = ins.b_wdata });
         try mb.assign(outs.r_rdata, try mb.readPort(ram, "r", .{ .domain = aux, .addr = ins.b_addr }));
-        // A ROM in logic with generated contents. Its file sits next to the
+        // A ROM (default storage) with generated contents. Its file sits next to the
         // RTL under a bare name, so the bundle can move (tools resolve
         // `$readmemh` from the current directory, then the RTL's).
-        const rom = try mb.mem(8, "rom", 4, .{ .storage = .registers, .init_file = init_file, .init_words = &.{ 0x11, 0x22, 0x33, 0x44 } });
+        const rom = try mb.mem(8, "rom", 4, .{ .init_file = init_file, .init_words = &.{ 0x11, 0x22, 0x33, 0x44 } });
         try mb.assign(outs.rom_q, try mb.readPort(rom, "c", .{ .addr = b.slice(ins.addr, 1, 0) }));
 
         // IO intent: input delay, every slew bound, required windows on both
@@ -223,8 +225,8 @@ test "the conformance design emits every SDC command and design.json field" {
         "\"schema\": \"zihdl.timing_intent/2\"",
         "\"edge\": \"falling\"",
         "\"generated_clocks\": [",
-        "\"storage\": \"macro\"",
         "\"storage\": \"registers\"",
+        "\"storage\": \"any\"",
         "\"read_ports\": 2",
         "\"write_ports\": 2",
         "\"init_sha256\": \"",

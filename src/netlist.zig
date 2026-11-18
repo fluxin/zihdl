@@ -65,6 +65,9 @@ pub const MemOpts = struct {
 
 pub const MemPortKind = enum { read, write, read_write };
 
+/// The process a memory's write ports on one clock edge share (builder-only).
+pub const MemWriteProcess = struct { mem: SymRef, clk: SymRef, edge: ClockEdge, process: u32 };
+
 /// One declared memory port, recorded on the module so `design.json` can
 /// describe the memory to a macro mapper. Built by `readPort`, `writePort`
 /// and `readWritePort`.
@@ -1734,8 +1737,11 @@ pub const InputTiming = struct {
     /// Rise/fall slew declaration; null keeps the whole transition behavior
     /// unknown.
     slew: ?SlewTiming = null,
-    /// Per-bit slew overrides; empty keeps every bit on `slew`. Entries must
-    /// name distinct bits of the port and are additive metadata only.
+    /// Per-bit slew overrides; empty keeps every bit on `slew`. Entries name
+    /// distinct bits. A bit row replaces only the bounds it declares and
+    /// inherits the port's others (as SDC applies a bit row after the port
+    /// row); every bound is measured at the thresholds of the row declaring
+    /// it, so the rows may use different thresholds.
     per_bit_slew: []const SlewBit = &.{},
 };
 
@@ -3328,6 +3334,10 @@ pub const ModuleBuilder = struct {
     timing: std.ArrayList(InputTiming),
     output_timing: std.ArrayList(OutputTiming),
     mem_ports: std.ArrayList(MemPort),
+    /// Builder-only: the process each memory writes from per clock edge, so
+    /// write ports on one edge share it (`addWriteStmt`). Indices are stable
+    /// until `finish`, which drops this table.
+    mem_write_procs: std.ArrayList(MemWriteProcess),
     source_locs: std.ArrayList(SourceLoc),
     generated_clocks: std.ArrayList(GeneratedClock),
     /// Location recorded on what is declared next (`at`); 0 = none.
@@ -3351,6 +3361,7 @@ pub const ModuleBuilder = struct {
             .timing = .empty,
             .output_timing = .empty,
             .mem_ports = .empty,
+            .mem_write_procs = .empty,
             .source_locs = .empty,
             .generated_clocks = .empty,
         };
@@ -3369,6 +3380,7 @@ pub const ModuleBuilder = struct {
         self.timing.deinit(self.allocator);
         self.output_timing.deinit(self.allocator);
         self.mem_ports.deinit(self.allocator);
+        self.mem_write_procs.deinit(self.allocator);
         self.source_locs.deinit(self.allocator);
         self.generated_clocks.deinit(self.allocator);
     }
@@ -3926,7 +3938,7 @@ pub const ModuleBuilder = struct {
         const raw_we = Expr(1){ .e = b.cond1(spec.we) };
         const be: ?Expr(laneCount(W)) = if (comptime @hasField(@TypeOf(spec), "be")) b.operand(laneCount(W), spec.be) else null;
         const write = try self.lowerWrite(W, memory, name, domain, raw_we, self.intern(spec.addr), b.operand(W, spec.wdata), be);
-        try self.addProcess(.{ .edge = .{ .clk = domain.clk.ref, .rst = null, .active = domain.edge } }, &.{write.stmt});
+        try self.addWriteStmt(memory.ref, domain, write.stmt);
         try self.mem_ports.append(self.allocator, .{
             .mem = memory.ref,
             .name = name,
@@ -3971,7 +3983,7 @@ pub const ModuleBuilder = struct {
         // The read register resets with the domain; the array write sits in
         // its own reset-free process so synthesis infers a memory.
         try self.seq(domain, &.{if (en) |e| b.when(e, &.{access}, &.{}) else access});
-        try self.addProcess(.{ .edge = .{ .clk = domain.clk.ref, .rst = null, .active = domain.edge } }, &.{write.stmt});
+        try self.addWriteStmt(memory.ref, domain, write.stmt);
         try self.mem_ports.append(self.allocator, .{
             .mem = memory.ref,
             .name = name,
@@ -4031,6 +4043,26 @@ pub const ModuleBuilder = struct {
         return .{ .stmt = stmt, .we = we, .lanes = lanes };
     }
 
+    /// Adds a write port's statement to the reset-free process that writes
+    /// `memory` on `domain`'s clock edge, creating it for the first port. One
+    /// process per memory and edge, in port order, means no tool sees two
+    /// processes writing one array on one clock (a race in Verilog, even
+    /// though `lowerWrite` already keeps the ports' lanes apart).
+    fn addWriteStmt(self: *ModuleBuilder, memory: SymRef, domain: ClockDomain, stmt: Stmt) !void {
+        for (self.mem_write_procs.items) |row| {
+            if (!symEql(row.mem, memory) or !symEql(row.clk, domain.clk.ref) or row.edge != domain.edge) continue;
+            const proc = &self.processes.items[row.process];
+            const stmts = try self.allocator.alloc(Stmt, proc.stmts.len + 1);
+            @memcpy(stmts[0..proc.stmts.len], proc.stmts);
+            stmts[proc.stmts.len] = stmt;
+            self.allocator.free(proc.stmts);
+            proc.stmts = stmts;
+            return;
+        }
+        try self.mem_write_procs.append(self.allocator, .{ .mem = memory, .clk = domain.clk.ref, .edge = domain.edge, .process = @intCast(self.processes.items.len) });
+        try self.addProcess(.{ .edge = .{ .clk = domain.clk.ref, .rst = null, .active = domain.edge } }, &.{stmt});
+    }
+
     fn hasMemPorts(self: *const ModuleBuilder, memory: u32) bool {
         for (self.mem_ports.items) |port| if (port.mem.idx == memory) return true;
         return false;
@@ -4041,7 +4073,6 @@ pub const ModuleBuilder = struct {
     /// write priority covers every writer: each write-capable port owns its
     /// one writing process, and every read feeds a port's read-data register.
     fn validatePortedMemory(self: *ModuleBuilder, memory: u32, writing_processes: usize) !void {
-        var writers: usize = 0;
         var rdata = std.ArrayList(SymRef).empty;
         defer rdata.deinit(self.allocator);
         var reads = std.ArrayList(*const AnyExpr).empty;
@@ -4055,7 +4086,6 @@ pub const ModuleBuilder = struct {
         for (self.mem_ports.items) |*port| {
             if (port.mem.idx != memory) continue;
             if (port.kind != .read) {
-                writers += 1;
                 if (one_write_clock) {
                     const here = ActiveEdge{ .clk = .{ .ref = port.clk.? }, .edge = port.edge };
                     if (write_clock) |first| {
@@ -4072,7 +4102,12 @@ pub const ModuleBuilder = struct {
             try collectMemReads(self.allocator, &port.addr, memory, &reads);
         }
         const name = sym.name;
-        if (writing_processes != writers) {
+        // Each write edge of the memory owns exactly one process.
+        var write_edges: usize = 0;
+        for (self.mem_write_procs.items) |row| {
+            if (row.mem.idx == memory) write_edges += 1;
+        }
+        if (writing_processes != write_edges) {
             std.log.warn("zihdl: memory '{s}' in module '{s}' has declared ports and is also written directly; write it only through writePort/readWritePort", .{ name, self.name });
             return error.InvalidMemoryPort;
         }

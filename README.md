@@ -213,8 +213,9 @@ classification/synchronizer/arrival).
 
 Per-bit slew/load is authored as optional overrides next to the whole-port row
 (`inputs[].per_bit_slew` / `outputs[].per_bit_load`, emitted only when
-declared): a bit without an override keeps the whole-port value, and no live
-consumer acts on per-bit values yet. Required windows always name their
+declared): a bit row replaces only the bounds it declares and keeps the
+port's others (as SDC applies a bit row after the port row), each bound
+measured at the thresholds of the row that declares it. Required windows always name their
 reference clock (zihdl rejects a window without one). Hierarchy validation
 joins rows through every instance level it can map back to a module signal and
 rejects contradictions between a descendant and its ancestor or between

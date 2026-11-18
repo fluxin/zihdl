@@ -501,7 +501,10 @@ fn isPort(kind: ir.SymbolKind) bool {
 //     `plesiochronous`, `related_to` names a 1-bit input of the declaring
 //     module (null means an external reference) and the times are explicit.
 //   * `inputs[].per_bit_slew`: `[{ bit, threshold, rise, fall }]` overrides the
-//     whole-port `slew` for the named bits only; emitted only when declared.
+//     whole-port `slew` for the named bits only: a bit row replaces the
+//     bounds it declares and inherits the port's others, each bound measured
+//     at the thresholds of the row that declares it; emitted only when
+//     declared.
 //   * `outputs[].per_bit_load`: `[{ bit, value, unit }]` overrides the
 //     whole-port `load` for the named bits only; emitted only when declared.
 //

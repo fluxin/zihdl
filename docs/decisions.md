@@ -175,6 +175,10 @@ give a memory ports:
 - **Access:** a memory with ports is reached only through them, so
   `design.json` port rows and counts are complete.
 - **Collisions:** writers on one clock resolve each byte lane in port order.
+- **One process per write clock:** a memory's write ports on one clock edge
+  share one process, in port order. Two processes writing one array on one
+  clock are a Verilog race that tools resolve differently, even though the
+  lane priority already keeps the ports apart.
 - **Reset:** writes sit in reset-free processes so synthesis infers a memory.
 - **Storage:** register or latch storage takes writes on one clock and edge
   only, since each storage flop has one clock pin. `storage` is a hint

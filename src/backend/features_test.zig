@@ -248,6 +248,9 @@ test "same-clock write ports yield to the earlier port on a collision" {
     const v = try verilog.emitDesign(alloc, &design, .{});
     try std.testing.expect(contains(v, "if ((we1 && (!(we0 && (addr0 == addr1))))) begin\n            ram[addr1] <= d1;"));
     try std.testing.expect(contains(v, "assign ram_r_rdata = ram[raddr];"));
+    // Both ports write from one process, in port order: no two processes
+    // write the array on one clock.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, v, "always @(posedge clk) begin"));
 
     // A raw second writer without declared ports is still a multiple driver.
     const Raw = struct {
