@@ -13,6 +13,7 @@ pub const timing_contract = @import("backend/timing_contract_fixture.zig");
 pub const stimulus = @import("backend/stimulus.zig");
 pub const sdc = @import("backend/sdc.zig");
 pub const meminit = @import("backend/meminit.zig");
+pub const conformance = @import("backend/conformance_fixture.zig");
 
 /// HDL target selected through the generic `emitDesign` / `emitModule` hub.
 pub const Target = enum { verilog2001, systemverilog };
@@ -85,4 +86,5 @@ test {
     _ = stimulus;
     _ = sdc;
     _ = meminit;
+    _ = conformance;
 }

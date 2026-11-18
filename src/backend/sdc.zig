@@ -2,14 +2,17 @@
 //! (OpenSTA, LibreLane). Every line is lowered from authored intent; nothing
 //! is invented:
 //!
-//!   * one `create_clock` per clock domain of the top module (period from
-//!     `ClockDomain.freq_hz`) plus clock uncertainty;
+//!   * one `create_clock` per clock port of the top module (period from
+//!     `ClockDomain.freq_hz`) plus clock uncertainty, named after the first
+//!     domain on the port; further domains on that port (its falling edge,
+//!     say) use the same clock;
 //!   * one `create_generated_clock` per generated clock anywhere in the
 //!     hierarchy (`ModuleBuilder.addGeneratedClock`), on its instance pin
 //!     (`u_a/u_div/clk_out`), sourced from the top port or generated pin its
 //!     input traces to;
 //!   * `set_clock_groups -asynchronous` for each declared clock relationship
-//!     that is not synchronous and names another declared clock;
+//!     that is not synchronous and names another declared clock, each group
+//!     holding a clock and every clock generated from it;
 //!   * `set_input_delay` from synchronous input arrival windows;
 //!   * `set_output_delay` from output required windows;
 //!   * `set_input_transition` from input slew declarations, rescaled to the
@@ -51,7 +54,19 @@ pub fn emitDesignSdc(allocator: std.mem.Allocator, design: *const ir.Design, opt
     try appendFmt(&out, allocator, "# zihdl SDC for {s}\n", .{top.name});
     try out.appendSlice(allocator, "# Generated constraints; wire into oasic timing/sta.odin\n");
 
-    for (top.clocks) |clock| {
+    for (top.clocks, 0..) |clock, i| {
+        if (options.reset_false_paths and (clock.rst_n.ref.kind() != .input or clock.reset.assertion != .asynchronous))
+            return error.InvalidResetFalsePath;
+        // One SDC clock per port: a later domain on the same port (its other
+        // edge) is timed against the clock the first one created.
+        const first = domainOf(top, clock.clk.ref).?;
+        if (!std.mem.eql(u8, first.name, clock.name)) {
+            if (clockPeriodPs(first) != clockPeriodPs(clock)) {
+                std.log.warn("zihdl: clock domains '{s}' and '{s}' share port '{s}' with different periods", .{ first.name, clock.name, clock.clk.name() });
+                return error.ConflictingClockPeriod;
+            }
+            continue;
+        }
         const period_ps = clockPeriodPs(clock);
         try appendFmt(&out, allocator, "create_clock -name {s} -period {f} -waveform {{0.000 {f}}} [get_ports {{{s}}}]\n", .{
             clock.name, Ns{ .ps = @intCast(period_ps) }, Ns{ .ps = @intCast(period_ps / 2) }, clock.clk.name(),
@@ -59,15 +74,22 @@ pub fn emitDesignSdc(allocator: std.mem.Allocator, design: *const ir.Design, opt
         if (options.uncertainty_ps) |ps| {
             try appendFmt(&out, allocator, "set_clock_uncertainty {f} [get_clocks {{{s}}}]\n", .{ Ns{ .ps = @intCast(ps) }, clock.name });
         }
-        if (options.reset_false_paths) {
-            if (clock.rst_n.ref.kind() != .input or clock.reset.assertion != .asynchronous)
-                return error.InvalidResetFalsePath;
+        // One waiver per reset port, however many domains share it.
+        const reset_seen = for (top.clocks[0..i]) |earlier| {
+            if (earlier.rst_n.ref.idx == clock.rst_n.ref.idx) break true;
+        } else false;
+        if (options.reset_false_paths and !reset_seen) {
             try appendFmt(&out, allocator, "set_false_path -from [get_ports {{{s}}}]\n", .{clock.rst_n.name()});
         }
     }
 
-    try emitGeneratedClocks(&out, allocator, design, top, options);
-    try emitClockGroups(&out, allocator, top);
+    // Generated clocks and their root ports live only until the groups are
+    // written.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    var generated = std.ArrayList(Generated).empty;
+    try emitGeneratedClocks(&out, allocator, scratch.allocator(), &generated, design, top, options);
+    try emitClockGroups(&out, allocator, top, generated.items);
     try emitInputDelays(&out, allocator, top);
     try emitOutputDelays(&out, allocator, top);
     try emitInputTransitions(&out, allocator, top, options);
@@ -82,64 +104,63 @@ fn clockPeriodPs(clock: ir.ClockDomain) u64 {
     return if (clock.freq_hz == 0) 0 else 1_000_000_000_000 / clock.freq_hz;
 }
 
-/// Where a clock net comes from, as SDC names it.
-const ClockSource = union(enum) {
-    port: []const u8,
-    pin: []const u8,
+/// Where a clock net comes from, as SDC names it, and the top clock port it
+/// is ultimately derived from.
+const ClockSource = struct {
+    kind: enum { port, pin },
+    name: []const u8,
+    root: []const u8,
 };
 
-fn emitGeneratedClocks(out: *std.ArrayList(u8), allocator: std.mem.Allocator, design: *const ir.Design, top: *const ir.Module, options: Options) !void {
-    // Paths and pin names live only for this pass: a scratch arena owns them.
-    var scratch = std.heap.ArenaAllocator.init(allocator);
-    defer scratch.deinit();
-    const arena = scratch.allocator();
+/// A generated clock's SDC name and the top clock port it derives from.
+const Generated = struct { name: []const u8, root: []const u8 };
+
+fn emitGeneratedClocks(out: *std.ArrayList(u8), allocator: std.mem.Allocator, arena: std.mem.Allocator, generated: *std.ArrayList(Generated), design: *const ir.Design, top: *const ir.Module, options: Options) !void {
     // Only top ports with a declared clock domain have an SDC clock to
     // derive from; everything below resolves through them.
     const inputs = try arena.alloc(?ClockSource, top.scope.symbols.items.len);
     for (top.scope.symbols.items, inputs, 0..) |sym, *slot, i| {
         const clocked = sym.kind == .input and domainOf(top, .{ .scope = top.scope, .idx = @intCast(i) }) != null;
-        slot.* = if (clocked) .{ .port = sym.name } else null;
+        slot.* = if (clocked) .{ .kind = .port, .name = sym.name, .root = sym.name } else null;
     }
     // A top module's own generated clocks sit on its output ports.
-    try emitGeneratedRows(out, allocator, top, "", inputs, options);
-    try walkGenerated(out, allocator, arena, design, top, "", inputs, options, 0);
+    try emitGeneratedRows(out, allocator, arena, generated, top, "", inputs, options);
+    try walkGenerated(out, allocator, arena, generated, design, top, "", inputs, options, 0);
 }
 
 /// `create_generated_clock` for each clock `module` generates. `path` is the
 /// instance path; empty for the top, whose outputs are ports.
-fn emitGeneratedRows(out: *std.ArrayList(u8), allocator: std.mem.Allocator, module: *const ir.Module, path: []const u8, inputs: []const ?ClockSource, options: Options) !void {
+fn emitGeneratedRows(out: *std.ArrayList(u8), allocator: std.mem.Allocator, arena: std.mem.Allocator, generated: *std.ArrayList(Generated), module: *const ir.Module, path: []const u8, inputs: []const ?ClockSource, options: Options) !void {
     for (module.generated_clocks) |gc| {
         const source = inputs[gc.source.idx] orelse {
             std.log.warn("zihdl: generated clock '{s}' of '{s}' is not fed by a declared top-level clock or generated clock", .{ gc.name, if (path.len == 0) module.name else path });
             return error.GeneratedClockSourceUnresolved;
         };
-        const source_kind: []const u8 = switch (source) {
+        const source_kind: []const u8 = switch (source.kind) {
             .port => "get_ports",
             .pin => "get_pins",
         };
-        const source_name = switch (source) {
-            .port, .pin => |n| n,
-        };
-        const sep: []const u8 = if (path.len == 0) "" else "/";
+        const name = if (path.len == 0) gc.name else try std.fmt.allocPrint(arena, "{s}/{s}", .{ path, gc.name });
         const target_kind: []const u8 = if (path.len == 0) "get_ports" else "get_pins";
-        try appendFmt(out, allocator, "create_generated_clock -name {s}{s}{s} -source [{s} {{{s}}}] -divide_by {d} [{s} {{{s}{s}{s}}}]\n", .{
-            path, sep, gc.name, source_kind, source_name, gc.divide_by, target_kind, path, sep, gc.output.name(),
+        const sep: []const u8 = if (path.len == 0) "" else "/";
+        try appendFmt(out, allocator, "create_generated_clock -name {s} -source [{s} {{{s}}}] -divide_by {d} [{s} {{{s}{s}{s}}}]\n", .{
+            name, source_kind, source.name, gc.divide_by, target_kind, path, sep, gc.output.name(),
         });
         if (options.uncertainty_ps) |ps| {
-            try appendFmt(out, allocator, "set_clock_uncertainty {f} [get_clocks {{{s}{s}{s}}}]\n", .{ Ns{ .ps = @intCast(ps) }, path, sep, gc.name });
+            try appendFmt(out, allocator, "set_clock_uncertainty {f} [get_clocks {{{s}}}]\n", .{ Ns{ .ps = @intCast(ps) }, name });
         }
+        try generated.append(arena, .{ .name = name, .root = source.root });
     }
 }
 
 /// Depth-first over instances: maps each child's input ports to the clock
-/// source feeding them, then emits the child's generated clocks.
-/// Depth-first over instances: maps each child's input ports to the clock
 /// source feeding them, then emits the child's generated clocks. `arena`
-/// holds the paths and maps; `allocator` only grows `out`.
+/// holds the paths, maps and generated rows; `allocator` only grows `out`.
 fn walkGenerated(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
+    generated: *std.ArrayList(Generated),
     design: *const ir.Design,
     module: *const ir.Module,
     path: []const u8,
@@ -158,8 +179,8 @@ fn walkGenerated(
             const port = child.scope.find(conn.port_name) orelse continue;
             child_inputs[port.idx] = try resolveClock(arena, design, module, path, inputs, conn.signal, 0);
         }
-        try emitGeneratedRows(out, allocator, child, child_path, child_inputs, options);
-        try walkGenerated(out, allocator, arena, design, child, child_path, child_inputs, options, depth + 1);
+        try emitGeneratedRows(out, allocator, arena, generated, child, child_path, child_inputs, options);
+        try walkGenerated(out, allocator, arena, generated, design, child, child_path, child_inputs, options, depth + 1);
     }
 }
 
@@ -182,11 +203,16 @@ fn resolveClock(allocator: std.mem.Allocator, design: *const ir.Design, module: 
                     const child = design.findModule(inst.module_name) orelse return null;
                     for (child.generated_clocks) |gc| {
                         if (!std.mem.eql(u8, gc.output.name(), conn.port_name)) continue;
+                        // The pin derives from whatever feeds the child's source input.
+                        const fed = for (inst.connections) |source_conn| {
+                            if (source_conn.direction == .input and std.mem.eql(u8, source_conn.port_name, gc.source.name())) break source_conn.signal;
+                        } else return null;
+                        const source = try resolveClock(allocator, design, module, path, inputs, fed, depth + 1) orelse return null;
                         const pin = if (path.len == 0)
                             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ inst.instance_name, conn.port_name })
                         else
                             try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ path, inst.instance_name, conn.port_name });
-                        return .{ .pin = pin };
+                        return .{ .kind = .pin, .name = pin, .root = source.root };
                     }
                     return null;
                 }
@@ -208,7 +234,7 @@ fn domainOf(top: *const ir.Module, port: ir.SymRef) ?ir.ClockDomain {
 /// One asynchronous group pair per declared non-synchronous relationship whose
 /// related port is itself a declared clock. A relationship to an external or
 /// undeclared reference has no SDC clock to name and stays descriptive.
-fn emitClockGroups(out: *std.ArrayList(u8), allocator: std.mem.Allocator, top: *const ir.Module) !void {
+fn emitClockGroups(out: *std.ArrayList(u8), allocator: std.mem.Allocator, top: *const ir.Module, generated: []const Generated) !void {
     for (top.clocks, 0..) |clock, i| {
         const rel = clock.relationship orelse continue;
         if (rel.relation == .synchronous) continue;
@@ -221,8 +247,21 @@ fn emitClockGroups(out: *std.ArrayList(u8), allocator: std.mem.Allocator, top: *
             if (target.idx == clock.clk.ref.idx and std.mem.eql(u8, earlier.name, related.name)) break true;
         } else false;
         if (duplicate) continue;
-        try appendFmt(out, allocator, "set_clock_groups -asynchronous -group [get_clocks {{{s}}}] -group [get_clocks {{{s}}}]\n", .{ clock.name, related.name });
+        try out.appendSlice(allocator, "set_clock_groups -asynchronous");
+        try appendGroup(out, allocator, domainOf(top, clock.clk.ref).?, generated);
+        try appendGroup(out, allocator, related, generated);
+        try out.appendSlice(allocator, "\n");
     }
+}
+
+/// ` -group [get_clocks {master derived...}]`: a clock and every clock
+/// generated from its port, so an asynchronous pair covers derived clocks.
+fn appendGroup(out: *std.ArrayList(u8), allocator: std.mem.Allocator, master: ir.ClockDomain, generated: []const Generated) !void {
+    try appendFmt(out, allocator, " -group [get_clocks {{{s}", .{master.name});
+    for (generated) |g| {
+        if (std.mem.eql(u8, g.root, master.clk.name())) try appendFmt(out, allocator, " {s}", .{g.name});
+    }
+    try out.appendSlice(allocator, "}]");
 }
 
 /// Arrival windows are relative to the destination clock's rising edge, which

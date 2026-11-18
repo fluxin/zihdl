@@ -585,3 +585,37 @@ test "a memory with declared ports is reached only through them" {
         try std.testing.expectError(error.InvalidMemoryPort, mixed.elaborate(MixedAccess.Make(raw)));
     }
 }
+
+const RegisterStorage = struct {
+    fn Make(comptime storage: netlist.MemStorage) type {
+        return struct {
+            pub const name = "register_storage_" ++ @tagName(storage);
+            pub const Inputs = struct { a_clk: Signal(1), b_clk: Signal(1), rst_n: Signal(1), we: Signal(1), addr: Signal(2), d: Signal(8) };
+            pub const Outputs = struct { q: Signal(8) };
+            pub fn build(mb: *ModuleBuilder) !void {
+                const ins = try mb.declareInputs(Inputs);
+                const outs = try mb.declareOutputs(Outputs);
+                const a = ClockDomain{ .clk = ins.a_clk, .rst_n = ins.rst_n };
+                const b = ClockDomain{ .name = "b", .clk = ins.b_clk, .rst_n = ins.rst_n };
+                const ram = try mb.mem(8, "ram", 4, .{ .read = .sync, .storage = storage });
+                try mb.writePort(ram, "wa", .{ .domain = a, .we = ins.we, .addr = ins.addr, .wdata = ins.d });
+                try mb.writePort(ram, "wb", .{ .domain = b, .we = ins.we, .addr = ins.addr, .wdata = ins.d });
+                try mb.assign(outs.q, try mb.readPort(ram, "r", .{ .domain = b, .addr = ins.addr }));
+            }
+        };
+    }
+};
+
+test "register and latch storage take writes on one clock only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    inline for (.{ netlist.MemStorage.registers, netlist.MemStorage.latches }) |storage| {
+        var design = Design.init(alloc);
+        try std.testing.expectError(error.InvalidMemoryPort, design.elaborate(RegisterStorage.Make(storage)));
+    }
+    inline for (.{ netlist.MemStorage.macro, netlist.MemStorage.any }) |storage| {
+        var design = Design.init(alloc);
+        _ = try design.elaborate(RegisterStorage.Make(storage));
+    }
+}

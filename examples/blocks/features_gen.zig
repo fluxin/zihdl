@@ -1,6 +1,7 @@
 //! Emits the 0.1 feature witnesses under out/features: signal arrays, edges,
 //! multi-port memories with generated contents, temporal properties, clock
-//! generation and the register bank on each bus. Testbenches come from
+//! generation and the register bank on each bus; and the format conformance
+//! design under out/conformance (every SDC command and design.json field). Testbenches come from
 //! examples/testing/feature_cases.zig; `zig build features` lints and runs
 //! them.
 const std = @import("std");
@@ -272,4 +273,19 @@ pub fn main(init: std.process.Init) !void {
     const Bank = blocks.RegisterBankBlock(blocks.regbank.example_spec, .apb);
     try write(io, "out/features/demo_regs.h", try Bank.cHeader(alloc));
     try write(io, "out/features/demo_regs.json", try Bank.regmapJson(alloc));
+
+    // Format conformance: every SDC command and design.json field in files.
+    const conformance = backend.conformance;
+    try std.Io.Dir.cwd().createDirPath(io, conformance.dir);
+    var full = netlist.Design.init(alloc);
+    _ = try full.elaborate(conformance.Top);
+    try write(io, conformance.dir ++ "/conformance.v", try backend.verilog.emitDesign(alloc, &full, .{}));
+    try write(io, conformance.dir ++ "/conformance.sv", try backend.systemverilog.emitDesign(alloc, &full, .{}));
+    // Init files are named relative to the RTL, so they go next to it.
+    for (try backend.meminit.files(alloc, &full)) |file| {
+        try write(io, try std.fmt.allocPrint(alloc, "{s}/{s}", .{ conformance.dir, file.path }), file.bytes);
+    }
+    try write(io, conformance.dir ++ "/conformance.sdc", try backend.sdc.emitDesignSdc(alloc, &full, conformance.sdc_options));
+    try write(io, conformance.dir ++ "/conformance.json", try backend.metadata.emitDesignJson(alloc, &full, conformance.json_options));
+    try write(io, conformance.dir ++ "/conformance_v1.json", try backend.metadata.emitDesignJson(alloc, &full, .{}));
 }

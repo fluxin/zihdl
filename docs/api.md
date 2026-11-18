@@ -240,7 +240,8 @@ holes that remain are listed below; work that belongs to the checker is in
   read-during-write behavior (`write_mode`) belongs to a read/write port.
   Array writes are reset-free processes, so a write during reset lands. A
   memory with ports is accessed only through them, so its `design.json` port
-  rows and counts are complete.
+  rows and counts are complete. Register or latch storage takes writes on one
+  clock and edge only.
 - Banked and multidimensional storage are Zig arrays of memories; there is no
   nested memory type.
 - Initialization is `$readmemh`, from a checked-in file or from

@@ -378,7 +378,7 @@ fn writeMemPorts(j: *std.json.Stringify, module: *const ir.Module, sym_idx: usiz
         try j.objectField("clock");
         try j.write(if (port.clk) |clk| clk.name() else null);
         try j.objectField("edge");
-        try j.write(@tagName(port.edge));
+        try j.write(if (port.clk != null) @tagName(port.edge) else null);
         try j.objectField("byte_enables");
         try j.write(port.byte_enables);
         try j.objectField("rdata");

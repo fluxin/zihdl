@@ -4046,15 +4046,32 @@ pub const ModuleBuilder = struct {
         defer rdata.deinit(self.allocator);
         var reads = std.ArrayList(*const AnyExpr).empty;
         defer reads.deinit(self.allocator);
+        const sym = self.scope.symbols.items[memory];
+        // Register or latch storage gives every word one clock pin, so all its
+        // writes must share one clock and edge; other storage may bind a
+        // multi-clock macro.
+        const one_write_clock = sym.storage == .registers or sym.storage == .latches;
+        var write_clock: ?ActiveEdge = null;
         for (self.mem_ports.items) |*port| {
             if (port.mem.idx != memory) continue;
-            if (port.kind != .read) writers += 1;
+            if (port.kind != .read) {
+                writers += 1;
+                if (one_write_clock) {
+                    const here = ActiveEdge{ .clk = .{ .ref = port.clk.? }, .edge = port.edge };
+                    if (write_clock) |first| {
+                        if (!symEql(first.clk.ref, here.clk.ref) or first.edge != here.edge) {
+                            std.log.warn("zihdl: memory '{s}' in module '{s}' is stored in {s} but written on more than one clock or edge; use storage .macro or .any", .{ sym.name, self.name, @tagName(sym.storage) });
+                            return error.InvalidMemoryPort;
+                        }
+                    } else write_clock = here;
+                }
+            }
             if (port.rdata) |r| try rdata.append(self.allocator, r);
             // A read-data assignment is skipped below as a whole, so a read of
             // this memory inside the port's own address is checked here.
             try collectMemReads(self.allocator, &port.addr, memory, &reads);
         }
-        const name = self.scope.symbols.items[memory].name;
+        const name = sym.name;
         if (writing_processes != writers) {
             std.log.warn("zihdl: memory '{s}' in module '{s}' has declared ports and is also written directly; write it only through writePort/readWritePort", .{ name, self.name });
             return error.InvalidMemoryPort;

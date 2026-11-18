@@ -209,3 +209,41 @@ test "sdc rejects malformed library slew thresholds" {
         try std.testing.expectError(error.InvalidLibrarySlewThreshold, sdc.emitDesignSdc(std.testing.allocator, &design, .{ .library_slew_threshold = bad }));
     }
 }
+
+const SharedPort = struct {
+    fn Make(comptime fall_hz: u64) type {
+        return struct {
+            pub const name = "sdc_shared_port";
+            pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), d: Signal(1) };
+            pub const Outputs = struct { q: Signal(1) };
+            pub fn build(mb: *ModuleBuilder) !void {
+                const ins = try mb.declareInputs(Inputs);
+                const outs = try mb.declareOutputs(Outputs);
+                const b = mb.exprs();
+                const rise = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = 100_000_000 };
+                const fall = ClockDomain{ .name = "sys_fall", .clk = ins.clk, .rst_n = ins.rst_n, .freq_hz = fall_hz, .edge = .falling };
+                try mb.addClockDomain(rise);
+                try mb.addClockDomain(fall);
+                const r = try mb.reg("r", 1, 0);
+                const f = try mb.reg("f", 1, 0);
+                try mb.seq(rise, &.{b.assign(r, ins.d)});
+                try mb.seq(fall, &.{b.assign(f, r)});
+                try mb.assign(outs.q, f);
+            }
+        };
+    }
+};
+
+test "domains sharing a clock port share its SDC clock and must agree on its period" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var design = Design.init(alloc);
+    _ = try design.elaborate(SharedPort.Make(100_000_000));
+    const text = try sdc.emitDesignSdc(alloc, &design, .{ .reset_false_paths = true });
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "create_clock"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "set_false_path"));
+    var conflict = Design.init(alloc);
+    _ = try conflict.elaborate(SharedPort.Make(50_000_000));
+    try std.testing.expectError(error.ConflictingClockPeriod, sdc.emitDesignSdc(alloc, &conflict, .{}));
+}

@@ -224,11 +224,14 @@ resolution.
 ## Authoring features
 
 **Constraints from intent.** `backend.sdc` lowers everything the top module
-authors: `create_clock` per domain, `create_generated_clock` for every
+authors: one `create_clock` per clock port (further domains on that port, such
+as its falling edge, share it and must agree on its period),
+`create_generated_clock` for every
 generated clock in the hierarchy (on its instance pin, or on the port when the
 top generates it, sourced from the declared top clock or generated pin it
 traces to; anything else is an error), `set_clock_groups -asynchronous` for declared
-non-synchronous clock relationships, `set_input_delay` from arrival windows,
+non-synchronous clock relationships (each group carries the clocks generated
+from its clock), `set_input_delay` from arrival windows,
 `set_output_delay` from required windows, `set_input_transition` from input
 slew (rescaled to `Options.library_slew_threshold`, which is required once a
 slew is declared) and `set_load` from output loads. A required window is
@@ -271,12 +274,19 @@ one memory port model: each records a port row (`memories[].ports` in
 memory may have any number of them, so true dual-port and dual-clock RAMs
 come from the same primitive. A memory with ports is reached only through
 them (direct `memRead`/`memWrite` on it is `error.InvalidMemoryPort`), and
-its `read_ports`/`write_ports` counts are its port rows. When write ports on one clock hit the same
+its `read_ports`/`write_ports` counts are its port rows. Register or latch
+storage (`MemOpts.storage`) gives each word one clock pin, so its write ports
+must share one clock and edge; writes from several clocks need `.macro` or
+`.any`. When write ports on one clock hit the same
 address in one cycle, each byte lane goes to the earliest port that writes
 it, so disjoint lanes both land; a read/write port follows the memory's
 `write_mode`, merging lanes for a byte-masked write-first read at any width. Array writes sit in reset-free processes so synthesis
 infers a memory (Yosys infers one true dual-port `$mem_v2` for the witness).
-`MemOpts.init_words` generates initial contents from Zig:
+`MemOpts.init_file` is emitted verbatim in `$readmemh` and `design.json`.
+Tools resolve it from the current directory, then the RTL file's directory, so
+a bare name written next to the RTL keeps a bundle relocatable (the
+conformance bundle does this). `MemOpts.init_words` generates initial contents
+from Zig:
 `backend.meminit.files` returns the exact `$readmemh` file (every entry
 written, zero past the data) and `design.json` records its SHA-256.
 
@@ -310,7 +320,12 @@ hardware-facing field ports, plus `cHeader` and `regmapJson`
 `zig build features` emits every witness through both HDL backends, lints
 each with Verilator and replays each in Icarus, including a byte-lane witness
 across 1-, 8-, 16- and 72-bit memories and a property trace that must trip its
-assertion.
+assertion. It also writes the format conformance design
+(`backend.conformance`) to `out/conformance/`: Verilog, SystemVerilog, SDC,
+`design.json` (timing intent v2 and v1) and generated memory contents from one
+design that uses every SDC command and every optional `design.json` field. A
+unit test pins the SDC text and each field, so a consumer validated against
+these files is validated against the whole format.
 
 ## Quick Start
 

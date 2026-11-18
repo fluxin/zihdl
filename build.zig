@@ -880,6 +880,19 @@ pub fn build(b: *std.Build) void {
             features_step.dependOn(&run.step);
         }
     }
+    // The conformance design has no bench: it must lint and compile under
+    // both backends (the clock gate's SYNTHESIS branch needs the cell library,
+    // so its behavioral model is the one compiled here).
+    for ([_][]const u8{ "v", "sv" }) |ext| {
+        const rtl = b.fmt("out/conformance/conformance.{s}", .{ext});
+        const lint = b.addSystemCommand(&.{ "verilator", "--lint-only", "-Wno-MULTITOP", "--top-module", "conformance_top", rtl });
+        lint.step.dependOn(&features_gen.step);
+        features_step.dependOn(&lint.step);
+        const gen: []const u8 = if (std.mem.eql(u8, ext, "sv")) "-g2012" else "-g2001";
+        const compile = b.addSystemCommand(&.{ "iverilog", gen, "-s", "conformance_top", "-o", b.fmt("out/conformance/conformance_{s}_iv", .{ext}), rtl });
+        compile.step.dependOn(&features_gen.step);
+        features_step.dependOn(&compile.step);
+    }
     const props_fail_compile = b.addSystemCommand(&.{ "iverilog", "-g2012", "-DZIHDL_ASSERT", "-s", "feature_props_fail_tb", "-o", "out/features/feature_props_fail_iv", "out/features/props.v", "out/testbenches/feature_props_fail_tb.v" });
     props_fail_compile.step.dependOn(&features_gen.step);
     props_fail_compile.step.dependOn(&testbench_sources_gen.step);
