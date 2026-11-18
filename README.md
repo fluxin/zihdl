@@ -404,7 +404,7 @@ is in [docs/api.md](docs/api.md#gaps-by-category).
 | Area | Still open |
 |---|---|
 | Parameterization | Runtime `Param(W)` values are 64-bit Verilog overrides and cannot size ports or memories; widths and depths are comptime `Shape` values by design |
-| Timing / constraints | No multicycle paths; per-bit slew/load has no consumer analysis; SDC covers the top module's IO and generated clocks, and constraint resolution beyond that stays consumer-side |
+| Timing / constraints | No multicycle paths; SDC covers the top module's IO and generated clocks, and constraint resolution beyond that stays consumer-side |
 | Properties | Fixed `##n` delays only (no `##[m:n]` ranges or repetition); no native SVA emission |
 | Memory | One memory per declaration: banks and multidimensional storage are Zig arrays of memories; generated contents need a width of at most 64 bits |
 | Backends / packaging | Verilog-2001 and SystemVerilog only; pre-release package version `0.0.0` until 0.1.0 is tagged |

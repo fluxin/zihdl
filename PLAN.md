@@ -13,10 +13,6 @@ Simulation, proof, synthesis, timing analysis and physical implementation are
    then tag `0.1.0` in `build.zig.zon` and freeze `zihdl.design/1`,
    `zihdl.timing_intent/1`, `/2`, `zihdl.provenance/1` and `zihdl.regmap/1`
    against that release.
-2. oasic's SDC reader must accept what the SDC now emits: `set_input_transition`,
-   `set_load`, and `create_generated_clock` with `get_pins` targets and sources.
-   Until it does, a design that declares input slew, output load or a generated
-   clock produces SDC that oasic rejects (the other readers accept it).
 
 ## Deferred expansion
 

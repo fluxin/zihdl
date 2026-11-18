@@ -278,8 +278,7 @@ holes that remain are listed below; work that belongs to the checker is in
   required windows (each with an explicit reference clock and edge), clock
   relationships and reset-release topology. Hierarchy contradictions are
   rejected transitively through silent levels and siblings, but constraint
-  resolution stays consumer-side and no consumer analysis reads per-bit values
-  yet.
+  resolution stays consumer-side.
 - SDC lowers clocks, generated clocks, uncertainty, asynchronous clock
   groups, input and output delays, input transitions (rescaled to the library's
   slew thresholds) and loads, plus the explicit reset waiver. There are no
