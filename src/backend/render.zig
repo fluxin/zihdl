@@ -102,26 +102,43 @@ pub const Renderer = struct {
         var queue = std.ArrayList(CountItem).empty;
         defer queue.deinit(self.allocator);
 
-        for (module.assigns) |a| try queue.append(self.allocator, .{ .expr = a.src, .delta = 1 });
-        for (module.processes) |proc| try self.enqueueStmts(proc.stmts, &queue);
+        // Each round counts occurrences in the expression forest whose roots
+        // are the statements plus every hoisted definition. A hoisted node is
+        // a cut: only its own definition counts its children. A subtree
+        // repeated inside one hoisted definition is therefore shared as well,
+        // and the next round names it. The hoisted set only grows, so the
+        // rounds end once a round names nothing new.
+        while (true) {
+            const hoisted_before = self.hoisted.items.len;
+            counts.clearRetainingCapacity();
+            queue.clearRetainingCapacity();
 
-        // Propagate occurrence multiplicity through the DAG (0 -> 1 -> 2),
-        // so duplicated subtrees inside a single expression count too.
-        var i: usize = 0;
-        while (i < queue.items.len) : (i += 1) {
-            const item = queue.items[i];
-            const gop = try counts.getOrPut(self.allocator, item.expr);
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            const old = gop.value_ptr.*;
-            if (old >= occurrence_cap) continue;
-            const new = @min(old + item.delta, occurrence_cap);
-            if (new == old) continue;
-            gop.value_ptr.* = new;
-            try self.enqueueChildren(item.expr, new - old, &queue);
+            for (module.assigns) |a| try queue.append(self.allocator, .{ .expr = a.src, .delta = 1 });
+            for (module.processes) |proc| try self.enqueueStmts(proc.stmts, &queue);
+            for (self.hoisted.items) |node| try self.enqueueChildren(node, 1, &queue);
+
+            // Propagate occurrence multiplicity through the DAG (0 -> 1 -> 2),
+            // so duplicated subtrees inside a single expression count too.
+            var i: usize = 0;
+            while (i < queue.items.len) : (i += 1) {
+                const item = queue.items[i];
+                if (self.hoist.contains(item.expr)) continue;
+                const gop = try counts.getOrPut(self.allocator, item.expr);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                const old = gop.value_ptr.*;
+                if (old >= occurrence_cap) continue;
+                const new = @min(old + item.delta, occurrence_cap);
+                if (new == old) continue;
+                gop.value_ptr.* = new;
+                try self.enqueueChildren(item.expr, new - old, &queue);
+            }
+
+            for (module.assigns) |a| try self.selectExpr(module, a.src, &counts);
+            for (module.processes) |proc| try self.selectStmts(module, proc.stmts, &counts);
+            // By index: selecting appends to `hoisted`.
+            for (0..hoisted_before) |h| try self.selectChildren(module, self.hoisted.items[h], &counts);
+            if (self.hoisted.items.len == hoisted_before) break;
         }
-
-        for (module.assigns) |a| try self.selectExpr(module, a.src, &counts);
-        for (module.processes) |proc| try self.selectStmts(module, proc.stmts, &counts);
     }
 
     /// Emits the hoisted subexpression definitions (`assign tmpN = ...;`) in
@@ -304,16 +321,19 @@ pub const Renderer = struct {
         }
     }
 
-    fn selectExpr(self: *Renderer, module: *const ir.Module, expr: ir.AnyExpr, counts: *ExprMap) !void {
+    fn selectExpr(self: *Renderer, module: *const ir.Module, expr: ir.AnyExpr, counts: *ExprMap) (std.mem.Allocator.Error || error{NoSpaceLeft})!void {
+        // A hoisted node's children are selected from its own definition.
+        if (self.hoist.contains(expr)) return;
         if ((counts.get(expr) orelse 0) >= 2 and isHoistable(expr)) {
-            const gop = try self.hoist.getOrPut(self.allocator, expr);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = @intCast(self.temps.items.len);
-                try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = expr.width, .is_signed = expr.is_signed });
-                try self.hoisted.append(self.allocator, expr);
-            }
+            try self.hoist.put(self.allocator, expr, @intCast(self.temps.items.len));
+            try self.temps.append(self.allocator, .{ .name = try self.uniqueName(module), .width = expr.width, .is_signed = expr.is_signed });
+            try self.hoisted.append(self.allocator, expr);
             return;
         }
+        try self.selectChildren(module, expr, counts);
+    }
+
+    fn selectChildren(self: *Renderer, module: *const ir.Module, expr: ir.AnyExpr, counts: *ExprMap) (std.mem.Allocator.Error || error{NoSpaceLeft})!void {
         switch (expr.node) {
             .ref, .lit => {},
             .bit => |b| try self.selectSelectBase(module, b.base, counts),
