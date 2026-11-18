@@ -171,12 +171,7 @@ pub fn emitModuleInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, mod
         if (sym.kind != .mem or sym.dead) continue;
         const multi_clock = render.memoryMultiClock(module, sym_idx);
         if (multi_clock) try render.appendStr(out, allocator, "    /* verilator lint_off MULTIDRIVEN */\n");
-        switch (sym.storage) {
-            .any => {},
-            .registers => try render.appendStr(out, allocator, "    (* ram_style = \"logic\" *)\n"),
-            .latches => try render.appendStr(out, allocator, "    (* ram_style = \"latch\" *)\n"),
-            .macro => try render.appendStr(out, allocator, "    (* ram_style = \"block\" *)\n"),
-        }
+        try render.appendStorageAttr(out, allocator, sym.storage);
         if (sym.is_signed) {
             if (sym.width == 1) {
                 try render.appendFmt(out, allocator, "    reg signed {s} [0:{d}];", .{ sym.name, sym.depth - 1 });

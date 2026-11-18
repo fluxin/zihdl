@@ -3,8 +3,9 @@
 //! A format is a Zig packed struct, least significant field first, placed at
 //! bit `base` of a wider word (an instruction payload, a register, a packet
 //! header). It may declare `pub const rules = [_]bitfield.Rule{...}`. A value
-//! is valid iff every enum field holds a declared tag, every field named
-//! `reserved` is zero and every rule holds. From that one definition:
+//! is valid iff every enum field holds a declared tag, every reserved field
+//! (named `reserved`, or `reserved_<suffix>` when a format has several gaps)
+//! is zero and every rule holds. From that one definition:
 //!
 //! - `field` slices a signal at a field's offset (hardware decode),
 //! - `valid` builds the validity check in hardware,
@@ -32,8 +33,9 @@ fn rulesOf(comptime P: type) []const Rule {
     return if (@hasDecl(P, "rules")) &P.rules else &.{};
 }
 
-fn isReserved(comptime name: []const u8) bool {
-    return std.mem.eql(u8, name, "reserved");
+/// A reserved field: `reserved`, or `reserved_<suffix>` for further gaps.
+pub fn isReserved(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "reserved") or std.mem.startsWith(u8, name, "reserved_");
 }
 
 /// Word bit range `[hi:lo]` of field `name` of `P` placed at bit `base`.
@@ -164,4 +166,11 @@ test "field offsets and the document table" {
     try writeTable(arena.allocator(), &text, TestFormat, 16);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "| `mode` | `[22:21]` | `a`=0, `b`=1, `c`=2 |") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "| `count` | `[20:16]` | 1..20 (any when `mode`=2) |") != null);
+}
+
+test "every reserved_<suffix> field is reserved" {
+    const Gaps = packed struct(u8) { a: u2, reserved: u2 = 0, b: u2, reserved_6: u2 = 0 };
+    try std.testing.expect(decode(Gaps, 0b0001_0001) != null);
+    try std.testing.expect(decode(Gaps, 0b0100_0001) == null);
+    try std.testing.expect(!isReserved("reservedness"));
 }

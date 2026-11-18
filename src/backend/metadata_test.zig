@@ -370,10 +370,9 @@ test "design.json records memory storage intent and access ports" {
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
             const outs = try mb.declareOutputs(Outputs);
-            const b = mb.exprs();
             const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
             const program = try mb.mem(32, "program_mem", 64, .{ .read = .sync, .storage = .registers });
-            try mb.seq(domain, &.{b.when(ins.we, &.{b.memWrite(program, ins.waddr, ins.wdata)}, &.{})});
+            try mb.writePort(program, "host", .{ .domain = domain, .we = ins.we, .addr = ins.waddr, .wdata = ins.wdata });
             try mb.assign(outs.i0, try mb.readPort(program, "i0", .{ .domain = domain, .addr = ins.pc0 }));
             try mb.assign(outs.i1, try mb.readPort(program, "i1", .{ .domain = domain, .addr = ins.pc1 }));
             try mb.assign(outs.i2, try mb.readPort(program, "i2", .{ .domain = domain, .addr = ins.pc2 }));
@@ -385,10 +384,13 @@ test "design.json records memory storage intent and access ports" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"storage\": \"registers\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"read_ports\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"write_ports\": 1") != null);
+    const sv = @import("systemverilog.zig");
+    for ([_][]const u8{ try verilog.emitDesign(alloc, &design, .{}), try sv.emitDesign(alloc, &design, .{}) }) |rtl| {
+        const attr = std.mem.indexOf(u8, rtl, "(* ram_style = \"logic\" *)").?;
+        const decl = std.mem.indexOf(u8, rtl, "program_mem [0:63];").?;
+        try std.testing.expect(attr < decl);
+    }
     const v = try verilog.emitDesign(alloc, &design, .{});
-    const attr = std.mem.indexOf(u8, v, "(* ram_style = \"logic\" *)").?;
-    const decl = std.mem.indexOf(u8, v, "program_mem [0:63];").?;
-    try std.testing.expect(attr < decl);
     // Three registered read ports, uniquely named.
     try std.testing.expect(std.mem.indexOf(u8, v, "program_mem_i2_rdata") != null);
 }

@@ -2222,15 +2222,33 @@ pub fn isReservedWord(name: []const u8) bool {
 
 pub const MemPorts = struct { reads: usize = 0, writes: usize = 0 };
 
-/// `mem` is the memory's symbol index in `module`'s scope.
+/// Read and write port counts of a memory (`mem` is its symbol index in
+/// `module`'s scope). A memory with declared ports (`readPort`, `writePort`,
+/// `readWritePort`) is reached only through them, so its counts are its port
+/// rows, a read/write port counting once each way. Otherwise a port is a
+/// distinct read or write address expression.
 pub fn memoryPorts(alloc: std.mem.Allocator, module: *const Module, mem: u32) !MemPorts {
+    var declared = MemPorts{};
+    var ported = false;
+    for (module.mem_ports) |port| {
+        if (port.mem.idx != mem) continue;
+        ported = true;
+        if (port.kind != .write) declared.reads += 1;
+        if (port.kind != .read) declared.writes += 1;
+    }
+    if (ported) return declared;
     var reads = std.ArrayList(*const AnyExpr).empty;
     defer reads.deinit(alloc);
     var writes = std.ArrayList(*const AnyExpr).empty;
     defer writes.deinit(alloc);
     for (module.assigns) |a| try collectMemReads(alloc, &a.src, mem, &reads);
-    for (module.processes) |p| try collectMemAccesses(alloc, p.stmts, mem, &reads, &writes);
+    for (module.processes) |p| try collectMemAccesses(alloc, p.stmts, mem, &.{}, &reads, &writes);
     return .{ .reads = reads.items.len, .writes = writes.items.len };
+}
+
+fn containsSym(list: []const SymRef, ref: SymRef) bool {
+    for (list) |item| if (symEql(item, ref)) return true;
+    return false;
 }
 
 fn addUniqueExpr(alloc: std.mem.Allocator, list: *std.ArrayList(*const AnyExpr), e: *const AnyExpr) !void {
@@ -2266,15 +2284,17 @@ fn collectMemReads(alloc: std.mem.Allocator, expr: *const AnyExpr, mem: u32, lis
     }
 }
 
-fn collectMemAccesses(alloc: std.mem.Allocator, stmts: []const Stmt, mem: u32, reads: *std.ArrayList(*const AnyExpr), writes: *std.ArrayList(*const AnyExpr)) !void {
+/// Reads and write addresses of `mem` in `stmts`. Reads assigned to a symbol
+/// in `skip` (port read-data registers) are not collected.
+fn collectMemAccesses(alloc: std.mem.Allocator, stmts: []const Stmt, mem: u32, skip: []const SymRef, reads: *std.ArrayList(*const AnyExpr), writes: *std.ArrayList(*const AnyExpr)) !void {
     for (stmts) |*stmt| {
         switch (stmt.*) {
             .nop => {},
             .assert_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
             .assume_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
             .cover_ => |*a| try collectMemReads(alloc, &a.cond, mem, reads),
-            .assign => |*a| try collectMemReads(alloc, &a.src, mem, reads),
-            .slice_assign => |*a| try collectMemReads(alloc, &a.src, mem, reads),
+            .assign => |*a| if (!containsSym(skip, a.dst)) try collectMemReads(alloc, &a.src, mem, reads),
+            .slice_assign => |*a| if (!containsSym(skip, a.dst)) try collectMemReads(alloc, &a.src, mem, reads),
             .mem_write => |*a| {
                 if (a.mem.idx == mem) try addUniqueExpr(alloc, writes, &a.addr);
                 try collectMemReads(alloc, &a.addr, mem, reads);
@@ -2288,13 +2308,13 @@ fn collectMemAccesses(alloc: std.mem.Allocator, stmts: []const Stmt, mem: u32, r
             },
             .if_then => |*it| {
                 try collectMemReads(alloc, &it.cond, mem, reads);
-                try collectMemAccesses(alloc, it.then_stmts, mem, reads, writes);
-                try collectMemAccesses(alloc, it.else_stmts, mem, reads, writes);
+                try collectMemAccesses(alloc, it.then_stmts, mem, skip, reads, writes);
+                try collectMemAccesses(alloc, it.else_stmts, mem, skip, reads, writes);
             },
             .case_block => |*cb| {
                 try collectMemReads(alloc, &cb.sel, mem, reads);
-                for (cb.cases) |c| try collectMemAccesses(alloc, c.stmts, mem, reads, writes);
-                try collectMemAccesses(alloc, cb.default_stmts, mem, reads, writes);
+                for (cb.cases) |c| try collectMemAccesses(alloc, c.stmts, mem, skip, reads, writes);
+                try collectMemAccesses(alloc, cb.default_stmts, mem, skip, reads, writes);
             },
         }
     }
@@ -4011,6 +4031,46 @@ pub const ModuleBuilder = struct {
         return .{ .stmt = stmt, .we = we, .lanes = lanes };
     }
 
+    fn hasMemPorts(self: *const ModuleBuilder, memory: u32) bool {
+        for (self.mem_ports.items) |port| if (port.mem.idx == memory) return true;
+        return false;
+    }
+
+    /// A memory with declared ports is reached only through them, so its port
+    /// rows (`design.json` `memories[].ports`) are complete and same-clock
+    /// write priority covers every writer: each write-capable port owns its
+    /// one writing process, and every read feeds a port's read-data register.
+    fn validatePortedMemory(self: *ModuleBuilder, memory: u32, writing_processes: usize) !void {
+        var writers: usize = 0;
+        var rdata = std.ArrayList(SymRef).empty;
+        defer rdata.deinit(self.allocator);
+        var reads = std.ArrayList(*const AnyExpr).empty;
+        defer reads.deinit(self.allocator);
+        for (self.mem_ports.items) |*port| {
+            if (port.mem.idx != memory) continue;
+            if (port.kind != .read) writers += 1;
+            if (port.rdata) |r| try rdata.append(self.allocator, r);
+            // A read-data assignment is skipped below as a whole, so a read of
+            // this memory inside the port's own address is checked here.
+            try collectMemReads(self.allocator, &port.addr, memory, &reads);
+        }
+        const name = self.scope.symbols.items[memory].name;
+        if (writing_processes != writers) {
+            std.log.warn("zihdl: memory '{s}' in module '{s}' has declared ports and is also written directly; write it only through writePort/readWritePort", .{ name, self.name });
+            return error.InvalidMemoryPort;
+        }
+        var writes = std.ArrayList(*const AnyExpr).empty;
+        defer writes.deinit(self.allocator);
+        for (self.assigns.items) |*a| {
+            if (!containsSym(rdata.items, a.dst)) try collectMemReads(self.allocator, &a.src, memory, &reads);
+        }
+        for (self.processes.items) |proc| try collectMemAccesses(self.allocator, proc.stmts, memory, rdata.items, &reads, &writes);
+        if (reads.items.len > 0) {
+            std.log.warn("zihdl: memory '{s}' in module '{s}' has declared ports and is also read directly; read it only through readPort/readWritePort", .{ name, self.name });
+            return error.InvalidMemoryPort;
+        }
+    }
+
     /// Port names name the read-data register and the `design.json` row, so
     /// they are unique per memory.
     fn checkPortName(self: *ModuleBuilder, memory: SymRef, name: []const u8) !void {
@@ -4419,17 +4479,13 @@ pub const ModuleBuilder = struct {
 
         for (drivers, 0..) |count, i| {
             const sym = self.scope.symbols.items[i];
-            // A memory may be written by one process, or by one process per
-            // declared write port.
-            var allowed: usize = 1;
-            if (sym.kind == .mem) {
-                var writers: usize = 0;
-                for (self.mem_ports.items) |port| {
-                    if (port.mem.idx == i and port.kind != .read) writers += 1;
-                }
-                allowed = @max(allowed, writers);
+            // A memory with declared ports is checked against them; any other
+            // signal or memory has at most one driver.
+            if (sym.kind == .mem and self.hasMemPorts(@intCast(i))) {
+                try self.validatePortedMemory(@intCast(i), count);
+                continue;
             }
-            if (count > allowed) {
+            if (count > 1) {
                 std.log.warn("zihdl: multiple drivers on '{s}' in module '{s}' ({d} drivers)", .{ sym.name, self.name, count });
                 return error.MultipleDrivers;
             }

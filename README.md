@@ -269,7 +269,9 @@ the memory ports capture on the falling edge; `seqNoReset`/`seqReset` take
 one memory port model: each records a port row (`memories[].ports` in
 `design.json`), takes its own clock domain and optional byte enables, and a
 memory may have any number of them, so true dual-port and dual-clock RAMs
-come from the same primitive. When write ports on one clock hit the same
+come from the same primitive. A memory with ports is reached only through
+them (direct `memRead`/`memWrite` on it is `error.InvalidMemoryPort`), and
+its `read_ports`/`write_ports` counts are its port rows. When write ports on one clock hit the same
 address in one cycle, each byte lane goes to the earliest port that writes
 it, so disjoint lanes both land; a read/write port follows the memory's
 `write_mode`, merging lanes for a byte-masked write-first read at any width. Array writes sit in reset-free processes so synthesis
@@ -297,10 +299,13 @@ from a flop and declares its output as a generated clock;
 (`sky130_fd_sc_hd__dlclkp_1`, `sg13g2_lgcp_1`) under `SYNTHESIS` and its
 latch-and-AND function otherwise.
 
-**Register banks.** `blocks.RegisterBankBlock(spec, bus)` turns one typed
-register/field table (`rw`, `ro`, `w1c`, `w1p` fields with byte-strobed
-writes) into an AXI4-Lite, APB or Wishbone slave with hardware-facing field
-ports, plus `cHeader` and `regmapJson` (`zihdl.regmap/1`) for software.
+**Register banks.** `blocks.RegisterBankBlock(spec, bus)` takes the same
+layout as `zihdl.registers.bank`: a struct of `bitfield` packed formats whose
+defaults are the reset values. A format's `access` declaration marks fields
+`ro`, `w1c` or `w1p` (the rest are `rw`), reserved fields read zero, and the
+block is an AXI4-Lite, APB or Wishbone slave with byte-strobed writes and
+hardware-facing field ports, plus `cHeader` and `regmapJson`
+(`zihdl.regmap/1`, enum tags included) for software.
 
 `zig build features` emits every witness through both HDL backends, lints
 each with Verilator and replays each in Icarus, including a byte-lane witness

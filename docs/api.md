@@ -238,7 +238,9 @@ holes that remain are listed below; work that belongs to the checker is in
   on different clocks have no defined order on a same-instant collision, as
   in silicon. A read port returns the stored word;
   read-during-write behavior (`write_mode`) belongs to a read/write port.
-  Array writes are reset-free processes, so a write during reset lands.
+  Array writes are reset-free processes, so a write during reset lands. A
+  memory with ports is accessed only through them, so its `design.json` port
+  rows and counts are complete.
 - Banked and multidimensional storage are Zig arrays of memories; there is no
   nested memory type.
 - Initialization is `$readmemh`, from a checked-in file or from
@@ -301,10 +303,12 @@ holes that remain are listed below; work that belongs to the checker is in
   AXI4-Lite single-register slave have RTL witnesses. The AXI4-Lite slave
   accepts independent AW/W channels in either order, applies byte strobes,
   and holds B/R responses under backpressure.
-- `RegisterBankBlock(spec, bus)` generates a multi-register slave from one
-  typed table (`rw`, `ro`, `w1c`, `w1p` fields) on AXI4-Lite, APB4 or
-  Wishbone classic, with field ports, a C header and a `zihdl.regmap/1` map;
-  each bus has an Icarus witness running the same software scenario.
+- `RegisterBankBlock(spec, bus)` generates a multi-register slave from the
+  `registers.bank` layout (a struct of `bitfield` formats; `rw`, `ro`, `w1c`,
+  `w1p` per field through the format's `access` declaration) on AXI4-Lite,
+  APB4 or Wishbone classic, with field ports, a C header and a
+  `zihdl.regmap/1` map; each bus has an Icarus witness running the same
+  software scenario.
 
 **Backends and packaging**
 - Verilog-2001 and SystemVerilog only. Netlist/cell export, GDS and a

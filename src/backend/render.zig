@@ -937,6 +937,18 @@ fn emitRawTo(out: *std.ArrayList(u8), r: *Renderer, expr: AnyExpr, record: bool)
     if (record) r.recordOccurrence(expr, r.occurrence, start, out.items.len);
 }
 
+/// The conventional `ram_style` attribute for a memory's storage intent
+/// (`MemOpts.storage`); nothing for the default `.any`.
+pub fn appendStorageAttr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, storage: ir.MemStorage) std.mem.Allocator.Error!void {
+    const style = switch (storage) {
+        .any => return,
+        .registers => "logic",
+        .latches => "latch",
+        .macro => "block",
+    };
+    try appendFmt(out, alloc, "    (* ram_style = \"{s}\" *)\n", .{style});
+}
+
 /// ` // @[file:line]` for an authored source location (`ModuleBuilder.at`);
 /// nothing when the item has none, so unmarked designs emit unchanged text.
 pub fn appendLoc(out: *std.ArrayList(u8), alloc: std.mem.Allocator, module: *const ir.Module, loc: u32) !void {

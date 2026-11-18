@@ -29,7 +29,7 @@ pub fn randomValid(r: std.Random) u32 {
         const P = isa.Payload(op);
         var payload: P = undefined;
         inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |field, T| {
-            @field(payload, field) = if (comptime std.mem.eql(u8, field, "reserved"))
+            @field(payload, field) = if (comptime zihdl.bitfield.isReserved(field))
                 0
             else switch (@typeInfo(T)) {
                 .@"enum" => blk: {

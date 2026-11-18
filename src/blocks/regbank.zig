@@ -1,7 +1,14 @@
-//! Register bank generator: one typed register/field table produces the
-//! bus slave RTL (AXI4-Lite, APB or Wishbone), the hardware-facing field
-//! ports, a C header and a JSON register map, so software and hardware read
-//! the same layout. Register `i` sits at byte offset `i * data_width / 8`.
+//! Register bank generator: one register layout produces the bus slave RTL
+//! (AXI4-Lite, APB or Wishbone), the hardware-facing field ports, a C header
+//! and a JSON register map, so software and hardware read the same layout.
+//!
+//! The layout is the same declaration `zihdl.registers.bank` takes: a struct
+//! whose fields are `bitfield` formats (packed structs, least significant
+//! field first), each field's default being that register's reset value.
+//! Register `i` of the layout sits at byte offset `i * data_width / 8`.
+//! Reserved fields (`reserved`, `reserved_<suffix>`) read zero and get no
+//! port. A format may declare `pub const access = .{ .field = .ro, ... }`
+//! (unlisted fields are `rw`) and `pub const summary = "..."`.
 //!
 //! Field access kinds:
 //!   * `rw`  software reads and writes; hardware reads the value port.
@@ -17,25 +24,12 @@
 
 const std = @import("std");
 const netlist = @import("../netlist.zig");
+const bitfield = @import("../bitfield.zig");
+const registers = @import("../registers.zig");
 const Signal = netlist.Signal;
 const ModuleBuilder = netlist.ModuleBuilder;
 
 pub const Access = enum { rw, ro, w1c, w1p };
-
-pub const Field = struct {
-    name: [:0]const u8,
-    lsb: u8,
-    width: u8,
-    access: Access,
-    reset: u64 = 0,
-    doc: []const u8 = "",
-};
-
-pub const Register = struct {
-    name: [:0]const u8,
-    fields: []const Field,
-    doc: []const u8 = "",
-};
 
 pub const Spec = struct {
     /// Module and C prefix name.
@@ -43,49 +37,98 @@ pub const Spec = struct {
     data_width: u8 = 32,
     /// Byte-address width of the bus.
     addr_width: u8 = 8,
-    registers: []const Register,
+    /// Registers in offset order: a struct of `bitfield` formats with
+    /// defaults (see the file comment).
+    Layout: type,
 };
 
 pub const Bus = enum { axi4_lite, apb, wishbone };
 
-/// Compile-time checks: data width 32 or 64, the registers fit the address
-/// space, fields lie inside the word without overlap, names are unique, and
-/// reset values fit their fields.
-pub fn validate(comptime spec: Spec) void {
+/// One declared tag of an enum field, for the C header and register map.
+pub const Tag = struct { name: [:0]const u8, value: u64 };
+
+/// A non-reserved field of a register format, as the generator lays it out.
+pub const Field = struct {
+    name: [:0]const u8,
+    lsb: u16,
+    width: u16,
+    access: Access,
+    reset: u64,
+    /// Declared tags when the field is an enum.
+    tags: []const Tag,
+};
+
+/// One register of a layout: its fields in bit order and its summary.
+pub const Register = struct {
+    name: [:0]const u8,
+    fields: []const Field,
+    doc: []const u8,
+    /// Reset word: the format's default bits.
+    reset: u64,
+};
+
+fn accessOf(comptime T: type, comptime name: []const u8) Access {
+    if (@hasDecl(T, "access") and @hasField(@TypeOf(T.access), name)) return @field(T.access, name);
+    return .rw;
+}
+
+fn tagsOf(comptime T: type) []const Tag {
+    if (@typeInfo(T) != .@"enum") return &.{};
+    const names = @typeInfo(T).@"enum".field_names;
+    var tags: [names.len]Tag = undefined;
+    for (names, @typeInfo(T).@"enum".field_values, &tags) |tag, value, *out| out.* = .{ .name = tag, .value = value };
+    const final = tags;
+    return &final;
+}
+
+fn ones(comptime width: usize) u64 {
+    return if (width >= 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+}
+
+/// The registers of `spec.Layout`, checked at compile time: data width 32
+/// or 64, every register a packed format that fits the word and the address
+/// space, access names that name non-reserved fields, reserved, `ro` and
+/// `w1p` fields resetting to zero.
+pub fn registersOf(comptime spec: Spec) []const Register {
     comptime {
         if (spec.data_width != 32 and spec.data_width != 64) @compileError("register bank data_width must be 32 or 64");
-        if (spec.registers.len == 0) @compileError("register bank needs at least one register");
+        const names = @typeInfo(spec.Layout).@"struct".field_names;
+        if (names.len == 0) @compileError("register bank needs at least one register");
         const lane_bits = std.math.log2_int(usize, spec.data_width / 8);
-        if (spec.addr_width <= lane_bits or spec.addr_width > 32 or (spec.registers.len - 1) >> (spec.addr_width - lane_bits) != 0)
+        if (spec.addr_width <= lane_bits or spec.addr_width > 32 or (names.len - 1) >> (spec.addr_width - lane_bits) != 0)
             @compileError("register bank address width cannot reach every register");
-        for (spec.registers, 0..) |reg, ri| {
-            for (spec.registers[0..ri]) |other| if (std.mem.eql(u8, reg.name, other.name)) @compileError("duplicate register " ++ reg.name);
-            var used: u64 = 0;
-            for (reg.fields, 0..) |field, fi| {
-                for (reg.fields[0..fi]) |other| if (std.mem.eql(u8, field.name, other.name)) @compileError("duplicate field " ++ reg.name ++ "." ++ field.name);
-                if (field.width == 0 or @as(usize, field.lsb) + field.width > spec.data_width) @compileError("field " ++ reg.name ++ "." ++ field.name ++ " does not fit the data word");
-                const mask = fieldMask(field);
-                if (used & mask != 0) @compileError("field " ++ reg.name ++ "." ++ field.name ++ " overlaps another field");
-                used |= mask;
-                if (field.width < 64 and field.reset >> @intCast(field.width) != 0) @compileError("reset of " ++ reg.name ++ "." ++ field.name ++ " does not fit its width");
-                if (field.access == .ro and field.reset != 0) @compileError("read-only field " ++ reg.name ++ "." ++ field.name ++ " has no reset value");
+        var regs: [names.len]Register = undefined;
+        for (names, &regs, 0..) |reg_name, *reg, ri| {
+            const T = @FieldType(spec.Layout, reg_name);
+            if (@typeInfo(T) != .@"struct" or @typeInfo(T).@"struct".layout != .@"packed") @compileError("register " ++ reg_name ++ " must be a packed struct format");
+            if (@bitSizeOf(T) > spec.data_width) @compileError("register " ++ reg_name ++ " is wider than the data word");
+            if (@hasDecl(T, "access")) for (@typeInfo(@TypeOf(T.access)).@"struct".field_names) |key| {
+                if (!@hasField(T, key) or bitfield.isReserved(key)) @compileError("access of " ++ reg_name ++ " names " ++ key ++ ", which is not a register field");
+            };
+            const reset = registers.resetValue(spec.Layout, ri);
+            var fields: []const Field = &.{};
+            for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FT| {
+                const lsb = @bitOffsetOf(T, field_name);
+                const width = @bitSizeOf(FT);
+                if (width == 0) @compileError("field " ++ reg_name ++ "." ++ field_name ++ " has no bits");
+                const value = (reset >> lsb) & ones(width);
+                const access = accessOf(T, field_name);
+                if (bitfield.isReserved(field_name)) {
+                    if (value != 0) @compileError("reserved field " ++ reg_name ++ "." ++ field_name ++ " must reset to zero");
+                    continue;
+                }
+                if ((access == .ro or access == .w1p) and value != 0) @compileError(@tagName(access) ++ " field " ++ reg_name ++ "." ++ field_name ++ " must reset to zero");
+                fields = fields ++ .{Field{ .name = field_name, .lsb = lsb, .width = width, .access = access, .reset = value, .tags = tagsOf(FT) }};
             }
+            reg.* = .{ .name = reg_name, .fields = fields, .doc = if (@hasDecl(T, "summary")) T.summary else "", .reset = reset };
         }
+        const final = regs;
+        return &final;
     }
 }
 
 fn fieldMask(comptime field: Field) u64 {
-    const ones: u64 = if (field.width >= 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(field.width)) - 1;
-    return ones << @intCast(field.lsb);
-}
-
-/// Reset value of a whole register word.
-pub fn registerReset(comptime reg: Register) u64 {
-    var value: u64 = 0;
-    for (reg.fields) |field| {
-        if (field.access == .rw or field.access == .w1c) value |= field.reset << @intCast(field.lsb);
-    }
-    return value;
+    return ones(field.width) << @intCast(field.lsb);
 }
 
 fn portName(comptime reg: Register, comptime field: Field, comptime suffix: []const u8) [:0]const u8 {
@@ -132,7 +175,7 @@ fn Ports(comptime spec: Spec, comptime bus: Bus, comptime inputs: bool) type {
         var types: []const type = if (inputs) &.{ Signal(1), Signal(1) } else &.{};
         names = names ++ base.names;
         types = types ++ base.types;
-        for (spec.registers) |reg| {
+        for (registersOf(spec)) |reg| {
             for (reg.fields) |field| {
                 const hw_in = field.access == .ro or field.access == .w1c;
                 if (inputs and hw_in) {
@@ -153,7 +196,7 @@ fn Ports(comptime spec: Spec, comptime bus: Bus, comptime inputs: bool) type {
 
 /// The generated register bank block for `spec` on `bus`.
 pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
-    comptime validate(spec);
+    const regs = comptime registersOf(spec);
     const DW = spec.data_width;
     const AW = spec.addr_width;
     const SW = DW / 8;
@@ -164,6 +207,7 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
         pub const Inputs = Ports(spec, bus, true);
         pub const Outputs = Ports(spec, bus, false);
         pub const bank_spec = spec;
+        pub const bank_registers = regs;
 
         pub fn build(mb: *ModuleBuilder) !void {
             const ins = try mb.declareInputs(Inputs);
@@ -172,8 +216,8 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
             const domain = netlist.ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
 
             // Register offsets as metadata for program views.
-            var entries: [spec.registers.len]netlist.EnumEntry = undefined;
-            inline for (spec.registers, 0..) |reg, i| entries[i] = .{ .name = reg.name, .value = i * SW };
+            var entries: [regs.len]netlist.EnumEntry = undefined;
+            inline for (regs, 0..) |reg, i| entries[i] = .{ .name = reg.name, .value = i * SW };
             try mb.addEnumGroup(spec.name ++ "_registers", AW, &entries, null);
 
             const port = switch (bus) {
@@ -191,8 +235,8 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
             // Fields: storage and next-state logic, one process for the bank.
             var stmts = std.ArrayList(netlist.Stmt).empty;
             defer stmts.deinit(mb.allocator);
-            var words: [spec.registers.len]netlist.Expr(DW) = undefined;
-            inline for (spec.registers, 0..) |reg, ri| {
+            var words: [regs.len]netlist.Expr(DW) = undefined;
+            inline for (regs, 0..) |reg, ri| {
                 const hit = b.and_(port.write, b.eq(port.waddr, b.lit(IW, ri)));
                 var word: ?netlist.Expr(DW) = null;
                 inline for (reg.fields) |field| {
@@ -262,7 +306,7 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
         };
 
         fn mapped(b: netlist.ExprBuilder, word: netlist.Expr(IW)) netlist.Expr(1) {
-            return b.lt(word, b.lit(IW + 1, spec.registers.len));
+            return b.lt(word, b.lit(IW + 1, regs.len));
         }
 
         fn wordOf(b: netlist.ExprBuilder, addr: anytype) netlist.Expr(IW) {
@@ -403,23 +447,27 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
             try mb.assign(outs.dat_r, dat_r);
         }
 
-        /// C header: offsets, field shifts, masks and reset words. Constants
-        /// carry the bank's word type (`u` for 32-bit, `ull` for 64-bit
-        /// banks), so masking a register never truncates it.
+        /// C header: offsets, field shifts, masks, enum tags and reset words.
+        /// Constants carry the bank's word type (`u` for 32-bit, `ull` for
+        /// 64-bit banks), so masking a register or shifting a tag into place
+        /// never truncates it.
         pub fn cHeader(allocator: std.mem.Allocator) ![]u8 {
             var out = std.ArrayList(u8).empty;
             errdefer out.deinit(allocator);
             const prefix = comptime upper(spec.name);
             const suffix = if (DW == 64) "ull" else "u";
             try appendFmt(&out, allocator, "/* Generated by zihdl from register bank {s}; do not edit. */\n#ifndef {s}_REGS_H\n#define {s}_REGS_H\n\n", .{ spec.name, prefix, prefix });
-            inline for (spec.registers, 0..) |reg, ri| {
+            inline for (regs, 0..) |reg, ri| {
                 const reg_name = comptime upper(reg.name);
                 try appendFmt(&out, allocator, "#define {s}_{s}_OFFSET 0x{x:0>2}u\n", .{ prefix, reg_name, ri * SW });
-                try appendFmt(&out, allocator, "#define {s}_{s}_RESET 0x{x}{s}\n", .{ prefix, reg_name, registerReset(reg), suffix });
+                try appendFmt(&out, allocator, "#define {s}_{s}_RESET 0x{x}{s}\n", .{ prefix, reg_name, reg.reset, suffix });
                 inline for (reg.fields) |field| {
                     const field_name = comptime upper(field.name);
                     try appendFmt(&out, allocator, "#define {s}_{s}_{s}_SHIFT {d}u\n", .{ prefix, reg_name, field_name, field.lsb });
                     try appendFmt(&out, allocator, "#define {s}_{s}_{s}_MASK 0x{x}{s}\n", .{ prefix, reg_name, field_name, fieldMask(field), suffix });
+                    inline for (field.tags) |tag| {
+                        try appendFmt(&out, allocator, "#define {s}_{s}_{s}_{s} {d}{s}\n", .{ prefix, reg_name, field_name, comptime upper(tag.name), tag.value, suffix });
+                    }
                 }
                 try out.appendSlice(allocator, "\n");
             }
@@ -446,14 +494,14 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
             try j.write(AW);
             try j.objectField("registers");
             try j.beginArray();
-            inline for (spec.registers, 0..) |reg, ri| {
+            inline for (regs, 0..) |reg, ri| {
                 try j.beginObject();
                 try j.objectField("name");
                 try j.write(reg.name);
                 try j.objectField("offset");
                 try j.write(ri * SW);
                 try j.objectField("reset");
-                try j.write(registerReset(reg));
+                try j.write(reg.reset);
                 try j.objectField("doc");
                 try j.write(reg.doc);
                 try j.objectField("fields");
@@ -470,8 +518,17 @@ pub fn RegisterBankBlock(comptime spec: Spec, comptime bus: Bus) type {
                     try j.write(@tagName(field.access));
                     try j.objectField("reset");
                     try j.write(field.reset);
-                    try j.objectField("doc");
-                    try j.write(field.doc);
+                    try j.objectField("tags");
+                    try j.beginArray();
+                    inline for (field.tags) |tag| {
+                        try j.beginObject();
+                        try j.objectField("name");
+                        try j.write(tag.name);
+                        try j.objectField("value");
+                        try j.write(tag.value);
+                        try j.endObject();
+                    }
+                    try j.endArray();
                     try j.endObject();
                 }
                 try j.endArray();
@@ -519,25 +576,33 @@ fn appendFmt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt
     try out.appendSlice(allocator, text);
 }
 
-/// The witness bank: one register of each access kind, with holes.
-pub const example_spec = Spec{
-    .name = "demo_regs",
-    .addr_width = 8,
-    .registers = &.{
-        .{ .name = "ctrl", .doc = "Control", .fields = &.{
-            .{ .name = "enable", .lsb = 0, .width = 1, .access = .rw, .doc = "Run the engine" },
-            .{ .name = "mode", .lsb = 4, .width = 3, .access = .rw, .reset = 5 },
-            .{ .name = "start", .lsb = 8, .width = 1, .access = .w1p, .doc = "Write 1 to start" },
-        } },
-        .{ .name = "status", .doc = "Status", .fields = &.{
-            .{ .name = "count", .lsb = 0, .width = 16, .access = .ro },
-            .{ .name = "irq", .lsb = 24, .width = 2, .access = .w1c, .doc = "Write 1 to clear" },
-        } },
-        .{ .name = "scratch", .fields = &.{
-            .{ .name = "value", .lsb = 0, .width = 32, .access = .rw, .reset = 0x1234_5678 },
-        } },
-    },
+/// Run mode of the demo engine.
+pub const DemoMode = enum(u3) { idle = 0, run = 1, turbo = 5 };
+
+/// The witness bank: every access kind, an enum field and reserved gaps.
+pub const DemoRegisters = struct {
+    ctrl: packed struct(u9) {
+        enable: bool = false,
+        reserved: u3 = 0,
+        mode: DemoMode = .turbo,
+        reserved_7: u1 = 0,
+        start: bool = false,
+        pub const summary = "Control";
+        pub const access = .{ .start = .w1p };
+    } = .{},
+    status: packed struct(u26) {
+        count: u16 = 0,
+        reserved: u8 = 0,
+        irq: u2 = 0,
+        pub const summary = "Status";
+        pub const access = .{ .count = .ro, .irq = .w1c };
+    } = .{},
+    scratch: packed struct(u32) {
+        value: u32 = 0x1234_5678,
+    } = .{},
 };
+
+pub const example_spec = Spec{ .name = "demo_regs", .addr_width = 8, .Layout = DemoRegisters };
 
 test "register bank emits field ports, a decoded read mux and C/JSON maps" {
     const verilog = @import("../backend/verilog.zig");
@@ -560,15 +625,20 @@ test "register bank emits field ports, a decoded read mux and C/JSON maps" {
     try std.testing.expect(std.mem.indexOf(u8, header, "#define DEMO_REGS_STATUS_OFFSET 0x04u\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "#define DEMO_REGS_STATUS_IRQ_MASK 0x3000000u\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "#define DEMO_REGS_CTRL_RESET 0x50u\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "#define DEMO_REGS_CTRL_MODE_TURBO 5u\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "RESERVED") == null);
     const json = try Bank.regmapJson(alloc);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema\": \"zihdl.regmap/1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"access\": \"w1c\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"turbo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"doc\": \"Status\"") != null);
 
-    // A 64-bit bank's constants are 64-bit in C, and long names fit.
+    // A 64-bit bank's constants are 64-bit in C, enum tags included (they
+    // shift past bit 31), and long names fit.
     const Wide = RegisterBankBlock(.{
         .name = "a_register_bank_with_a_name_longer_than_any_fixed_scratch_buffer_would_comfortably_hold_for_macro_generation",
         .data_width = 64,
-        .registers = &.{.{ .name = "word", .fields = &.{.{ .name = "low", .lsb = 0, .width = 1, .access = .rw, .reset = 1 }} }},
+        .Layout = struct { word: packed struct(u64) { low: u1 = 1, reserved: u39 = 0, mode: DemoMode = .idle, reserved_43: u21 = 0 } = .{} },
     }, .apb);
     var wide_design = netlist.Design.init(alloc);
     _ = try wide_design.elaborate(Wide);
@@ -577,4 +647,6 @@ test "register bank emits field ports, a decoded read mux and C/JSON maps" {
     const wide_header = try Wide.cHeader(alloc);
     try std.testing.expect(std.mem.indexOf(u8, wide_header, "_WORD_LOW_MASK 0x1ull\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, wide_header, "_WORD_RESET 0x1ull\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide_header, "_WORD_MODE_SHIFT 40u\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide_header, "_WORD_MODE_TURBO 5ull\n") != null);
 }

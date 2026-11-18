@@ -21,7 +21,8 @@ fn fieldNames(comptime Layout: type) []const [:0]const u8 {
     return @typeInfo(Layout).@"struct".field_names;
 }
 
-fn resetValue(comptime Layout: type, comptime index: usize) u64 {
+/// Reset word of register `index` of `Layout`: its default, as raw bits.
+pub fn resetValue(comptime Layout: type, comptime index: usize) u64 {
     const T = @typeInfo(Layout).@"struct".field_types[index];
     const attrs = @typeInfo(Layout).@"struct".field_attrs[index];
     const value = attrs.defaultValue(T) orelse @compileError("register '" ++ fieldNames(Layout)[index] ++ "' needs a default (its reset value)");

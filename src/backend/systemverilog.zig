@@ -356,6 +356,7 @@ pub fn emitModule(allocator: std.mem.Allocator, module: *const ir.Module, option
         if (sym.kind != .mem or sym.dead) continue;
         const multi_clock = render.memoryMultiClock(module, sym_idx);
         if (multi_clock) try render.appendStr(&out, allocator, "    /* verilator lint_off MULTIDRIVEN */\n");
+        try render.appendStorageAttr(&out, allocator, sym.storage);
         if (sym.is_signed) {
             if (sym.width == 1) {
                 try render.appendFmt(&out, allocator, "    logic signed {s} [0:{d}];", .{ sym.name, sym.depth - 1 });

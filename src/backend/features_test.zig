@@ -537,3 +537,51 @@ test "byte-lane writes record provenance spans for their operands" {
         }
     }
 }
+
+const MixedAccess = struct {
+    fn Make(comptime raw: enum { write, read, self_addr, none }) type {
+        return struct {
+            pub const name = "mixed_access_" ++ @tagName(raw);
+            pub const Inputs = struct { clk: Signal(1), rst_n: Signal(1), we: Signal(1), addr: Signal(2), d: Signal(8) };
+            pub const Outputs = struct { q: Signal(8), r: Signal(8), s: Signal(8) };
+            pub fn build(mb: *ModuleBuilder) !void {
+                const ins = try mb.declareInputs(Inputs);
+                const outs = try mb.declareOutputs(Outputs);
+                const b = mb.exprs();
+                const domain = ClockDomain{ .clk = ins.clk, .rst_n = ins.rst_n };
+                const ram = try mb.mem(8, "ram", 4, .{ .read = .sync, .write_mode = .write_first });
+                // Two read ports on one address are still two ports, and a
+                // write-first port with its write tied high still reads.
+                try mb.assign(outs.q, try mb.readPort(ram, "q", .{ .domain = domain, .addr = ins.addr }));
+                try mb.assign(outs.r, try mb.readPort(ram, "r", .{ .domain = domain, .addr = ins.addr }));
+                try mb.assign(outs.s, try mb.readWritePort(ram, "s", .{ .domain = domain, .we = 1, .addr = ins.addr, .wdata = ins.d }));
+                switch (raw) {
+                    .write => try mb.seqNoReset(ins.clk, &.{b.when(ins.we, &.{b.memWrite(ram, ins.addr, ins.d)}, &.{})}),
+                    .read => {
+                        const peek = try mb.wire("peek", 8);
+                        try mb.assign(peek, b.memRead(ram, ins.addr));
+                    },
+                    // A direct read hidden in a port's own address.
+                    .self_addr => _ = try mb.readPort(ram, "t", .{ .domain = domain, .addr = b.trunc(b.memRead(ram, ins.addr), 2) }),
+                    .none => {},
+                }
+            }
+        };
+    }
+};
+
+test "a memory with declared ports is reached only through them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var design = Design.init(alloc);
+    _ = try design.elaborate(MixedAccess.Make(.none));
+    const json = try metadata.emitDesignJson(alloc, &design, .{});
+    // Counts are the declared rows, never folded address expressions.
+    try std.testing.expect(contains(json, "\"read_ports\": 3"));
+    try std.testing.expect(contains(json, "\"write_ports\": 1"));
+    inline for (.{ .write, .read, .self_addr }) |raw| {
+        var mixed = Design.init(alloc);
+        try std.testing.expectError(error.InvalidMemoryPort, mixed.elaborate(MixedAccess.Make(raw)));
+    }
+}
